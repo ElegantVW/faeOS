@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# pixie — your local terminal agent (wraps ask)
+export PATH="$HOME/bin:$PATH"
+
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}/pixie"
+VERBOSE_FILE="$CFG/verbose"
+
+pixie_verbose_status() {
+  if [[ -f "$VERBOSE_FILE" ]] && grep -qiE '^(on|1|true|yes)$' "$VERBOSE_FILE" 2>/dev/null; then
+    echo "pixie verbose: on   (rounds + tools + results shown)"
+  else
+    echo "pixie verbose: off  (only wait line + final reply — default)"
+  fi
+}
+
+case "${1:-}" in
+  -h|--help)
+    cat <<'H'
+pixie — local offline AI agent (llama.cpp via pixie-llm)
+
+  pixie-llm start              # offline server on 127.0.0.1:8080
+  pixie "list what's in Downloads"
+  pixie "create ~/notes/todo.txt with milk and eggs"
+  pixie --web "latest Arch security news"
+  pixie -m mistral "…"
+
+Email (aerc IMAP → local .txt, then summary):
+  pixie "hey pixie, can you check my emails?"
+  pixie "summarize my unread mail"
+
+Default: pink wait + final reply only (prompts stay on your machine).
+  pixie -v "…"                 # tools/results this run
+  pixie verbose on|off|status
+
+Offline only: pixie-llm (llama.cpp on 127.0.0.1). No Ollama.
+See also: pixie-llm, duck, cmds, mail (aerc)
+H
+    exit 0
+    ;;
+  verbose|tools)
+    # "tools" is an alias for the same toggle
+    sub="${2:-status}"
+    mkdir -p "$CFG"
+    case "$sub" in
+      on|1|true|yes)
+        echo on >"$VERBOSE_FILE"
+        chmod 600 "$VERBOSE_FILE" 2>/dev/null || true
+        echo "pixie verbose: on  (tools + rounds visible)"
+        ;;
+      off|0|false|no)
+        echo off >"$VERBOSE_FILE"
+        chmod 600 "$VERBOSE_FILE" 2>/dev/null || true
+        echo "pixie verbose: off (final reply only)"
+        ;;
+      status|show|"")
+        pixie_verbose_status
+        ;;
+      *)
+        echo "Usage: pixie verbose {on|off|status}" >&2
+        echo "   or: pixie tools {on|off|status}" >&2
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+
+exec ask "$@"

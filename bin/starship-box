@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""Cute pink-framed status box for the prompt + cursor two lines below.
+
+Collects username, idle mood, music, time, RAM/CPU/HDD (and git when present)
+into a Unicode box. Borders are pink_dim; body keeps each segment's colors.
+"""
+from __future__ import annotations
+
+import os
+import random
+import re
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+HOME = Path.home()
+BIN = HOME / "bin"
+CACHE = HOME / ".cache" / "pixie"
+SUMMON_FILE = CACHE / "summon.msg"
+
+# Palette (256 + truecolor where music already uses it)
+PINK = "\033[38;5;175m"
+DARK_PINK = "\033[38;5;168m"
+PINK_DIM = "\033[38;5;132m"
+BLUSH = "\033[38;5;218m"
+SILVER = "\033[38;5;252m"
+SILVER_DIM = "\033[38;5;245m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+# Imperative, magical summons — same line as ❯ (no trailing dots; message leads into cursor)
+SUMMONS = (
+    "Casting cursor",
+    "Calling cursor from the ether",
+    "Summoning the prompt",
+    "Weaving a command line",
+    "Invoking the shell spirits",
+    "Drawing runes on the void",
+    "Opening a rift for your next spell",
+    "Conjuring an input charm",
+    "Beckoning the cursor forth",
+    "Kindling the prompt flame",
+    "Unsealing the command circle",
+    "Whispering to the key spirits",
+    "Binding a fresh line of magic",
+    "Stirring the cauldron of stdin",
+    "Pulling a thread from the fey net",
+    "Charging the sigil of Enter",
+    "Awakening the sleeping glyphs",
+    "Requesting an audience with the shell",
+    "Spinning moonlight into a prompt",
+    "Hexing the blank line into life",
+    "Channeling keystrokes from beyond",
+    "Raising the cursor from slumber",
+    "Enchanting the next command",
+    "Scrying for your intention",
+    "Parting the veil of the terminal",
+    "Aligning the stars for a command",
+    "Pouring sparkles into the buffer",
+    "Hailing the machine spirits",
+    "Unlocking the gate of input",
+    "Manifesting a place to type",
+)
+
+
+def strip_ansi(s: str) -> str:
+    return ANSI_RE.sub("", s)
+
+
+def vis_len(s: str) -> int:
+    # rough: treat all non-ANSI as width 1 (good enough for our ASCII/emoji mix)
+    return len(strip_ansi(s))
+
+
+def run_bin(name: str, timeout: float = 1.2) -> str:
+    path = BIN / name
+    if not path.is_file():
+        return ""
+    try:
+        out = subprocess.check_output(
+            [str(path)],
+            text=True,
+            timeout=timeout,
+            env={**os.environ, "PATH": f"{BIN}:{os.environ.get('PATH', '')}"},
+            stderr=subprocess.DEVNULL,
+        )
+        return out.rstrip("\n")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def git_snippet() -> str:
+    try:
+        top = subprocess.check_output(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            text=True,
+            timeout=0.4,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        if top != "true":
+            return ""
+        branch = subprocess.check_output(
+            ["git", "branch", "--show-current"],
+            text=True,
+            timeout=0.4,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        if not branch:
+            return ""
+        return f"{PINK}on {branch}{RESET}"
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def username() -> str:
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "you"
+    if os.geteuid() == 0:
+        return f"{BOLD}\033[38;5;197m{user}{RESET}"
+    return f"{BOLD}{DARK_PINK}{user}{RESET}"
+
+
+def clock() -> str:
+    return f"{BOLD}{SILVER_DIM}{time.strftime('%H:%M')}{RESET}"
+
+
+def ram() -> str:
+    """RAM percent from /proc/meminfo."""
+    try:
+        info = {}
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            parts = v.split()
+            if parts:
+                info[k] = int(parts[0])
+        total = info.get("MemTotal") or 0
+        avail = info.get("MemAvailable") or info.get("MemFree") or 0
+        if total <= 0:
+            return f"{BOLD}{BLUSH}RAM ?{RESET}"
+        used_pct = max(0, min(100, int(round(100 * (1 - avail / total)))))
+        return f"{BOLD}{BLUSH}RAM {used_pct}%{RESET}"
+    except OSError:
+        return f"{BOLD}{BLUSH}RAM ?{RESET}"
+
+
+def pad_line(inner: str, width: int) -> str:
+    """Pad visible width with spaces so the right border aligns."""
+    n = vis_len(inner)
+    if n < width:
+        return inner + (" " * (width - n))
+    if n > width:
+        # truncate carefully by visible chars
+        plain = strip_ansi(inner)
+        cut = plain[: max(0, width - 1)] + "…"
+        return f"{PINK}{cut}{RESET}" + (" " * max(0, width - vis_len(cut)))
+    return inner
+
+
+def pick_summon() -> str:
+    """Fresh imperative summon line each prompt; avoid immediate repeat."""
+    prev = ""
+    try:
+        prev = SUMMON_FILE.read_text(encoding="utf-8").rstrip("\n")
+    except OSError:
+        pass
+    msg = prev
+    for _ in range(10):
+        cand = random.choice(SUMMONS)
+        if cand != prev:
+            msg = cand
+            break
+        msg = cand
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        SUMMON_FILE.write_text(msg + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return msg
+
+
+def box_lines(rows: list[str]) -> list[str]:
+    """Plain artistic frame — no title (Pixie is the assistant, not the chrome)."""
+    term = shutil.get_terminal_size((80, 24)).columns
+    # leave a little margin; min cute width
+    max_inner = max(40, min(term - 4, 76))
+    content_w = max((vis_len(r) for r in rows), default=20)
+    inner = min(max_inner, max(content_w, 36))
+
+    # Side lines are: "│ " + body(inner) + " │" → span between corners = inner + 2
+    span = inner + 2
+    top = f"{PINK_DIM}╭{'─' * span}╮{RESET}"
+    mid = []
+    for r in rows:
+        body = pad_line(r, inner)
+        mid.append(f"{PINK_DIM}│{RESET} {body} {PINK_DIM}│{RESET}")
+    bot = f"{PINK_DIM}╰{'─' * span}╯{RESET}"
+    return [top, *mid, bot]
+
+
+def main() -> None:
+    idle = run_bin("starship-pixie-idle") or f"{BOLD}{PINK}Pixie is waiting…{RESET}"
+    music = run_bin("starship-music") or f"{SILVER_DIM}Not playing{RESET}"
+    cpu = run_bin("starship-cpu") or "CPU ?"
+    disk = run_bin("starship-disk") or "HDD ?"
+    # colorize cpu/disk if scripts didn't (they print plain + we wrap)
+    if "\033" not in cpu:
+        cpu = f"{BOLD}{PINK}{cpu}{RESET}"
+    if "\033" not in disk:
+        disk = f"{BOLD}{DARK_PINK}{disk}{RESET}"
+
+    git = git_snippet()
+    user = username()
+    # Line 1: user · idle · git
+    sep = f" {PINK_DIM}·{RESET} "
+    row1_parts = [user, idle]
+    if git:
+        row1_parts.append(git)
+    row1 = sep.join(row1_parts)
+
+    # Line 2: music alone (often long)
+    row2 = music
+
+    # Line 3: time · RAM · CPU · HDD
+    row3 = sep.join([clock(), ram(), cpu, disk])
+
+    rows = [row1, row2, row3]
+    framed = box_lines(rows)
+
+    # Summon + cursor on one line. Use ASCII ">" — fancy ❯ becomes "?" on many fonts.
+    summon = pick_summon().rstrip(".…? ")
+    line = (
+        f"{PINK_DIM}{summon}{RESET} "
+        f"{BOLD}{PINK}>{RESET} "
+    )
+    out = "\n".join(framed) + "\n\n" + line
+    print(out, end="")
+
+
+if __name__ == "__main__":
+    main()

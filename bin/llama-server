@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# User-local llama.cpp server (no Ollama)
+LIB="$HOME/.local/lib/pixie"
+export LD_LIBRARY_PATH="$LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$LIB/llama-server" "$@"

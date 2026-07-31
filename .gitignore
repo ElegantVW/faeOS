@@ -1,0 +1,27 @@
+# secrets & machine state — never commit
+*.pem
+*.key
+.env
+accounts.conf
+**/credentials*
+**/*password*
+
+# caches / runtime
+.cache/
+*.pyc
+__pycache__/
+*.pid
+*.log
+
+# huge model weights
+*.gguf
+*.bin
+models/
+
+# local lib copies of llama-server (optional vendor)
+vendor/lib-pixie/*.so*
+vendor/lib-pixie/llama-server
+
+# OS junk
+.DS_Store
+*~

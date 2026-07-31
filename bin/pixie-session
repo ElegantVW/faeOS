@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Pixie session helpers: last reply, event log, grace period, idle wait lines."""
+from __future__ import annotations
+
+import argparse
+import os
+import random
+import re
+import sys
+import time
+from pathlib import Path
+
+CACHE = Path.home() / ".cache" / "pixie"
+LAST_REPLY = CACHE / "last-reply.txt"
+LAST_EVENT = CACHE / "last-event.txt"
+EVENTS = CACHE / "events.log"
+GRACE = CACHE / "grace_until"
+MAX_EVENTS = 200
+DEFAULT_GRACE = float(os.environ.get("PIXIE_READ_SEC", "45"))
+
+# Idle: Pixie waiting on the human (shown on system tick)
+PIXIE_IDLE = (
+    "Pixie is waiting for you…",
+    "Pixie taps her foot patiently…",
+    "Pixie is humming until you type something…",
+    "Pixie has tea ready when you are…",
+    "Pixie is daydreaming in the prompt…",
+    "Pixie left a sticky note: 'your turn'…",
+    "Pixie is polishing the cursor for you…",
+    "Pixie is watching the prompt sparkle…",
+    "Pixie won't rush you (much)…",
+    "Pixie is practicing patience magic…",
+    "Pixie is counting the seconds kindly…",
+    "Pixie is ready when you are…",
+    "Pixie folded her wings. Your move…",
+    "Pixie is browsing the void. Call her anytime…",
+    "Pixie saved you a seat at the prompt…",
+)
+
+USE_COLOR = (
+    sys.stdout.isatty()
+    or sys.stderr.isatty()
+    or os.environ.get("FORCE_COLOR")
+) and not os.environ.get("NO_COLOR")
+PINK = "\033[38;5;175m"
+PINK_DIM = "\033[38;5;132m"
+BOLD = "\033[1m"
+SILVER = "\033[38;5;252m"
+RESET = "\033[0m"
+
+
+def paint(s: str, *codes: str) -> str:
+    if not USE_COLOR:
+        return s
+    return "".join(codes) + s + RESET
+
+
+def ensure() -> None:
+    CACHE.mkdir(parents=True, exist_ok=True)
+
+
+def set_grace(seconds: float | None = None) -> None:
+    ensure()
+    sec = DEFAULT_GRACE if seconds is None else float(seconds)
+    GRACE.write_text(str(time.time() + sec), encoding="utf-8")
+
+
+def clear_grace() -> None:
+    """End read-grace immediately (user entered a command / empty Enter)."""
+    ensure()
+    try:
+        GRACE.write_text("0", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def in_grace() -> bool:
+    try:
+        until = float(GRACE.read_text(encoding="utf-8").strip())
+        return time.time() < until
+    except (OSError, ValueError):
+        return False
+
+
+def grace_left() -> int:
+    try:
+        until = float(GRACE.read_text(encoding="utf-8").strip())
+        return max(0, int(until - time.time()))
+    except (OSError, ValueError):
+        return 0
+
+
+def log_event(kind: str, text: str) -> None:
+    ensure()
+    text = text.rstrip() + "\n"
+    stamp = time.strftime("%H:%M:%S")
+    block = f"===== {stamp} · {kind} =====\n{text}\n"
+    LAST_EVENT.write_text(block, encoding="utf-8")
+    if kind == "reply":
+        LAST_REPLY.write_text(text, encoding="utf-8")
+    try:
+        prev = EVENTS.read_text(encoding="utf-8") if EVENTS.exists() else ""
+    except OSError:
+        prev = ""
+    parts = re.split(r"(?=^===== )", prev, flags=re.M)
+    parts = [p for p in parts if p.strip()]
+    parts.append(block)
+    parts = parts[-MAX_EVENTS:]
+    EVENTS.write_text("".join(parts), encoding="utf-8")
+
+
+def idle_message() -> str:
+    return random.choice(PIXIE_IDLE)
+
+
+def print_idle_box() -> None:
+    msg = idle_message()
+    plain = f"☕  {msg}"
+    inner = max(28, min(56, len(plain) + 2))
+    title = "Pixie"
+    pad = max(0, inner - len(title) - 2)
+    top = (
+        paint("┌─", PINK_DIM)
+        + paint(f" {title} ", BOLD, PINK)
+        + paint("─" * pad + "┐", PINK_DIM)
+    )
+    space = max(0, inner - len(plain))
+    mid = (
+        paint("│", PINK_DIM)
+        + " "
+        + paint("☕", PINK)
+        + "  "
+        + paint(msg, BOLD, PINK)
+        + (" " * space)
+        + " "
+        + paint("│", PINK_DIM)
+    )
+    bot = paint("└" + "─" * (inner + 2) + "┘", PINK_DIM)
+    print(top)
+    print(mid)
+    print(bot)
+
+
+def _box_text(title: str, body: str) -> str:
+    """Simple pink box for re-shown replies (ANSI-aware width)."""
+    lines = (body.rstrip("\n") or "(empty)").splitlines() or [""]
+    plain_lines = [re.sub(r"\033\[[0-9;]*m", "", ln) for ln in lines]
+    title_plain = re.sub(r"\033\[[0-9;]*m", "", title)
+    inner = max(28, min(72, max([len(title_plain) + 2] + [len(p) for p in plain_lines])))
+    pad = max(0, inner - len(title_plain) - 2)
+    top = (
+        paint("┌─", PINK_DIM)
+        + paint(f" {title_plain} ", BOLD, PINK)
+        + paint("─" * pad + "┐", PINK_DIM)
+    )
+    out = [top]
+    for raw, plain in zip(lines, plain_lines):
+        # wrap long plain lines
+        if len(plain) <= inner:
+            chunks = [(raw, plain)]
+        else:
+            chunks = []
+            words = plain.split(" ")
+            cur = ""
+            for w in words:
+                trial = (cur + " " + w).strip() if cur else w
+                if len(trial) <= inner:
+                    cur = trial
+                else:
+                    if cur:
+                        chunks.append((cur, cur))
+                    cur = w
+            if cur:
+                chunks.append((cur, cur))
+        for ch, pl in chunks:
+            space = max(0, inner - len(pl))
+            body_col = ch if "\033" in ch else paint(ch, SILVER if USE_COLOR else "")
+            if not USE_COLOR:
+                body_col = pl
+            out.append(
+                paint("│", PINK_DIM) + " " + body_col + (" " * space) + " " + paint("│", PINK_DIM)
+            )
+    out.append(paint("└" + "─" * (inner + 2) + "┘", PINK_DIM))
+    return "\n".join(out)
+
+
+def show_up(arg: str | None) -> int:
+    """Re-show last reply / events and hold the screen (read-grace).
+
+    Without grace, zsh `_precmd_clear` / tick wipe the message instantly.
+    """
+    ensure()
+    # Arm grace *before* printing so the post-command clear is skipped
+    set_grace()
+
+    if arg is None or arg in ("", "message", "msg", "last"):
+        if LAST_REPLY.exists():
+            body = LAST_REPLY.read_text(encoding="utf-8")
+            print(_box_text("last Pixie reply", body))
+            left = grace_left()
+            print(paint(f"(held {left}s — tick/clear paused; type to continue)", PINK_DIM))
+            return 0
+        if LAST_EVENT.exists():
+            print(LAST_EVENT.read_text(encoding="utf-8"), end="")
+            return 0
+        print(paint("(nothing saved yet)", SILVER if USE_COLOR else ""))
+        return 1
+    if arg.isdigit():
+        n = max(1, min(int(arg), 50))
+        if not EVENTS.exists():
+            print("(no event log yet)")
+            return 1
+        parts = re.split(r"(?=^===== )", EVENTS.read_text(encoding="utf-8"), flags=re.M)
+        parts = [p for p in parts if p.strip()][-n:]
+        print("".join(parts), end="")
+        print(paint(f"\n(held {grace_left()}s — tick/clear paused)", PINK_DIM))
+        return 0
+    print("Usage: up [message|N]", file=sys.stderr)
+    print("  up / up message  — last Pixie reply", file=sys.stderr)
+    print("  up 3             — last 3 logged events", file=sys.stderr)
+    return 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="pixie-session")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("idle-box", help="print idle 'waiting for you' box")
+    p = sub.add_parser("grace", help="set read-grace seconds after reply")
+    p.add_argument("seconds", nargs="?", type=float, default=DEFAULT_GRACE)
+    sub.add_parser("grace-left", help="print seconds left in grace")
+    sub.add_parser("in-grace", help="exit 0 if grace active")
+    sub.add_parser(
+        "grace-clear",
+        help="end read-grace now (user pressed Enter / ran a command)",
+    )
+    s = sub.add_parser("save-reply")
+    s.add_argument("file", nargs="?", help="read from file or stdin")
+    u = sub.add_parser("up")
+    u.add_argument("arg", nargs="?", default="message")
+    args = ap.parse_args()
+    if args.cmd == "idle-box":
+        print_idle_box()
+        return 0
+    if args.cmd == "grace":
+        set_grace(args.seconds)
+        return 0
+    if args.cmd == "grace-clear":
+        clear_grace()
+        return 0
+    if args.cmd == "grace-left":
+        print(grace_left())
+        return 0
+    if args.cmd == "in-grace":
+        return 0 if in_grace() else 1
+    if args.cmd == "save-reply":
+        if args.file:
+            text = Path(args.file).read_text(encoding="utf-8")
+        else:
+            text = sys.stdin.read()
+        log_event("reply", text)
+        set_grace()
+        return 0
+    if args.cmd == "up":
+        return show_up(args.arg)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

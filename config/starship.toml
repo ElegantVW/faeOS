@@ -1,0 +1,57 @@
+# ~/.config/starship.toml
+# Whole status lives in a cute pink box; input is two lines below.
+
+format = """
+${custom.pixie_box}"""
+
+right_format = ""
+palette = "pink_system"
+add_newline = true
+
+[palettes.pink_system]
+pink = "#e879a0"
+dark_pink = "#c44d7a"
+pink_dim = "#9d5c75"
+blush = "#f0b4c8"
+silver = "#c0c0c8"
+silver_dim = "#8a8a96"
+danger = "#ff2d55"
+warn = "#ffb020"
+ok = "#3dd68c"
+
+# Single module draws the framed status + cursor gap
+[custom.pixie_box]
+command = "starship-box"
+when = "true"
+format = "$output"
+shell = ["bash", "--noprofile", "--norc"]
+ignore_timeout = true
+description = "Pink status box + input two lines below"
+
+# Built-ins unused — rendered inside starship-box
+[username]
+disabled = true
+
+[hostname]
+disabled = true
+
+[directory]
+disabled = true
+
+[git_branch]
+disabled = true
+
+[git_status]
+disabled = true
+
+[cmd_duration]
+disabled = true
+
+[time]
+disabled = true
+
+[memory_usage]
+disabled = true
+
+[character]
+disabled = true

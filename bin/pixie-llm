@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# pixie-llm — fully offline llama.cpp server for Pixie (localhost only)
+#
+# Uses llama-server (llama.cpp). No cloud, no ollama.com after models exist.
+# Model default: ~/.local/share/pixie/models/mistral-7b-instruct.gguf
+#
+# Usage:
+#   pixie-llm start|stop|status|restart|logs|path
+#   pixie-llm chat "hello"     # quick offline test (needs curl + jq optional)
+#
+set -euo pipefail
+
+CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pixie"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pixie/llm"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pixie"
+MODEL_DIR="${PIXIE_LLM_MODEL_DIR:-$DATA_DIR/models}"
+MODEL="${PIXIE_LLM_MODEL:-$MODEL_DIR/mistral-7b-instruct.gguf}"
+
+HOST="${PIXIE_LLM_HOST:-127.0.0.1}"
+PORT="${PIXIE_LLM_PORT:-8080}"
+CTX="${PIXIE_LLM_CTX:-2048}"
+THREADS="${PIXIE_LLM_THREADS:-$(nproc 2>/dev/null || echo 4)}"
+NGL="${PIXIE_LLM_NGL:-0}"   # 0 = CPU only (safe offline default)
+ALIAS="${PIXIE_LLM_ALIAS:-mistral}"
+
+PID_FILE="$CACHE_DIR/llama-server.pid"
+LOG_FILE="$CACHE_DIR/llama-server.log"
+URL="http://${HOST}:${PORT}"
+
+mkdir -p "$CFG_DIR" "$CACHE_DIR" "$MODEL_DIR"
+
+find_server() {
+  if [[ -n "${PIXIE_LLAMA_SERVER:-}" && -x "${PIXIE_LLAMA_SERVER}" ]]; then
+    echo "$PIXIE_LLAMA_SERVER"
+    return
+  fi
+  # Prefer user-local llama.cpp (no Ollama)
+  if [[ -x "$HOME/bin/llama-server" ]]; then
+    echo "$HOME/bin/llama-server"
+    return
+  fi
+  if command -v llama-server >/dev/null 2>&1; then
+    command -v llama-server
+    return
+  fi
+  for p in \
+    "$HOME/.local/lib/pixie/llama-server" \
+    /usr/bin/llama-server \
+    /usr/local/bin/llama-server
+  do
+    if [[ -x "$p" ]]; then
+      echo "$p"
+      return
+    fi
+  done
+  return 1
+}
+
+is_running() {
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid=$(cat "$PID_FILE" 2>/dev/null || true)
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  # fallback: something listening on port
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -qE ":${PORT}\\b" && return 0
+  fi
+  return 1
+}
+
+health() {
+  curl -fsS --max-time 2 "${URL}/health" >/dev/null 2>&1 \
+    || curl -fsS --max-time 2 "${URL}/v1/models" >/dev/null 2>&1
+}
+
+cmd_status() {
+  local srv
+  srv=$(find_server 2>/dev/null || echo "(llama-server not found)")
+  echo "backend:  llama.cpp (offline)"
+  echo "server:   $srv"
+  echo "model:    $MODEL"
+  echo "listen:   ${HOST}:${PORT}  (localhost only)"
+  echo "url:      $URL"
+  if is_running && health; then
+    echo "status:   running ✓"
+    [[ -f "$PID_FILE" ]] && echo "pid:      $(cat "$PID_FILE")"
+    return 0
+  elif is_running; then
+    echo "status:   process up, API not ready yet (loading model?)"
+    return 1
+  else
+    echo "status:   stopped"
+    return 1
+  fi
+}
+
+cmd_start() {
+  if is_running && health; then
+    echo "pixie-llm already running at $URL"
+    return 0
+  fi
+  local srv
+  if ! srv=$(find_server); then
+    echo "error: llama-server not found." >&2
+    echo "Expected user-local: ~/bin/llama-server + ~/.local/lib/pixie/" >&2
+    echo "Or install: sudo pacman -S llama-cpp" >&2
+    return 1
+  fi
+  if [[ ! -e "$MODEL" ]]; then
+    echo "error: model not found: $MODEL" >&2
+    echo "Place a .gguf at that path (Mistral-7B-Instruct GGUF works well)." >&2
+    return 1
+  fi
+
+  # Resolve symlink for clarity in logs
+  local model_path
+  model_path=$(readlink -f "$MODEL" 2>/dev/null || echo "$MODEL")
+
+  echo "starting llama.cpp offline on ${HOST}:${PORT} …"
+  echo "  model: $model_path"
+  # --host 127.0.0.1 : never expose to LAN
+  # --jinja : chat templates from GGUF
+  nohup "$srv" \
+    -m "$MODEL" \
+    --host "$HOST" \
+    --port "$PORT" \
+    -c "$CTX" \
+    -t "$THREADS" \
+    -ngl "$NGL" \
+    --alias "$ALIAS" \
+    --jinja \
+    >"$LOG_FILE" 2>&1 &
+  echo $! >"$PID_FILE"
+
+  # wait for health
+  local i
+  for i in $(seq 1 90); do
+    if health; then
+      echo "ready: $URL  (pid $(cat "$PID_FILE"))"
+      echo "logs:  $LOG_FILE"
+      return 0
+    fi
+    # died?
+    if [[ -f "$PID_FILE" ]] && ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+      echo "error: llama-server exited while loading. Last log lines:" >&2
+      tail -30 "$LOG_FILE" >&2 || true
+      rm -f "$PID_FILE"
+      return 1
+    fi
+    sleep 1
+  done
+  echo "error: timeout waiting for API. See $LOG_FILE" >&2
+  return 1
+}
+
+cmd_stop() {
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 0.5
+      kill -9 "$pid" 2>/dev/null || true
+      echo "stopped pid $pid"
+    fi
+    rm -f "$PID_FILE"
+  fi
+  # anything leftover on port?
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${PORT}/tcp" 2>/dev/null || true
+  fi
+  echo "pixie-llm stopped"
+}
+
+cmd_chat() {
+  local prompt="${*:-hello}"
+  if ! health; then
+    echo "server not up — try: pixie-llm start" >&2
+    return 1
+  fi
+  curl -fsS --max-time 300 "${URL}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "$(python3 -c "
+import json,sys
+print(json.dumps({
+  'model': '$ALIAS',
+  'messages': [{'role':'user','content': sys.argv[1]}],
+  'temperature': 0.2,
+  'stream': False,
+}))
+" "$prompt")" \
+  | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print((d.get('choices') or [{}])[0].get('message',{}).get('content','') or d)
+"
+}
+
+cmd_path() {
+  echo "MODEL=$MODEL"
+  echo "URL=$URL"
+  echo "LOG=$LOG_FILE"
+  echo "PID=$PID_FILE"
+  find_server || true
+}
+
+case "${1:-status}" in
+  start)   shift; cmd_start "$@" ;;
+  stop)    cmd_stop ;;
+  restart) cmd_stop; cmd_start ;;
+  status)  cmd_status ;;
+  logs)    tail -n "${2:-80}" "$LOG_FILE" 2>/dev/null || echo "(no log yet)" ;;
+  chat)    shift; cmd_chat "$@" ;;
+  path)    cmd_path ;;
+  -h|--help|help)
+    sed -n '2,12p' "$0" | sed 's/^# \?//'
+    ;;
+  *)
+    echo "Usage: pixie-llm {start|stop|restart|status|logs|chat|path}" >&2
+    exit 1
+    ;;
+esac

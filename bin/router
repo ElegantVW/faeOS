@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""router — terminal admin helper (wizard + vendor plugins).
+
+v1: Huawei HG8247 / Vodafone PT style (login.cgi + base64 password).
+
+Usage:
+  router probe              # find gateway, detect vendor (no password)
+  router login              # login (asks creds; optional save)
+  router wan                # WAN IPv4/IPv6 status (login first)
+  router status             # probe + short summary
+  router forget             # delete saved credentials
+  router reboot             # request reboot if supported (needs login)
+
+Creds: prompt → optional save to ~/.config/router-tool/credentials (mode 0600).
+Env override (not saved unless you choose save):
+  ROUTER_HOST   default: auto gateway
+  ROUTER_USER / ROUTER_PASS
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import getpass
+import json
+import os
+import re
+import stat
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.cookiejar import CookieJar
+from pathlib import Path
+from typing import Optional
+
+UA = "router-tool/0.1 (terminal; HG8247 plugin)"
+CONFIG_DIR = Path.home() / ".config" / "router-tool"
+CREDS_FILE = CONFIG_DIR / "credentials"
+
+
+def eprint(*a, **k):
+    print(*a, file=sys.stderr, **k)
+
+
+def default_gateway() -> Optional[str]:
+    try:
+        with open("/proc/net/route") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 3 and parts[1] == "00000000":
+                    # little-endian hex IP
+                    h = parts[2]
+                    ip = ".".join(str(int(h[i : i + 2], 16)) for i in (6, 4, 2, 0))
+                    return ip
+    except OSError:
+        pass
+    return None
+
+
+def host_base() -> str:
+    env = os.environ.get("ROUTER_HOST", "").strip()
+    if env:
+        if not env.startswith("http"):
+            env = "http://" + env
+        return env.rstrip("/")
+    gw = default_gateway() or "192.168.1.1"
+    return f"http://{gw}"
+
+
+class Session:
+    """HTTP session with explicit Cookie header (Huawei uses a weird Cookie=sid=… name)."""
+
+    def __init__(self, base: str):
+        self.base = base.rstrip("/")
+        self.cookie: str = ""  # full "Cookie=sid=…:Language:…:id=1" value header body
+
+    def request(
+        self,
+        path: str,
+        data: Optional[dict] = None,
+        method: Optional[str] = None,
+        timeout: float = 8,
+        extra_headers: Optional[dict] = None,
+    ) -> tuple[int, str, bytes, dict]:
+        url = path if path.startswith("http") else self.base + path
+        body = None
+        headers = {"User-Agent": UA, "Referer": self.base + "/"}
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        if extra_headers:
+            headers.update(extra_headers)
+        if data is not None:
+            body = urllib.parse.urlencode(data).encode()
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            method = method or "POST"
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+                hdrs = {k.lower(): v for k, v in r.headers.items()}
+                # capture Set-Cookie
+                sc = r.headers.get("Set-Cookie") or r.headers.get("Set-cookie")
+                if sc and "Cookie=" in sc:
+                    # keep "Cookie=sid=…:Language:…:id=N" without path attrs
+                    part = sc.split("Cookie=", 1)[1].split(";", 1)[0]
+                    self.cookie = "Cookie=" + part
+                return r.status, r.geturl(), raw, hdrs
+        except urllib.error.HTTPError as e:
+            raw = e.read() if e.fp else b""
+            return e.code, url, raw, {}
+        except Exception as e:
+            raise RuntimeError(f"request failed {url}: {e}") from e
+
+
+# ── detection ────────────────────────────────────────────────────────────────
+
+def detect(session: Session) -> dict:
+    info = {
+        "base": session.base,
+        "vendor": "unknown",
+        "model": "",
+        "plugin": None,
+        "notes": [],
+    }
+    try:
+        code, _, raw, _ = session.request("/", method="GET")
+    except RuntimeError as e:
+        info["notes"].append(str(e))
+        return info
+    text = raw.decode("utf-8", "replace")
+    info["http"] = code
+    if "GetRandCount.asp" in text or "X_HW_Token" in text or "HG8247" in text:
+        info["vendor"] = "huawei"
+        info["plugin"] = "hg8247"
+        m = re.search(r"productName\s*=\s*'([^']+)'", text)
+        if m:
+            info["model"] = bytes(m.group(1), "utf-8").decode("unicode_escape")
+        m = re.search(r"CfgMode\s*=\s*'([^']+)'", text)
+        if m:
+            info["notes"].append(f"CfgMode={m.group(1)}")
+        if "PTVDF" in text or "vodafone" in text.lower():
+            info["notes"].append("Vodafone-branded firmware hints")
+    elif "FRITZ" in text:
+        info["vendor"] = "fritzbox"
+        info["notes"].append("detected FRITZ!Box (plugin not yet)")
+    elif "TP-Link" in text or "tplink" in text.lower():
+        info["vendor"] = "tplink"
+        info["notes"].append("detected TP-Link (plugin not yet)")
+    return info
+
+
+# ── Huawei HG8247 plugin ─────────────────────────────────────────────────────
+
+def huawei_get_token(session: Session) -> str:
+    code, _, raw, _ = session.request("/asp/GetRandCount.asp", data={}, method="POST")
+    if code != 200:
+        raise RuntimeError(f"GetRandCount.asp HTTP {code}")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    token = raw.decode("utf-8", "replace").strip()
+    if not token:
+        raise RuntimeError("empty HW token")
+    return token
+
+
+def huawei_login(session: Session, user: str, password: str, language: str = "portuguese") -> None:
+    token = huawei_get_token(session)
+    # pre-login cookie required by firmware
+    session.cookie = f"Cookie=body:Language:{language}:id=-1"
+    pw_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
+    data = {
+        "UserName": user,
+        "PassWord": pw_b64,
+        "Language": language,
+        "x.X_HW_Token": token,
+    }
+    code, final_url, raw, _ = session.request("/login.cgi", data=data, method="POST")
+    text = raw.decode("utf-8", "replace")
+    # success: Waiting… + index.asp + sid cookie with id=1
+    if "sid=" not in session.cookie or ":id=-1" in session.cookie or ":id=0" in session.cookie:
+        if "userpwd" in text or "loginbtn" in text:
+            raise RuntimeError("login failed — check user/pass (use sticker Password Router, not Wi‑Fi Chave)")
+        raise RuntimeError("login failed — no session sid cookie")
+    if "index.asp" not in text and "Waiting" not in text and code not in (200, 302, 303):
+        raise RuntimeError(f"login.cgi unexpected HTTP {code}")
+    eprint(f"login OK (session cookie set) → {final_url}")
+
+
+def _js_unescape(s: str) -> str:
+    try:
+        return bytes(s, "utf-8").decode("unicode_escape")
+    except Exception:
+        return s.replace("\\x2e", ".").replace("\\x2d", "-")
+
+
+def huawei_wan_status(session: Session) -> list[dict]:
+    """Parse Vodafone PT wan_list_ptvdf.asp for WAN IPv4 rows."""
+    code, _, raw, _ = session.request(
+        "/html/bbsp/common/wan_list_ptvdf.asp", method="GET", timeout=10
+    )
+    if code != 200:
+        raise RuntimeError(f"wan_list_ptvdf.asp HTTP {code} (not logged in?)")
+    text = raw.decode("utf-8", "replace")
+    rows: list[dict] = []
+    for m in re.finditer(r"new\s+(WanIPOE|WanPPPOE)\s*\((.*?)\)\s*(?:,|;)", text, re.S):
+        kind, args = m.group(1), m.group(2)
+        parts = [_js_unescape(p) for p in re.findall(r'"(.*?)"', args, re.S)]
+        if len(parts) < 12:
+            continue
+        # WanIPOE: domain, Name, Enable, ConnectionStatus, SERVICELIST, ExServiceList,
+        # NAT, NatType, PRI, VLAN, AddressingType, ExternalIP, Mask, GW, ...
+        row = {
+            "type": kind,
+            "name": parts[1],
+            "enable": parts[2],
+            "status": parts[3],
+            "service": parts[4] or parts[5],
+            "addressing": parts[10] if len(parts) > 10 else "",
+            "ipv4": parts[11] if len(parts) > 11 else "",
+            "mask": parts[12] if len(parts) > 12 else "",
+            "gateway": parts[13] if len(parts) > 13 else "",
+            "dns": parts[16] if len(parts) > 16 else "",
+        }
+        rows.append(row)
+    return rows
+
+
+# ── CLI commands ─────────────────────────────────────────────────────────────
+
+def cmd_probe(_: argparse.Namespace) -> int:
+    base = host_base()
+    print(f"Gateway base: {base}")
+    s = Session(base)
+    info = detect(s)
+    print(f"Vendor:  {info['vendor']}")
+    print(f"Model:   {info.get('model') or '?'}")
+    print(f"Plugin:  {info.get('plugin') or 'none yet'}")
+    for n in info.get("notes") or []:
+        print(f"Note:    {n}")
+    # LAN side quick check
+    gw = default_gateway()
+    print(f"Default gateway (kernel): {gw}")
+    return 0 if info.get("plugin") else 1
+
+
+def load_saved_creds() -> Optional[dict]:
+    if not CREDS_FILE.is_file():
+        return None
+    try:
+        mode = CREDS_FILE.stat().st_mode
+        if mode & (stat.S_IRGRP | stat.S_IROTH | stat.S_IWGRP | stat.S_IWOTH):
+            eprint(f"warning: {CREDS_FILE} is too open; fixing to 0600")
+            CREDS_FILE.chmod(0o600)
+        data = json.loads(CREDS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("user") and data.get("pass") is not None:
+            return data
+    except (OSError, json.JSONDecodeError) as e:
+        eprint(f"warning: could not read saved creds: {e}")
+    return None
+
+
+def save_creds(user: str, password: str, host: str = "") -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.chmod(0o700)
+    payload = {
+        "user": user,
+        "pass": password,
+        "host": host or host_base(),
+        "note": "plain file mode 0600 — do not copy to git/shared disks",
+    }
+    # write privately
+    fd = os.open(CREDS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    CREDS_FILE.chmod(0o600)
+    eprint(f"saved credentials → {CREDS_FILE} (mode 0600)")
+
+
+def forget_creds() -> bool:
+    if CREDS_FILE.is_file():
+        CREDS_FILE.unlink()
+        eprint(f"removed {CREDS_FILE}")
+        return True
+    eprint("no saved credentials")
+    return False
+
+
+def _ask_yes_no(prompt: str, default: bool = False) -> bool:
+    suffix = " [Y/n] " if default else " [y/N] "
+    try:
+        ans = input(prompt + suffix).strip().lower()
+    except EOFError:
+        return default
+    if not ans:
+        return default
+    return ans in ("y", "yes")
+
+
+def credentials(*, allow_save: bool = True) -> tuple[str, str]:
+    """Resolve user/pass: env → saved file → interactive prompt (+ optional save)."""
+    env_user = os.environ.get("ROUTER_USER", "").strip()
+    env_pass = os.environ.get("ROUTER_PASS")  # None if unset
+    saved = load_saved_creds()
+
+    # Full env credentials: use and do not prompt to save
+    if env_user and env_pass is not None:
+        return env_user, env_pass
+
+    # Offer saved login
+    if saved and not env_user:
+        if _ask_yes_no(
+            f"Use saved router login ({saved['user']} @ {saved.get('host', '?')})?",
+            default=True,
+        ):
+            return str(saved["user"]), str(saved["pass"])
+
+    # Interactive username
+    try:
+        default_u = env_user or (saved or {}).get("user") or "admin"
+        typed = input(f"Router username [{default_u}]: ").strip()
+        user = typed or default_u
+    except EOFError as e:
+        raise SystemExit("need username (run in an interactive terminal)") from e
+
+    # Interactive password
+    try:
+        pw = getpass.getpass("Router password (sticker/admin): ")
+    except EOFError as e:
+        raise SystemExit("need password") from e
+
+    if not user or not pw:
+        raise SystemExit("need username and password")
+
+    if allow_save and sys.stdin.isatty():
+        if _ask_yes_no("Save credentials on this machine for next time?", default=False):
+            save_creds(user, pw)
+        else:
+            eprint("not saving credentials")
+
+    return user, pw
+
+
+def cmd_login(_: argparse.Namespace) -> int:
+    base = host_base()
+    s = Session(base)
+    info = detect(s)
+    if info.get("plugin") != "hg8247":
+        eprint(f"No login plugin for vendor={info['vendor']} model={info.get('model')}")
+        return 2
+    user, pw = credentials()
+    try:
+        huawei_login(s, user, pw)
+    except RuntimeError as e:
+        eprint(f"login error: {e}")
+        return 1
+    print("Login OK.")
+    print("Tip: sticker user is often 'vodafone' and password is 'Password Router' (not Wi‑Fi Chave).")
+    return cmd_wan_from_session(s)
+
+
+def cmd_wan_from_session(s: Session) -> int:
+    try:
+        rows = huawei_wan_status(s)
+    except RuntimeError as e:
+        eprint(f"wan error: {e}")
+        return 1
+    if not rows:
+        print("No WAN rows parsed.")
+        return 1
+    print("WAN interfaces (from router):")
+    for row in rows:
+        print(
+            f"  {row['name']:10} {row['status']:12} svc={row['service']:10} "
+            f"ipv4={row['ipv4'] or '-'}  mask={row['mask'] or '-'}  dns={row['dns'] or '-'}"
+        )
+    inet = next(
+        (
+            r
+            for r in rows
+            if "INTERNET" in (r["service"] or "").upper() or r["name"].lower() == "internet"
+        ),
+        None,
+    )
+    print()
+    if inet and inet["ipv4"] and inet["status"].lower() == "connected":
+        print(f"Router WAN IPv4: {inet['ipv4']} (Connected)")
+    else:
+        print("Router WAN IPv4: missing or not Connected")
+
+    import subprocess
+
+    print("\nFrom this PC:")
+    r = subprocess.run(["ping", "-c", "1", "-W", "2", "1.1.1.1"], capture_output=True)
+    print("  ping 1.1.1.1:", "OK" if r.returncode == 0 else "FAIL")
+    if inet and inet["ipv4"]:
+        r2 = subprocess.run(
+            ["ping", "-c", "1", "-W", "2", inet["ipv4"]], capture_output=True
+        )
+        print(f"  ping router WAN {inet['ipv4']}:", "OK" if r2.returncode == 0 else "FAIL")
+    if r.returncode != 0 and inet and inet["ipv4"]:
+        print(
+            "\nDiagnosis: router HAS public IPv4, but this PC cannot reach the IPv4 internet.\n"
+            "  → often NAT/firewall/parental filter on the ONT, or need router reboot.\n"
+            "  → not an Arch 'IPv4 disabled' problem."
+        )
+    return 0
+
+
+def cmd_wan(_: argparse.Namespace) -> int:
+    base = host_base()
+    s = Session(base)
+    info = detect(s)
+    if info.get("plugin") != "hg8247":
+        eprint("unsupported vendor for wan")
+        return 2
+    user, pw = credentials()
+    try:
+        huawei_login(s, user, pw)
+    except RuntimeError as e:
+        eprint(f"login error: {e}")
+        return 1
+    return cmd_wan_from_session(s)
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    rc = cmd_probe(args)
+    print()
+    import subprocess
+
+    r4 = subprocess.run(
+        ["ping", "-c", "1", "-W", "2", "1.1.1.1"], capture_output=True
+    )
+    r6 = subprocess.run(
+        ["ping", "-c", "1", "-W", "2", "-6", "2001:4860:4860::8888"],
+        capture_output=True,
+    )
+    print("From this PC:")
+    print("  IPv4 to internet (1.1.1.1):", "OK" if r4.returncode == 0 else "FAIL")
+    print("  IPv6 to internet:", "OK" if r6.returncode == 0 else "FAIL/skip")
+    print()
+    print("Next: router wan  (asks for sticker/admin password; optional save)")
+    return rc
+
+
+def cmd_forget(_: argparse.Namespace) -> int:
+    forget_creds()
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Terminal router admin wizard")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("probe", help="detect gateway/vendor")
+    sub.add_parser("status", help="probe + PC IPv4/IPv6 quick test")
+    sub.add_parser("login", help="login + list interesting pages")
+    sub.add_parser("wan", help="login + show WAN IP hints")
+    sub.add_parser("forget", help="delete saved credentials")
+    args = ap.parse_args()
+    if args.cmd == "probe":
+        return cmd_probe(args)
+    if args.cmd == "status":
+        return cmd_status(args)
+    if args.cmd == "login":
+        return cmd_login(args)
+    if args.cmd == "wan":
+        return cmd_wan(args)
+    if args.cmd == "forget":
+        return cmd_forget(args)
+    return 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        eprint("aborted")
+        raise SystemExit(130)

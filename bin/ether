@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""ether — legally free media from the Internet Archive (terminal).
+
+Search public-domain / freely licensed audio & video on archive.org,
+list results, and optionally download with curl/wget/aria2c.
+
+  ether list 10 music album lofi
+  ether list 5 podcast history
+  ether list 8 movie silent
+  ether list 5 series documentary
+  ether search music lofi
+  ether get <identifier>
+
+This is NOT a pirate client. Only archive.org (and similar free corpora
+you may add later). Commercial Netflix/Spotify/etc. content is not here.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+UA = "ether/1.0 (legal archive.org client; +https://archive.org)"
+IA_SEARCH = "https://archive.org/advancedsearch.php"
+IA_META = "https://archive.org/metadata/{ident}"
+IA_DOWNLOAD = "https://archive.org/download/{ident}/{name}"
+
+# Default download roots
+AUDIO_DIR = Path(os.environ.get("ETHER_AUDIO_DIR", Path.home() / "Music" / "ether"))
+VIDEO_DIR = Path(os.environ.get("ETHER_VIDEO_DIR", Path.home() / "Videos" / "ether"))
+
+# Map friendly kinds → IA query bits
+KIND_MAP: dict[str, dict[str, str]] = {
+    "music": {
+        "mediatype": "audio",
+        "hint": "(subject:(music) OR collection:(opensource_audio) OR collection:(netlabels))",
+    },
+    "album": {
+        "mediatype": "audio",
+        "hint": "(subject:(album) OR subject:(music) OR collection:(netlabels))",
+    },
+    "podcast": {
+        "mediatype": "audio",
+        "hint": "(subject:(podcast) OR collection:(podcasts) OR title:(podcast))",
+    },
+    "audiobook": {
+        "mediatype": "audio",
+        "hint": "(collection:(librivoxaudio) OR subject:(audiobook) OR creator:(LibriVox))",
+    },
+    "movie": {
+        "mediatype": "movies",
+        "hint": "(subject:(feature) OR subject:(film) OR collection:(feature_films))",
+    },
+    "movies": {
+        "mediatype": "movies",
+        "hint": "(subject:(feature) OR collection:(feature_films))",
+    },
+    "series": {
+        "mediatype": "movies",
+        "hint": "(subject:(series) OR subject:(television) OR subject:(episode))",
+    },
+    "video": {
+        "mediatype": "movies",
+        "hint": "",
+    },
+    "documentary": {
+        "mediatype": "movies",
+        "hint": "(subject:(documentary) OR collection:(documentary))",
+    },
+}
+
+
+def eprint(*a: Any, **k: Any) -> None:
+    print(*a, file=sys.stderr, **k)
+
+
+def color(s: str, code: str) -> str:
+    if os.environ.get("NO_COLOR"):
+        return s
+    return f"\033[{code}m{s}\033[0m"
+
+
+P = "38;5;175"  # pink
+PD = "38;5;132"
+S = "38;5;252"
+SD = "38;5;245"
+OK = "38;5;78"
+W = "38;5;214"
+
+
+def http_json(url: str, timeout: float = 30) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def build_query(kind: str | None, terms: list[str]) -> str:
+    """Build IA lucene-ish query from kind + free text."""
+    parts: list[str] = []
+    k = (kind or "").lower().strip()
+    if k in KIND_MAP:
+        mt = KIND_MAP[k]["mediatype"]
+        parts.append(f"mediatype:({mt})")
+        hint = KIND_MAP[k].get("hint") or ""
+        if hint:
+            parts.append(hint)
+    elif k in ("audio",):
+        parts.append("mediatype:(audio)")
+    elif k in ("movies", "films"):
+        parts.append("mediatype:(movies)")
+    # free text — search title/subject/description
+    words = [t for t in terms if t]
+    if kind and kind.lower() not in KIND_MAP and kind.lower() not in (
+        "audio",
+        "movies",
+        "films",
+        "music",
+        "album",
+        "podcast",
+        "movie",
+        "series",
+        "video",
+        "documentary",
+        "audiobook",
+    ):
+        # first token was not a kind — include it as a term
+        words = [kind] + words
+    if words:
+        qtext = " ".join(words)
+        # prefer title/subject match
+        esc = qtext.replace('"', " ")
+        parts.append(f'(title:({esc}) OR subject:({esc}) OR description:({esc}) OR creator:({esc}))')
+    if not parts:
+        parts.append("mediatype:(audio)")
+    # prefer items that are downloadable / public
+    parts.append("NOT collection:(spotify)")  # no effect usually; harmless
+    return " AND ".join(parts)
+
+
+def search(query: str, rows: int = 10, page: int = 1) -> tuple[list[dict], int]:
+    rows = max(1, min(int(rows), 50))
+    page = max(1, int(page))
+    params = {
+        "q": query,
+        "fl[]": ["identifier", "title", "creator", "year", "mediatype", "downloads", "description"],
+        "sort[]": "downloads desc",
+        "rows": str(rows),
+        "page": str(page),
+        "output": "json",
+    }
+    # urllib doesn't do multi fl[] well with urlencode list — build manually
+    q = urllib.parse.urlencode({"q": query, "rows": rows, "page": page, "output": "json", "sort[]": "downloads desc"})
+    for fl in ("identifier", "title", "creator", "year", "mediatype", "downloads"):
+        q += f"&fl[]={fl}"
+    url = f"{IA_SEARCH}?{q}"
+    data = http_json(url)
+    resp = data.get("response") or {}
+    docs = resp.get("docs") or []
+    n = int(resp.get("numFound") or 0)
+    return docs, n
+
+
+def fmt_item(i: int, doc: dict) -> str:
+    title = (doc.get("title") or doc.get("identifier") or "?")
+    if isinstance(title, list):
+        title = title[0]
+    creator = doc.get("creator") or ""
+    if isinstance(creator, list):
+        creator = ", ".join(creator[:2])
+    year = doc.get("year") or ""
+    if isinstance(year, list):
+        year = year[0]
+    mt = doc.get("mediatype") or ""
+    if isinstance(mt, list):
+        mt = mt[0]
+    ident = doc.get("identifier") or ""
+    dl = doc.get("downloads") or ""
+    meta = " · ".join(x for x in (str(creator)[:40], str(year), str(mt), f"↓{dl}" if dl != "" else "") if x)
+    return (
+        f"{color(f'{i:>2}.', '1;' + P)} {color(str(title)[:70], S)}\n"
+        f"    {color(meta, SD)}  {color(ident, PD)}"
+    )
+
+
+def list_files(ident: str) -> list[dict]:
+    meta = http_json(IA_META.format(ident=urllib.parse.quote(ident)))
+    files = meta.get("files") or []
+    # prefer media extensions
+    audio_ext = {".mp3", ".ogg", ".flac", ".m4a", ".wav", ".opus"}
+    video_ext = {".mp4", ".mkv", ".webm", ".avi", ".ogv", ".mov"}
+    out = []
+    for f in files:
+        name = f.get("name") or ""
+        if name.endswith(".xml") or name.endswith(".sqlite") or "/." in name:
+            continue
+        low = name.lower()
+        ext = Path(low).suffix
+        if ext in audio_ext or ext in video_ext:
+            out.append(f)
+    # sort: larger-ish useful files first, skip tiny samples if possible
+    def score(f: dict) -> tuple:
+        name = (f.get("name") or "").lower()
+        ext = Path(name).suffix
+        prefer = 0 if ext in {".mp3", ".ogg", ".mp4", ".mkv", ".flac"} else 1
+        try:
+            sz = int(f.get("size") or 0)
+        except ValueError:
+            sz = 0
+        return (prefer, -sz)
+
+    out.sort(key=score)
+    return out
+
+
+def pick_download_targets(ident: str, mediatype: str = "") -> list[tuple[str, str, Path]]:
+    """Return list of (url, filename, dest_dir)."""
+    files = list_files(ident)
+    if not files:
+        return []
+    is_video = (mediatype or "").startswith("movie") or any(
+        Path((f.get("name") or "").lower()).suffix in {".mp4", ".mkv", ".webm", ".avi"} for f in files
+    )
+    dest_root = VIDEO_DIR if is_video else AUDIO_DIR
+    dest_dir = dest_root / re.sub(r"[^\w.\-]+", "_", ident)[:80]
+    targets = []
+    # For music albums: grab all audio files. For video: largest video file (+ maybe same base).
+    audio_ext = {".mp3", ".ogg", ".flac", ".m4a", ".wav", ".opus"}
+    video_ext = {".mp4", ".mkv", ".webm", ".avi", ".ogv", ".mov"}
+    media = []
+    for f in files:
+        name = f.get("name") or ""
+        ext = Path(name.lower()).suffix
+        if ext in audio_ext or ext in video_ext:
+            media.append(f)
+    if not media:
+        return []
+    if is_video:
+        # single best video
+        media = media[:1]
+    # album: all audio (cap 40 files to avoid huge dumps by accident)
+    if not is_video:
+        media = media[:40]
+    for f in media:
+        name = f["name"]
+        # nested paths in IA
+        base = Path(name).name
+        url = IA_DOWNLOAD.format(ident=urllib.parse.quote(ident), name=urllib.parse.quote(name, safe="/"))
+        targets.append((url, base, dest_dir))
+    return targets
+
+
+def download_file(url: str, dest: Path) -> bool:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.stat().st_size > 0:
+        eprint(color(f"  skip (exists): {dest.name}", SD))
+        return True
+    # prefer aria2c, then curl, then wget
+    if shutil.which("aria2c"):
+        cmd = ["aria2c", "-x", "4", "-s", "4", "-c", "-d", str(dest.parent), "-o", dest.name, url]
+    elif shutil.which("curl"):
+        cmd = ["curl", "-L", "--fail", "--retry", "3", "-o", str(dest), url]
+    elif shutil.which("wget"):
+        cmd = ["wget", "-c", "-O", str(dest), url]
+    else:
+        eprint("need curl, wget, or aria2c")
+        return False
+    eprint(color(f"  ↓ {dest.name}", P))
+    try:
+        subprocess.run(cmd, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        eprint(color(f"  download failed: {e}", W))
+        if dest.exists() and dest.stat().st_size == 0:
+            dest.unlink(missing_ok=True)
+        return False
+
+
+def do_download(doc: dict) -> None:
+    ident = doc.get("identifier") or ""
+    mt = doc.get("mediatype") or ""
+    if isinstance(mt, list):
+        mt = mt[0]
+    title = doc.get("title") or ident
+    if isinstance(title, list):
+        title = title[0]
+    eprint(color(f"Fetching file list for {ident} …", PD))
+    try:
+        targets = pick_download_targets(ident, str(mt))
+    except Exception as e:
+        eprint(color(f"metadata error: {e}", W))
+        return
+    if not targets:
+        eprint(color("No audio/video files found on this item (metadata only?).", W))
+        eprint(f"  Browse: https://archive.org/details/{ident}")
+        return
+    eprint(color(f"Downloading {len(targets)} file(s) → {targets[0][2]}", OK))
+    ok = 0
+    for url, name, ddir in targets:
+        if download_file(url, ddir / name):
+            ok += 1
+    eprint(color(f"Done: {ok}/{len(targets)}  ({title})", OK))
+
+
+def interactive_list(docs: list[dict], num_found: int, query: str) -> str:
+    """Returns: quit | again | or empty after downloads."""
+    print()
+    print(color("┌─ ether · Internet Archive (legal free media) ─", PD))
+    print(color(f"│ query: {query}", SD))
+    print(color(f"│ matches: {num_found:,}  ·  showing {len(docs)}", SD))
+    print(color("└──────────────────────────────────────────────", PD))
+    print()
+    if not docs:
+        print(color("No results. Try different words.", W))
+        return "again"
+    for i, d in enumerate(docs, 1):
+        print(fmt_item(i, d))
+        print()
+    print(color("  [1–N] download   [a] download all listed   [s] search again   [q] quit", SD))
+    print(color("  Only freely hosted archive.org items — not commercial streaming catalogs.", SD))
+    while True:
+        try:
+            choice = input(color("ether> ", "1;" + P)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return "quit"
+        if choice in ("q", "quit", "exit"):
+            return "quit"
+        if choice in ("s", "search", "again", "r"):
+            return "again"
+        if choice in ("a", "all"):
+            for d in docs:
+                do_download(d)
+            return ""
+        if choice.isdigit():
+            n = int(choice)
+            if 1 <= n <= len(docs):
+                do_download(docs[n - 1])
+                # offer more
+                print(color("Another number, [s] search again, or [q] quit?", SD))
+                continue
+        print(color("Pick a number, a, s, or q.", W))
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    n = args.n or 10
+    # parse: ether list 10 music album lofi  OR  ether list music lofi
+    tokens = list(args.terms or [])
+    kind = args.kind
+    # if first term is a known kind and kind not set
+    if not kind and tokens and tokens[0].lower() in KIND_MAP:
+        kind = tokens.pop(0).lower()
+    # second kind-ish word (album after music) — treat as extra filter term if not in map alone
+    query = build_query(kind, tokens)
+    eprint(color("◆ ether", "1;" + P) + color(f"  search  {query[:100]}…", S) if len(query) > 100 else color("◆ ether", "1;" + P) + color(f"  {query}", S))
+    try:
+        docs, total = search(query, rows=n, page=1)
+    except urllib.error.URLError as e:
+        eprint(color(f"Network error (archive.org): {e}", W))
+        return 1
+    except Exception as e:
+        eprint(color(f"Search failed: {e}", W))
+        return 1
+
+    while True:
+        action = interactive_list(docs, total, query)
+        if action == "quit":
+            return 0
+        if action == "again":
+            try:
+                line = input(color("new search (e.g. music lofi / movie silent)> ", "1;" + P)).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
+            if not line or line.lower() in ("q", "quit"):
+                return 0
+            parts = line.split()
+            kind2 = None
+            if parts and parts[0].lower() in KIND_MAP:
+                kind2 = parts.pop(0).lower()
+            query = build_query(kind2, parts)
+            eprint(color(f"◆ {query}", PD))
+            try:
+                docs, total = search(query, rows=n, page=1)
+            except Exception as e:
+                eprint(color(f"Search failed: {e}", W))
+                return 1
+            continue
+        # after download, loop menu again with same docs
+        action = interactive_list(docs, total, query)
+        if action == "quit":
+            return 0
+        if action == "again":
+            continue
+        return 0
+
+
+def cmd_get(args: argparse.Namespace) -> int:
+    ident = args.identifier.strip()
+    do_download({"identifier": ident, "title": ident, "mediatype": args.type or ""})
+    return 0
+
+
+def cmd_about(_: argparse.Namespace) -> int:
+    print(
+        """
+ether — legal free media (Internet Archive)
+
+Sources (lawful / free-to-download corpora, not piracy sites):
+  • archive.org     public domain, Creative Commons, open collections
+  • LibriVox        public-domain audiobooks (via IA collection)
+  • Netlabels       free/CC music collections on IA
+  • Feature Films   public-domain & freely licensed films on IA
+
+NOT supported (and not legal to bulk-rip):
+  Netflix, Spotify, commercial torrents, paywalled catalogs, etc.
+
+Examples:
+  ether list 10 music lofi
+  ether list 5 podcast science
+  ether list 8 movie silent
+  ether list 5 audiobook verne
+  ether get SomeIdentifier
+
+Downloads default to:
+  ~/Music/ether/   and   ~/Videos/ether/
+  override: ETHER_AUDIO_DIR / ETHER_VIDEO_DIR
+""".strip()
+    )
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="ether",
+        description="Browse & download legally free audio/video from Internet Archive",
+    )
+    sub = ap.add_subparsers(dest="cmd")
+
+    p = sub.add_parser("list", help="search and interactively download")
+    p.add_argument("n", nargs="?", type=int, default=None, help="how many results (default 10)")
+    p.add_argument(
+        "terms",
+        nargs="*",
+        help="kind + keywords, e.g. music album lofi | podcast history | movie silent",
+    )
+    p.add_argument("--kind", default=None, help="force kind: music, podcast, movie, series, …")
+    p.set_defaults(func=cmd_list)
+
+    # convenience: ether search … == list
+    p = sub.add_parser("search", help="alias for list")
+    p.add_argument("n", nargs="?", type=int, default=None)
+    p.add_argument("terms", nargs="*")
+    p.add_argument("--kind", default=None)
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("get", help="download by archive.org identifier")
+    p.add_argument("identifier")
+    p.add_argument("--type", default="", help="audio|movies hint")
+    p.set_defaults(func=cmd_get)
+
+    p = sub.add_parser("about", help="legal sources & help")
+    p.set_defaults(func=cmd_about)
+
+    # bare "ether 10 music lofi" → list
+    # If first arg is digits or known subcommand…
+    argv = sys.argv[1:]
+    if argv and argv[0] not in ("list", "search", "get", "about", "-h", "--help") and not argv[0].startswith("-"):
+        # rewrite to list
+        argv = ["list"] + argv
+
+    args = ap.parse_args(argv)
+    if not getattr(args, "cmd", None):
+        ap.print_help()
+        print()
+        return cmd_about(args)
+    # list: if n missing but terms[0] is int-like already handled; if terms start with number
+    if args.cmd in ("list", "search") and args.n is None and args.terms:
+        if args.terms[0].isdigit():
+            args.n = int(args.terms.pop(0))
+        else:
+            args.n = 10
+    elif args.cmd in ("list", "search") and args.n is None:
+        args.n = 10
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print()
+        raise SystemExit(130)

@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""pixie-mail — sync aerc IMAP mail to local text files for Pixie.
+
+Layout:
+  ~/.cache/pixie/mail/unread/*.txt
+  ~/.cache/pixie/mail/read/*.txt
+  ~/.cache/pixie/mail/trash/*.txt
+
+Each file has YAML-like headers + plain body. IMAP UID kept for server moves.
+"""
+from __future__ import annotations
+
+import argparse
+import email
+import email.policy
+import imaplib
+import os
+import re
+import sys
+from email.header import decode_header, make_header
+from pathlib import Path
+from typing import Optional
+from urllib.parse import unquote, urlparse
+
+MAIL_ROOT = Path.home() / ".cache" / "pixie" / "mail"
+UNREAD = MAIL_ROOT / "unread"
+READ = MAIL_ROOT / "read"
+TRASH = MAIL_ROOT / "trash"
+AERC_ACCOUNTS = Path.home() / ".config" / "aerc" / "accounts.conf"
+
+
+def eprint(*a, **k):
+    print(*a, file=sys.stderr, **k)
+
+
+def ensure_dirs() -> None:
+    for d in (UNREAD, READ, TRASH):
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def parse_aerc_account(name: Optional[str] = None) -> dict:
+    """Parse first (or named) account from aerc accounts.conf."""
+    if not AERC_ACCOUNTS.is_file():
+        raise SystemExit(f"no aerc accounts at {AERC_ACCOUNTS}")
+    text = AERC_ACCOUNTS.read_text(encoding="utf-8", errors="replace")
+    sections: dict[str, dict] = {}
+    cur = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            cur = line[1:-1]
+            sections[cur] = {"name": cur}
+            continue
+        if cur is None or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        sections[cur][k.strip().lower()] = v.strip()
+    if not sections:
+        raise SystemExit("no accounts in aerc config")
+    if name and name in sections:
+        acc = sections[name]
+    else:
+        acc = next(iter(sections.values()))
+    src = acc.get("source", "")
+    # imaps://user:pass@host:993
+    u = urlparse(src)
+    if u.scheme not in ("imaps", "imap"):
+        raise SystemExit(f"unsupported source: {src[:40]}…")
+    user = unquote(u.username or "")
+    password = unquote(u.password or "")
+    host = u.hostname or ""
+    port = u.port or (993 if u.scheme == "imaps" else 143)
+    if not user or not password or not host:
+        raise SystemExit("could not parse IMAP credentials from aerc")
+    return {
+        "name": acc.get("name", "Personal"),
+        "user": user,
+        "password": password,
+        "host": host,
+        "port": port,
+        "ssl": u.scheme == "imaps",
+        "folder": acc.get("default", "INBOX"),
+        "from": acc.get("from", ""),
+    }
+
+
+def decode_mime(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    try:
+        return str(make_header(decode_header(s)))
+    except Exception:
+        return s
+
+
+def html_to_text(html: str) -> str:
+    """Rough HTML → plain text (good enough for summaries)."""
+    html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</p>", "\n", html)
+    html = re.sub(r"(?i)</div>", "\n", html)
+    html = re.sub(r"(?i)</tr>", "\n", html)
+    html = re.sub(r"(?i)</li>", "\n", html)
+    html = re.sub(r"<[^>]+>", " ", html)
+    html = re.sub(r"&nbsp;", " ", html)
+    html = re.sub(r"&amp;", "&", html)
+    html = re.sub(r"&lt;", "<", html)
+    html = re.sub(r"&gt;", ">", html)
+    html = re.sub(r"&quot;", '"', html)
+    html = re.sub(r"&#\d+;", " ", html)
+    html = re.sub(r"[ \t]+", " ", html)
+    html = re.sub(r"\n\s*\n+", "\n\n", html)
+    return html.strip()
+
+
+def body_to_text(msg: email.message.Message) -> str:
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disp = str(part.get("Content-Disposition") or "")
+            if "attachment" in disp.lower():
+                continue
+            try:
+                content = part.get_content()
+            except Exception:
+                payload = part.get_payload(decode=True) or b""
+                content = payload.decode(part.get_content_charset() or "utf-8", "replace")
+            if ctype == "text/plain":
+                plain_parts.append(str(content))
+            elif ctype == "text/html":
+                html_parts.append(str(content))
+    else:
+        try:
+            content = msg.get_content()
+        except Exception:
+            payload = msg.get_payload(decode=True) or b""
+            content = payload.decode("utf-8", "replace")
+        if msg.get_content_type() == "text/html":
+            html_parts.append(str(content))
+        else:
+            plain_parts.append(str(content))
+    if plain_parts:
+        text = "\n".join(plain_parts)
+    elif html_parts:
+        text = html_to_text("\n".join(html_parts))
+    else:
+        text = ""
+    text = re.sub(r"\s+", " ", text).strip()
+    # hard cap for local storage / agent context
+    if len(text) > 4000:
+        text = text[:4000] + "…"
+    return text
+
+
+def safe_filename(uid: str, subject: str) -> str:
+    sub = re.sub(r"[^\w\s.-]", "", subject)[:60].strip() or "no-subject"
+    sub = re.sub(r"\s+", "_", sub)
+    return f"uid{uid}_{sub}.txt"
+
+
+def write_mail_file(folder: Path, meta: dict, body: str) -> Path:
+    ensure_dirs()
+    path = folder / safe_filename(meta["uid"], meta["subject"])
+    # avoid clobber different mails with same subject
+    if path.exists() and f"uid: {meta['uid']}" not in path.read_text(encoding="utf-8", errors="replace"):
+        path = folder / f"uid{meta['uid']}.txt"
+    lines = [
+        f"uid: {meta['uid']}",
+        f"account: {meta.get('account', '')}",
+        f"folder: {meta.get('folder', 'INBOX')}",
+        f"from: {meta['from']}",
+        f"to: {meta.get('to', '')}",
+        f"date: {meta.get('date', '')}",
+        f"subject: {meta['subject']}",
+        f"message-id: {meta.get('message_id', '')}",
+        "---",
+        body or "(empty body)",
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def parse_mail_file(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    headers, _, body = text.partition("\n---\n")
+    meta = {"path": str(path), "body": body.strip()}
+    for line in headers.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            meta[k.strip().lower()] = v.strip()
+    return meta
+
+
+def connect(acc: dict) -> imaplib.IMAP4:
+    if acc["ssl"]:
+        M = imaplib.IMAP4_SSL(acc["host"], acc["port"])
+    else:
+        M = imaplib.IMAP4(acc["host"], acc["port"])
+    M.login(acc["user"], acc["password"])
+    return M
+
+
+def known_uids() -> set[str]:
+    """UIDs already stored under unread/read/trash."""
+    uids: set[str] = set()
+    for folder in (UNREAD, READ, TRASH):
+        if not folder.is_dir():
+            continue
+        for p in folder.glob("*.txt"):
+            try:
+                m = parse_mail_file(p)
+            except OSError:
+                continue
+            if m.get("uid"):
+                uids.add(str(m["uid"]))
+    return uids
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    acc = parse_aerc_account(args.account)
+    mode = "all recent" if args.all else "unread (UNSEEN)"
+    eprint(f"syncing {mode} from {acc['user']} @ {acc['host']} …")
+    M = connect(acc)
+    try:
+        folder = args.folder or acc["folder"]
+        # readonly=True also avoids side-effects; BODY.PEEK is the real protection
+        typ, _ = M.select(folder, readonly=True)
+        if typ != "OK":
+            eprint(f"cannot select {folder}")
+            return 1
+        if args.all:
+            typ, data = M.search(None, "ALL")
+        else:
+            typ, data = M.search(None, "UNSEEN")
+        if typ != "OK":
+            eprint("search failed")
+            return 1
+        ids = data[0].split()
+        # when --all, only take the newest N
+        if args.all and args.limit and len(ids) > args.limit:
+            ids = ids[-args.limit :]
+        eprint(f"found {len(ids)} candidate(s)")
+        already = known_uids() if not args.force else set()
+        written = []
+        skipped = 0
+        for num in ids:
+            # BODY.PEEK so we do NOT mark messages \Seen on the server
+            typ, msg_data = M.fetch(num, "(UID BODY.PEEK[])")
+            if typ != "OK" or not msg_data or not msg_data[0]:
+                continue
+            # parse UID + bytes
+            uid = num.decode() if isinstance(num, bytes) else str(num)
+            raw = None
+            for part in msg_data:
+                if isinstance(part, tuple) and len(part) >= 2:
+                    header = part[0].decode(errors="replace") if isinstance(part[0], bytes) else str(part[0])
+                    m = re.search(r"UID\s+(\d+)", header)
+                    if m:
+                        uid = m.group(1)
+                    raw = part[1]
+            if not raw:
+                continue
+            if uid in already and not args.force:
+                skipped += 1
+                continue
+            msg = email.message_from_bytes(raw, policy=email.policy.default)
+            meta = {
+                "uid": uid,
+                "account": acc["name"],
+                "folder": folder,
+                "from": decode_mime(msg.get("From")),
+                "to": decode_mime(msg.get("To")),
+                "date": decode_mime(msg.get("Date")),
+                "subject": decode_mime(msg.get("Subject")) or "(no subject)",
+                "message_id": msg.get("Message-ID") or "",
+            }
+            body = body_to_text(msg)
+            # UNSEEN → unread/; --all with already-seen still lands in unread for Pixie
+            # unless it was previously moved to read/trash (skipped via known_uids)
+            path = write_mail_file(UNREAD, meta, body)
+            written.append(path)
+            already.add(uid)
+            eprint(f"  saved {path.name}")
+        print(f"synced {len(written)} message(s) → {UNREAD}" + (f" (skipped {skipped} already stored)" if skipped else ""))
+        for p in written:
+            print(f"  {p.name}")
+        if not written and not args.all:
+            local_n = len(list(UNREAD.glob("*.txt")))
+            if local_n:
+                print(f"(server has no new UNSEEN; {local_n} still in local unread/)")
+            else:
+                print("(no UNSEEN on server and local unread/ is empty — try: pixie-mail sync --all)")
+        return 0
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    folder = {"unread": UNREAD, "read": READ, "trash": TRASH}[args.box]
+    files = sorted(folder.glob("*.txt"))
+    if not files:
+        print(f"(no messages in {args.box})")
+        return 0
+    for p in files:
+        m = parse_mail_file(p)
+        print(
+            f"{p.name}\tuid={m.get('uid','?')}\t"
+            f"from={m.get('from','')[:40]}\t"
+            f"subject={m.get('subject','')[:50]}"
+        )
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    path = Path(args.file)
+    if not path.is_file():
+        # try unread/
+        cand = UNREAD / args.file
+        path = cand if cand.is_file() else path
+    if not path.is_file():
+        eprint(f"not found: {args.file}")
+        return 1
+    print(path.read_text(encoding="utf-8", errors="replace"))
+    return 0
+
+
+def cmd_unread_bundle(args: argparse.Namespace) -> int:
+    """Print all unread messages as a compact digest (for Pixie summaries)."""
+    ensure_dirs()
+    files = sorted(UNREAD.glob("*.txt"))
+    if not files:
+        print("(no unread messages on disk — run sync first)")
+        return 0
+    snippet_n = max(80, min(int(args.snippet or 280), 1200))
+    max_msgs = max(1, min(int(args.limit or 20), 50))
+    files = files[:max_msgs]
+    parts = [f"UNREAD DIGEST — {len(files)} message(s) (use filename for mail_move)\n"]
+    for i, p in enumerate(files, 1):
+        m = parse_mail_file(p)
+        body = re.sub(r"\s+", " ", (m.get("body") or "")).strip()
+        if len(body) > snippet_n:
+            body = body[:snippet_n] + "…"
+        parts.append(
+            f"{i}. file={p.name}\n"
+            f"   From: {m.get('from', '')}\n"
+            f"   Date: {m.get('date', '')}\n"
+            f"   Subject: {m.get('subject', '')}\n"
+            f"   Snippet: {body}\n"
+        )
+    print("\n".join(parts))
+    return 0
+
+
+def imap_mark_and_move(acc: dict, uid: str, action: str) -> str:
+    """action: read | trash"""
+    M = connect(acc)
+    try:
+        folder = acc["folder"]
+        M.select(folder)
+        # search by UID
+        typ, data = M.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+        if action == "read":
+            return f"uid {uid} marked Seen on server"
+        if action == "trash":
+            # try common trash names
+            for trash in ("Trash", "INBOX.Trash", "Deleted", "INBOX.Deleted Messages"):
+                try:
+                    typ, _ = M.uid("COPY", uid, trash)
+                    if typ == "OK":
+                        M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+                        M.expunge()
+                        return f"uid {uid} moved to {trash}"
+                except Exception:
+                    continue
+            # fallback: just delete
+            M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            M.expunge()
+            return f"uid {uid} deleted (no Trash folder found)"
+        return f"unknown action {action}"
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+def cmd_move(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    dest = args.dest  # read | trash
+    targets = args.files
+    if args.all:
+        targets = [p.name for p in UNREAD.glob("*.txt")]
+    if not targets:
+        print("nothing to move")
+        return 0
+    acc = parse_aerc_account(args.account)
+    dest_dir = READ if dest == "read" else TRASH
+    for name in targets:
+        path = Path(name)
+        if not path.is_file():
+            path = UNREAD / name
+        if not path.is_file():
+            eprint(f"skip missing {name}")
+            continue
+        meta = parse_mail_file(path)
+        uid = meta.get("uid", "")
+        server_msg = ""
+        if uid and not args.local_only:
+            try:
+                server_msg = imap_mark_and_move(acc, uid, dest)
+            except Exception as e:
+                server_msg = f"server error: {e}"
+        new_path = dest_dir / path.name
+        path.replace(new_path)
+        print(f"moved {path.name} → {dest}/  ({server_msg})")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Pixie mail sync for aerc IMAP")
+    ap.add_argument("--account", default=None, help="aerc account section name")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("sync", help="download UNSEEN mail to unread/*.txt")
+    p.add_argument("--folder", default=None)
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="fetch recent messages even if already Seen (skip UIDs already on disk)",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=30,
+        help="with --all, max newest messages (default 30)",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="re-download even if UID already stored locally",
+    )
+    p.set_defaults(func=cmd_sync)
+
+    p = sub.add_parser("list", help="list local mail files")
+    p.add_argument("box", nargs="?", default="unread", choices=["unread", "read", "trash"])
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("show", help="print one mail file")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("bundle", help="compact unread digest for summarization")
+    p.add_argument("--snippet", type=int, default=280, help="body snippet chars (default 280)")
+    p.add_argument("--limit", type=int, default=20, help="max messages in digest (default 20)")
+    p.set_defaults(func=cmd_unread_bundle)
+
+    p = sub.add_parser("move", help="move local files + update IMAP")
+    p.add_argument("dest", choices=["read", "trash"])
+    p.add_argument("files", nargs="*")
+    p.add_argument("--all", action="store_true", help="all unread")
+    p.add_argument("--local-only", action="store_true")
+    p.set_defaults(func=cmd_move)
+
+    args = ap.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

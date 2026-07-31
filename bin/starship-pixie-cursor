@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Static second-line cursor for the pink Pixie prompt."""
+from __future__ import annotations
+
+import os
+
+PINK = "\033[38;5;175m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+
+def main() -> None:
+    tip = ">"
+    if os.environ.get("NO_COLOR", "").strip():
+        print(tip, end="")
+    else:
+        print(f"{BOLD}{PINK}{tip}{RESET}", end="")
+
+
+if __name__ == "__main__":
+    main()

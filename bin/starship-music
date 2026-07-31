@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Now-playing for starship — always prints; color embedded (Playing vs idle)."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+SOCK = os.environ.get("XDG_RUNTIME_DIR", "/tmp") + "/mpv-music.sock"
+# Palette truecolor (256 blush washed out to near-white on many terminals)
+# dark_pink #c44d7a — distinct from idle pink #e879a0
+MUSIC = "\033[38;2;196;77;122m"
+BOLD = "\033[1m"
+SILVER_DIM = "\033[38;5;245m"
+RESET = "\033[0m"
+
+# Only notes most fonts render (♩ often becomes "?" in terminals)
+NOTE_FRAMES = "♪♫♬"
+
+
+def mpv(cmd: list) -> object | None:
+    if not os.path.exists(SOCK):
+        return None
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.25)
+        s.connect(SOCK)
+        s.sendall((json.dumps({"command": cmd}) + "\n").encode())
+        data = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        s.close()
+        obj = json.loads(data.decode(errors="replace").split("\n", 1)[0])
+        if obj.get("error") not in (None, "success"):
+            return None
+        return obj.get("data")
+    except Exception:
+        return None
+
+
+def play_label(base: str) -> tuple[str, str]:
+    base = re.sub(r"\.(wav|mp3|flac|ogg|m4a)$", "", base, flags=re.I)
+    m = re.search(r"([0-9]{2})\s+(.+?)\s+-\s+(.+)$", base)
+    if m:
+        return m.group(2).strip(), m.group(3).strip()
+    if " - " in base:
+        a, t = base.rsplit(" - ", 1)
+        return a.strip(), t.strip()
+    return "Unknown", base or "Unknown"
+
+
+def volume_pct() -> str:
+    try:
+        out = subprocess.check_output(
+            ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+            text=True,
+            timeout=0.4,
+        )
+        m = re.search(r"([0-9.]+)", out)
+        if m:
+            return str(int(round(float(m.group(1)) * 100)))
+    except Exception:
+        pass
+    return "?"
+
+
+def music_note() -> str:
+    """♪/♫ glyph synced to pixie spin.frame (ticks with prompt redraw)."""
+    i = 0
+    try:
+        raw = (Path.home() / ".cache" / "pixie" / "spin.frame").read_text(
+            encoding="utf-8"
+        ).strip()
+        i = int(raw or "0")
+    except (OSError, ValueError):
+        i = 0
+    return NOTE_FRAMES[i % len(NOTE_FRAMES)]
+
+
+def main() -> int:
+    note = music_note()
+    path = mpv(["get_property", "filename/no-ext"])
+    if path is None:
+        sys.stdout.write(f"{SILVER_DIM}{note} Not playing{RESET}")
+        return 0
+    path = str(path)
+    artist = mpv(["get_property", "metadata/by-key/artist"])
+    title = mpv(["get_property", "metadata/by-key/title"])
+    if isinstance(artist, str) and isinstance(title, str) and artist and title:
+        a, t = artist, title
+    else:
+        a, t = play_label(path)
+    if len(a) > 22:
+        a = a[:21] + "…"
+    if len(t) > 26:
+        t = t[:25] + "…"
+    vol = volume_pct()
+    sys.stdout.write(f"{BOLD}{MUSIC}{note} Playing: {a} - {t} at {vol}%{RESET}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

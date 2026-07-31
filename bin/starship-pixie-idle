@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Pixie idle mood for the prompt (path-aware, no spinner glyphs).
+
+Mix of pure Pixie chatter, system tips, thoughts, and occasional lines that
+mention the current folder (basename only). Color-coded pink theme.
+
+While a *live* Pixie agent holds a busy lock, shows a short "thinking" line.
+"""
+from __future__ import annotations
+
+import os
+import random
+import time
+from pathlib import Path
+
+# 256-color (matches pink system palette)
+PINK = "\033[38;5;175m"
+DARK_PINK = "\033[38;5;168m"
+PINK_DIM = "\033[38;5;132m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+CACHE = Path.home() / ".cache" / "pixie"
+SPIN_FILE = CACHE / "spin.frame"  # still advanced for music ♪♫♬
+MSG_FILE = CACHE / "idle.msg"
+MSG_TS_FILE = CACHE / "idle.msg.ts"
+
+# Pure mood / thoughts / tips — no directory
+IDLE_FREE = (
+    "Pixie is waiting for you…",
+    "Pixie taps her foot patiently…",
+    "Pixie is humming until you type something…",
+    "Pixie has tea ready when you are…",
+    "Pixie is daydreaming in the prompt…",
+    "Pixie left a sticky note: 'your turn'…",
+    "Pixie is polishing the cursor for you…",
+    "Pixie is watching the prompt sparkle…",
+    "Pixie won't rush you (much)…",
+    "Pixie is practicing patience magic…",
+    "Pixie is counting the seconds kindly…",
+    "Pixie is ready when you are…",
+    "Pixie folded her wings. Your move…",
+    "Pixie is browsing the void. Call her anytime…",
+    "Pixie saved you a seat at the prompt…",
+    "Pixie is braiding idle loops…",
+    "Pixie is feeding crumbs to the CPU pigeons…",
+    "Pixie is napping with one eye open…",
+    "Pixie is sketching your next command…",
+    "Pixie is keeping the fey channel open…",
+    "Pixie thinks a stretch might help…",
+    "Pixie wonders what you'll invent next…",
+    "Pixie is listening to the machine spirits…",
+    "Pixie sorted wishes by priority…",
+    "Pixie is bribing the scheduler with cookies…",
+    "Hold still — the prompt is warm…",
+    "Soft moonlight on the terminal…",
+    "Sparkles idle in the air…",
+    # system tips
+    "Tip: type cmds for your tool list",
+    "Tip: pixie \"…\" talks to your agent",
+    "Tip: duck <words> for private search",
+    "Tip: up re-shows the last Pixie reply",
+    "Tip: tick off if you want a still screen",
+    "Tip: mail opens aerc; pixie checks unread",
+    "Tip: volume 30 sets output level",
+    "Tip: next / prev skips tracks",
+    "Tip: pixie verbose on shows tool rounds",
+    "Tip: router status checks the gateway",
+)
+
+# Lines that weave in the folder name ({path} = Downloads, Music, ~, …)
+IDLE_AT = (
+    "Pixie lounges in {path}",
+    "Pixie is waiting in {path}",
+    "Pixie nestles in {path}",
+    "Pixie daydreams in {path}",
+    "Pixie left tea in {path}",
+    "Pixie is humming in {path}",
+    "Pixie keeps watch in {path}",
+    "Pixie polished {path} for you",
+    "Pixie folded her wings in {path}",
+    "Pixie is sketching in {path}",
+    "Pixie napping near {path}",
+    "Pixie braids idle loops in {path}",
+    "Pixie saved your seat in {path}",
+    "Pixie is browsing {path}",
+    "Pixie left a note in {path}",
+    "Currently nestled in {path}",
+    "Moonlight on {path}",
+    "Soft boots in {path}",
+    "Your turn — still in {path}",
+    "Prompt warm in {path}",
+    "Pixie thinks {path} looks tidy enough…",
+    "A breeze through {path}…",
+    "Pixie mapped a tiny path around {path}",
+)
+
+
+def _use_color() -> bool:
+    if os.environ.get("NO_COLOR", "").strip():
+        return False
+    return True
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def pixie_busy() -> bool:
+    """True only if a live Pixie process holds a busy lock; purges stale locks."""
+    d = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    busy = False
+    try:
+        for p in d.glob("pixie-busy.*"):
+            if not p.is_file():
+                continue
+            try:
+                pid = int(p.name.rsplit(".", 1)[-1])
+            except ValueError:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+                continue
+            if _pid_alive(pid):
+                busy = True
+            else:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return busy
+
+
+def shell_cwd() -> Path:
+    home = Path.home().resolve()
+    for raw in (os.environ.get("PWD"), None):
+        if not raw:
+            continue
+        try:
+            p = Path(raw).expanduser().resolve()
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
+    try:
+        p = Path.cwd().resolve()
+        if p.is_dir():
+            return p
+    except OSError:
+        pass
+    return home
+
+
+def pretty_path(p: Path, max_len: int = 24) -> str:
+    """Folder basename only (Downloads, Music, ~)."""
+    home = Path.home().resolve()
+    try:
+        p = p.resolve()
+    except OSError:
+        p = Path(str(p))
+    if p == home:
+        s = "~"
+    else:
+        s = p.name or p.as_posix()
+    if len(s) > max_len:
+        s = s[: max_len - 1] + "…"
+    return s
+
+
+def bump_spin() -> None:
+    """Advance shared spin counter (music notes use this; not shown here)."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    i = 0
+    try:
+        i = int(SPIN_FILE.read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        i = 0
+    try:
+        SPIN_FILE.write_text(str((i + 1) % 64), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def pick_message(path_s: str) -> str:
+    """Fresh random line on every prompt (Enter) and every tick redraw.
+
+    Avoids immediate repeat of the previous message when possible.
+    """
+    CACHE.mkdir(parents=True, exist_ok=True)
+    prev = ""
+    try:
+        prev = MSG_FILE.read_text(encoding="utf-8").rstrip("\n")
+    except OSError:
+        pass
+
+    msg = prev
+    for _ in range(8):
+        # ~45% place-aware, ~55% free (mood / tip / thought)
+        if random.random() < 0.45:
+            cand = random.choice(IDLE_AT).format(path=path_s)
+        else:
+            cand = random.choice(IDLE_FREE)
+        if cand != prev:
+            msg = cand
+            break
+        msg = cand
+
+    if len(msg) > 56:
+        msg = msg[:55] + "…"
+    try:
+        MSG_FILE.write_text(msg, encoding="utf-8")
+        MSG_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+        (CACHE / "idle.path").write_text(path_s, encoding="utf-8")
+    except OSError:
+        pass
+    return msg
+
+
+def paint(msg: str) -> str:
+    if not _use_color():
+        return msg
+    return f"{BOLD}{PINK}{msg}{RESET}"
+
+
+def main() -> None:
+    bump_spin()
+    if pixie_busy():
+        msg = "Pixie is thinking…"
+        if _use_color():
+            print(f"{BOLD}{DARK_PINK}{msg}{RESET}", end="")
+        else:
+            print(msg, end="")
+        return
+
+    path_s = pretty_path(shell_cwd())
+    msg = pick_message(path_s)
+    print(paint(msg), end="")
+
+
+if __name__ == "__main__":
+    main()

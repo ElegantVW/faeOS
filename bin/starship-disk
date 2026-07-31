@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Root filesystem use % for starship (+ fill glyph)
+pct=$(df -P / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+if [[ -z $pct ]]; then
+  echo "HDD ?"
+  exit 0
+fi
+bars=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+idx=$(( pct * 7 / 100 ))
+(( idx > 7 )) && idx=7
+(( idx < 0 )) && idx=0
+echo "HDD ${bars[idx]} ${pct}%"

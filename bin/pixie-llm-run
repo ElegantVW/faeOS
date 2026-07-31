@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Foreground launcher for systemd (does not daemonize) — offline llama.cpp only
+set -euo pipefail
+export PATH="$HOME/bin:$PATH"
+MODEL="${PIXIE_LLM_MODEL:-$HOME/.local/share/pixie/models/mistral-7b-instruct.gguf}"
+HOST="${PIXIE_LLM_HOST:-127.0.0.1}"
+PORT="${PIXIE_LLM_PORT:-8080}"
+CTX="${PIXIE_LLM_CTX:-2048}"
+THREADS="${PIXIE_LLM_THREADS:-$(nproc 2>/dev/null || echo 4)}"
+NGL="${PIXIE_LLM_NGL:-0}"
+ALIAS="${PIXIE_LLM_ALIAS:-mistral}"
+LIB="$HOME/.local/lib/pixie"
+export LD_LIBRARY_PATH="$LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+if [[ -n "${PIXIE_LLAMA_SERVER:-}" && -x "${PIXIE_LLAMA_SERVER}" ]]; then
+  SRV="$PIXIE_LLAMA_SERVER"
+elif [[ -x "$HOME/bin/llama-server" ]]; then
+  SRV="$HOME/bin/llama-server"
+elif [[ -x "$LIB/llama-server" ]]; then
+  SRV="$LIB/llama-server"
+elif command -v llama-server >/dev/null 2>&1; then
+  SRV=$(command -v llama-server)
+else
+  echo "llama-server not found" >&2
+  exit 1
+fi
+[[ -e "$MODEL" ]] || { echo "model missing: $MODEL" >&2; exit 1; }
+exec "$SRV" -m "$MODEL" --host "$HOST" --port "$PORT" -c "$CTX" -t "$THREADS" -ngl "$NGL" --alias "$ALIAS" --jinja
