@@ -1,0 +1,958 @@
+#!/usr/bin/env python3
+import sys
+import os
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ.setdefault("PIXIE_UNICODE", "1")
+import pixie_termart as art
+import siren_player as player
+import siren_waves as waves
+
+P = art.P
+
+AUDIO_EXT = player.AUDIO_EXT
+
+class FileBrowser:
+    """File/directory browser for music library."""
+    def __init__(self, root: str = None):
+        self.root = Path(os.path.expanduser(root or "~/Music")).resolve()
+        self.current_dir = self.root
+        self.selected_idx = 0
+        self.filter = ""
+        self.entries: list[dict] = []  # each: {"name": str, "path": Path, "is_dir": bool, "display": str}
+        self._refresh()
+
+    def _refresh(self):
+        """Scan current directory, apply filter, and build entries list."""
+        all_entries = []
+        try:
+            # Add parent directory entry if not at root
+            if self.current_dir != self.root:
+                all_entries.append({
+                    "name": "..",
+                    "path": self.current_dir.parent,
+                    "is_dir": True,
+                    "display": "▸  .."
+                })
+
+            # Get all entries
+            for entry in sorted(self.current_dir.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+                if entry.is_dir():
+                    all_entries.append({
+                        "name": entry.name,
+                        "path": entry,
+                        "is_dir": True,
+                        "display": f"▸  {entry.name}"
+                    })
+                elif entry.suffix.lower() in AUDIO_EXT:
+                    # Get metadata for display
+                    display = player._global_player.get_track_metadata(str(entry))
+                    all_entries.append({
+                        "name": entry.name,
+                        "path": entry,
+                        "is_dir": False,
+                        "display": f"·  {display}"
+                    })
+        except PermissionError:
+            pass
+
+        if self.filter:
+            f = self.filter.lower()
+            all_entries = [
+                e for e in all_entries
+                if f in e["name"].lower() or f in e["display"].lower()
+            ]
+
+        self.entries = all_entries
+
+        # Clamp selection
+        if self.entries:
+            self.selected_idx = max(0, min(self.selected_idx, len(self.entries) - 1))
+        else:
+            self.selected_idx = 0
+
+    def set_filter(self, text: str):
+        """Set the incremental filter for the current directory."""
+        if text == self.filter:
+            return
+        self.filter = text
+        self.selected_idx = 0
+        self._refresh()
+
+    def navigate_up(self):
+        if self.selected_idx > 0:
+            self.selected_idx -= 1
+
+    def navigate_down(self):
+        if self.entries and self.selected_idx < len(self.entries) - 1:
+            self.selected_idx += 1
+
+    def enter(self) -> str | None:
+        """Enter selected directory or return file path to play.
+        Returns: 'dir' if changed directory, 'file' if file selected, None if no action."""
+        if not self.entries:
+            return None
+        entry = self.entries[self.selected_idx]
+        if entry["is_dir"]:
+            self.current_dir = entry["path"].resolve()
+            self.selected_idx = 0
+            self._refresh()
+            return "dir"
+        else:
+            return str(entry["path"])
+
+    def go_up(self) -> bool:
+        """Go to parent directory."""
+        if self.current_dir != self.root:
+            self.current_dir = self.current_dir.parent
+            self.selected_idx = 0
+            self._refresh()
+            return True
+        return False
+
+    def get_selected(self) -> dict | None:
+        if self.entries and 0 <= self.selected_idx < len(self.entries):
+            return self.entries[self.selected_idx]
+        return None
+
+    def get_selected_path(self) -> str | None:
+        entry = self.get_selected()
+        return str(entry["path"]) if entry else None
+
+    def set_dir(self, path: str):
+        """Set browser to specific directory."""
+        p = Path(os.path.expanduser(path)).resolve()
+        if p.exists() and p.is_dir():
+            self.current_dir = p
+            self.selected_idx = 0
+            self._refresh()
+
+    def get_display_path(self) -> str:
+        """Get current path relative to root for display."""
+        try:
+            rel = self.current_dir.relative_to(self.root)
+            if str(rel) == ".":
+                return "~/Music"
+            return f"~/Music/{rel}"
+        except ValueError:
+            return str(self.current_dir)
+
+
+def _compact_width(lines, min_width=30):
+    max_len = max((len(l) for l in lines), default=20)
+    return max(min_width, min(max_len + 6, art.term_width()))
+
+
+def _pad_line(line: str, width: int) -> str:
+    return line + " " * max(0, width - art.vis_len(art.strip_ansi(line)))
+
+
+def build_header(track: str, status: str, pos: float, dur: float, vol: int, shuffle: bool, repeat: str, width: int) -> str:
+    if dur > 0:
+        pct = pos / dur
+        outer = max(36, min(width, 96))
+        bar_w = max(10, outer - 47)
+        filled = int(bar_w * pct)
+        bar = "█" * filled + "░" * (bar_w - filled)
+        pos_str = f"{int(pos//60)}:{int(pos%60):02d}"
+        dur_str = f"{int(dur//60)}:{int(dur%60):02d}"
+        prog = f" {bar}  {pos_str}/{dur_str} "
+    else:
+        prog = ""
+    status_icon = "▶" if status == "playing" else "⏸" if status == "paused" else "■"
+    shuffle_icon = "[RND]" if shuffle else "[SEQ]"
+    rep_icon = {"all": "[REP:ALL]", "track": "[REP:ONE]", "off": "[REP:OFF]"}[repeat]
+    line1 = f" {status_icon}  {track}"
+    line2 = f" vol: {vol}%  {shuffle_icon} {rep_icon}  {prog}"
+    return art.box([line1, line2], title=" Siren ✦", width=width, body_style=(P.SILVER,))
+
+
+def build_waves_panel(path: str, pos: float, playing: bool, paused: bool, volume: float, width: int, height: int) -> list[str]:
+    """Returns list of lines (no box) for the waves panel, bounded to `height` rows."""
+    body_w = max(20, width - 4)
+    panel_h = max(4, height - 2)
+    body = waves.build_waves_body(
+        bands=min(32, max(8, body_w // 3)),
+        height=panel_h,
+        body_w=body_w,
+        path=path,
+        pos=pos,
+        playing=playing,
+        paused=paused,
+        volume=volume,
+        color=True,
+    )
+    if len(body) > height:
+        body = body[:height]
+    return body
+
+
+def build_queue_panel(queue_items: list[dict], playing_index: int, width: int, height: int, focus: bool) -> list[str]:
+    """Returns list of lines for queue panel."""
+    panel_w = max(20, width - 4)
+    max_lines = max(4, height - 4)
+    
+    lines = []
+    title = "QUEUE"
+    if focus:
+        title = art.paint("► QUEUE ◄", P.BOLD, P.PINK)
+    else:
+        title = art.paint("  QUEUE  ", P.MUTED)
+    lines.append(title)
+    lines.append(art.paint("─" * panel_w, P.PINK_DIM))
+    
+    if not queue_items:
+        lines.append(art.paint("  (empty — 'a' to add from library)", P.DIM))
+    else:
+        # Calculate visible range
+        start = max(0, playing_index - max_lines // 2)
+        end = min(len(queue_items), start + max_lines - 3)
+        if end - start < max_lines - 3:
+            start = max(0, end - (max_lines - 3))
+        
+        for i in range(start, end):
+            item = queue_items[i]
+            display = item.get("display", "Unknown")
+            # Truncate to panel width
+            max_display_w = panel_w - 6
+            if art.vis_len(display) > max_display_w:
+                display = art.pad_vis(display, max_display_w)[:max_display_w - 3] + "..."
+            
+            if i == playing_index:
+                prefix = art.paint("▶ ", P.BOLD, P.PINK)
+                line = prefix + art.paint(display, P.BOLD, P.SILVER)
+            else:
+                prefix = "  "
+                line = prefix + art.paint(display, P.SILVER)
+            
+            # Add index
+            idx_str = f"{i+1:3d}."
+            line = art.paint(idx_str, P.PINK_DIM) + " " + line
+            
+            if focus and i == playing_index:
+                line = art.paint("►", P.PINK) + line[1:]
+            
+            lines.append(line)
+        
+        # Indicate more items
+        if len(queue_items) > end:
+            lines.append(art.paint(f"  … and {len(queue_items) - end} more", P.MUTED))
+        if start > 0:
+            lines.insert(1, art.paint(f"  {start} more above …", P.MUTED))
+    
+    return lines
+
+
+def build_browser_panel(browser: 'FileBrowser', width: int, height: int, focus: bool) -> list[str]:
+    """Returns list of lines for file browser panel."""
+    panel_w = max(20, width - 4)
+    max_lines = max(4, height - 4)
+    
+    lines = []
+    title = "BROWSER"
+    path_display = browser.get_display_path()
+    if browser.filter:
+        path_display += f"  [filter: {browser.filter}]"
+    max_path_w = max(10, panel_w - 16)
+    if art.vis_len(path_display) > max_path_w:
+        path_display = art.pad_vis(path_display, max_path_w)[: max_path_w - 3] + "..."
+    if focus:
+        title = art.paint(f"► BROWSER ◄  {path_display}", P.BOLD, P.PINK)
+    else:
+        title = art.paint(f"  BROWSER   {path_display}", P.MUTED)
+    lines.append(title)
+    lines.append(art.paint("─" * panel_w, P.PINK_DIM))
+    
+    if not browser.entries:
+        lines.append(art.paint("  (empty directory)", P.DIM))
+    else:
+        # Calculate visible range around selection
+        start = max(0, browser.selected_idx - max_lines // 2)
+        end = min(len(browser.entries), start + max_lines - 3)
+        if end - start < max_lines - 3:
+            start = max(0, end - (max_lines - 3))
+        
+        for i in range(start, end):
+            entry = browser.entries[i]
+            display = entry["display"]
+            # Truncate to panel width
+            max_display_w = panel_w - 4
+            if art.vis_len(display) > max_display_w:
+                display = art.pad_vis(display, max_display_w)[:max_display_w - 3] + "..."
+            
+            if i == browser.selected_idx:
+                prefix = art.paint("► ", P.BOLD, P.PINK)
+                line = prefix + art.paint(display, P.BOLD, P.SILVER)
+            else:
+                prefix = "  "
+                if entry["is_dir"]:
+                    line = prefix + art.paint(display, P.SILVER)
+                else:
+                    line = prefix + art.paint(display, P.MUTED)
+            
+            if focus and i == browser.selected_idx:
+                line = art.paint("►", P.PINK) + line[1:]
+            
+            lines.append(line)
+        
+        # Indicate more items
+        if len(browser.entries) > end:
+            lines.append(art.paint(f"  … and {len(browser.entries) - end} more", P.MUTED))
+        if start > 0:
+            lines.insert(1, art.paint(f"  {start} more above …", P.MUTED))
+    
+    return lines
+
+
+def _rune_row(*pairs: tuple[str, str]) -> str:
+    """'keys  label' hints joined with ' · ' for the runes footer."""
+    return " · ".join(f"{keys} {label}" for keys, label in pairs)
+
+
+def build_footer(width: int, focus_mode: int = 0) -> str:
+    if focus_mode == 0:
+        rows = [
+            _rune_row(("↑↓/jk", "browse"), ("o/enter/p/space", "open·play"), ("backspace", "up")),
+            _rune_row(("a", "add"), ("/", "filter"), ("S", "save"), ("L", "load&play")),
+            _rune_row(("g", "go to path"), ("Tab", "→ queue"), ("q", "quit")),
+        ]
+    elif focus_mode == 1:
+        rows = [
+            _rune_row(("↑↓/jk", "move"), ("enter/space", "play from here")),
+            _rune_row(("a", "add 10"), ("d", "remove"), ("c", "clear"), ("S", "save")),
+            _rune_row(("g", "go to path"), ("Tab", "→ EQ"), ("q", "quit")),
+        ]
+    else:
+        rows = [
+            _rune_row(("p/space", "play·pause"), ("n/b", "next/prev"), ("s", "shuffle"), ("r", "repeat")),
+            _rune_row(("+/-", "vol"), ("a", "add 10"), ("S", "save"), ("L", "load&play")),
+            _rune_row(("g", "go to path"), ("Tab", "→ browser"), ("q", "quit")),
+        ]
+    return art.box(rows, title="runes", width=width, body_style=(P.MUTED,))
+
+
+def build_missing_notification(removed: list[dict], playlist_name: str) -> str:
+    """Build themed notification box for missing files."""
+    if not removed:
+        return ""
+    lines = []
+    for r in removed:
+        item = r.get("item", {})
+        reason = r.get("reason", "Unknown")
+        fname = os.path.basename(item.get("path", "unknown"))
+        lines.append(f"File {fname} was removed from {playlist_name}")
+        lines.append(f"Reason was {reason}")
+    body = "\n".join(lines)
+    return art.box(body.splitlines(), title=" Siren ✦", width=60, body_style=(P.WARN,))
+
+
+def ui_loop() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        print(art.paint("siren needs a real TTY (not a pipe).", P.ERR), file=sys.stderr)
+        return 2
+    art.tui_begin(fd, "siren")
+
+    focus_mode = 0  # 0=Browser, 1=Queue, 2=EQ
+    notification = ""
+    notification_time = 0
+    browser = FileBrowser()
+    input_active = False
+    input_action = ""
+    input_prompt = ""
+    input_buf = ""
+
+    try:
+        while True:
+            alive = player.sock_alive()
+            paused = player.is_paused() if alive else False
+            status = "paused" if paused else ("playing" if alive else "idle")
+            track = player.now_label() or "— silence —"
+            path = ""
+            pos = 0.0
+            dur = 0.0
+            if alive:
+                pos, dur = player.time_pair()
+                path = player.get_prop("path") or ""
+                if path.startswith("file://"):
+                    path = path[7:]
+
+            vol = int(player.get_prop("volume", 75) or 75)
+            shuffle = bool(player.get_prop("shuffle", False))
+            repeat = player.get_repeat()
+            width = art.term_width()
+            height = art.term_height()
+
+            # Get queue state
+            queue_items = player.queue_list()
+            playing_idx = -1
+            if alive and queue_items:
+                # Find current playing in queue by path match
+                for i, item in enumerate(queue_items):
+                    if item.get("path") == path:
+                        playing_idx = i
+                        break
+
+            # Vertical layout: EQ on top, browser + queue below
+            body_h = max(12, height - 10)
+            eq_h = max(6, int(body_h * 0.35))
+            bottom_h = body_h - eq_h
+
+            browser_w = max(20, int(width * 0.6))
+            queue_w = max(20, width - browser_w - 2)
+            if browser_w + queue_w + 2 > width:
+                browser_w = width - queue_w - 2
+            header_w = width
+
+            # Validate queue periodically (every ~5 seconds via frame count)
+            # Check for missing files
+            if not hasattr(ui_loop, "_validate_counter"):
+                ui_loop._validate_counter = 0
+            ui_loop._validate_counter += 1
+            if ui_loop._validate_counter >= 100:  # ~5 seconds at 20fps
+                ui_loop._validate_counter = 0
+                removed = player.queue_validate()
+                if removed:
+                    notification = build_missing_notification(removed, "queue")
+                    notification_time = time.time()
+
+            # Build panels
+            header = build_header(track, status, pos, dur, vol, shuffle, repeat, header_w)
+            waves_lines = build_waves_panel(path, pos, alive, paused, vol / 100.0, header_w, eq_h)
+            browser_lines = build_browser_panel(browser, browser_w, bottom_h, focus_mode == 0)
+            queue_lines = build_queue_panel(queue_items, playing_idx, queue_w, bottom_h, focus_mode == 1)
+            footer = build_footer(width, focus_mode)
+
+            # Assemble bottom row: browser | queue
+            max_h = max(len(browser_lines), len(queue_lines))
+            browser_lines += [""] * (max_h - len(browser_lines))
+            queue_lines += [""] * (max_h - len(queue_lines))
+            bottom_lines = []
+            for i in range(max_h):
+                bottom_lines.append(_pad_line(browser_lines[i], browser_w) + "  " + _pad_line(queue_lines[i], queue_w))
+            bottom = "\n".join(bottom_lines)
+
+            body = "\n".join(waves_lines + [""] + [bottom])
+
+            # Build full frame
+            frame_parts = [header, "", body, "", footer]
+            if input_active:
+                shown = "  " + input_prompt + input_buf + "▌"
+                if art.vis_len(shown) > width:
+                    shown = shown[: width - 1]
+                prompt_line = art.paint(shown, P.BOLD, P.PINK)
+                frame_parts.insert(-1, prompt_line)
+            if notification and (time.time() - notification_time) < 4:
+                frame_parts.insert(2, "\n" + notification)
+            elif notification and (time.time() - notification_time) >= 4:
+                notification = ""
+
+            frame = "\n".join(frame_parts)
+
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                art.tty_write(fd, art.clear_screen() + frame + "\n")
+
+            key = art.tui_read_key(fd, timeout=0.05)
+
+            if input_active:
+                if key == "esc":
+                    if input_action == "filter":
+                        browser.set_filter("")
+                    input_active = False
+                    input_action = ""
+                    input_prompt = ""
+                    input_buf = ""
+                elif key == "backspace":
+                    input_buf = input_buf[:-1]
+                elif key == "space":
+                    input_buf += " "
+                elif key == "enter":
+                    action = input_action
+                    buf = input_buf.strip()
+                    input_active = False
+                    input_action = ""
+                    input_prompt = ""
+                    input_buf = ""
+                    if action == "save":
+                        name = buf or "playlist"
+                        count = len(player.queue_list())
+                        if player.save_playlist_json(name, player.queue_list()):
+                            notification = art.box([f"Saved playlist: {name} ({count} tracks)"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                        else:
+                            notification = art.box([f"Failed to save: {name}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                        notification_time = time.time()
+                    elif action == "load":
+                        name = buf
+                        if player.play_playlist(name):
+                            notification = art.box([f"Playing playlist: {name}"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                        elif name and name in player.list_playlists_json():
+                            notification = art.box([f"Playlist '{name}' has no playable tracks"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                        else:
+                            notification = art.box([f"No playlist: {name}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                        notification_time = time.time()
+                    elif action == "open":
+                        dir_input = buf or str(Path.home() / "Music")
+                        target = Path(dir_input).expanduser().resolve()
+                        if target.is_dir():
+                            browser.set_dir(str(target))
+                            focus_mode = 0
+                            notification = art.box([f"Open: {browser.get_display_path()}"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                        else:
+                            notification = art.box([f"Not a directory: {dir_input}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                        notification_time = time.time()
+                    # action == "filter": filter stays applied, just exit input
+                elif key == "ctrl-c":
+                    return 0
+                elif len(key) == 1:
+                    input_buf += key
+                if input_active and input_action == "filter":
+                    browser.set_filter(input_buf.strip())
+                continue
+
+            if key in ("q", "esc", "ctrl-c", "Q"):
+                return 0
+
+            # Global: open selected / save playlist / load playlist / go to path / filter
+            if key == "o":
+                focus_mode = 0
+                res = browser.enter()
+                if res and res != "dir":
+                    player.queue_add_and_play(res)
+                    time.sleep(0.1)
+                continue
+            elif key == "S":
+                input_active = True
+                input_action = "save"
+                input_prompt = "save queue as:"
+                input_buf = ""
+                continue
+            elif key == "L":
+                names = player.list_playlists_json()
+                hint = ", ".join(names) if names else "(none)"
+                input_active = True
+                input_action = "load"
+                input_prompt = f"load & play ({hint}):"
+                input_buf = ""
+                continue
+            elif key == "g":
+                input_active = True
+                input_action = "open"
+                input_prompt = "go to directory:"
+                input_buf = ""
+                continue
+            elif key == "/":
+                focus_mode = 0
+                input_active = True
+                input_action = "filter"
+                input_prompt = "filter:"
+                input_buf = browser.filter
+                continue
+
+            # Tab cycles focus: Browser -> Queue -> EQ
+            if key == "tab":
+                focus_mode = (focus_mode + 1) % 3
+                continue
+
+            if focus_mode == 0:
+                # File browser focused
+                if key in ("up", "k"):
+                    browser.navigate_up()
+                elif key in ("down", "j"):
+                    browser.navigate_down()
+                elif key in ("enter", "p", " "):
+                    res = browser.enter()
+                    if res and res != "dir":
+                        player.queue_add_and_play(res)
+                        time.sleep(0.1)
+                elif key == "backspace":
+                    browser.go_up()
+                elif key == "a":
+                    entry = browser.get_selected()
+                    if entry:
+                        count = 0
+                        if entry["is_dir"]:
+                            for f in sorted(entry["path"].iterdir()):
+                                if f.is_file() and f.suffix.lower() in AUDIO_EXT:
+                                    player.queue_add(str(f))
+                                    count += 1
+                        else:
+                            player.queue_add(str(entry["path"]))
+                            count = 1
+                        if count:
+                            notification = art.box(
+                                [f"Added {count} track(s) to queue"],
+                                title=" Siren ✦", width=50, body_style=(P.OK,)
+                            )
+                            notification_time = time.time()
+            elif focus_mode == 1:
+                # Queue panel focused
+                if key in ("up", "k"):
+                    if queue_items and playing_idx > 0:
+                        player.queue_move(playing_idx, playing_idx - 1)
+                elif key in ("down", "j"):
+                    if queue_items and playing_idx < len(queue_items) - 1:
+                        player.queue_move(playing_idx, playing_idx + 1)
+                elif key in ("enter", " "):
+                    if queue_items and 0 <= playing_idx < len(queue_items):
+                        player.play_queue_from(playing_idx)
+                        time.sleep(0.1)
+                elif key == "a":
+                    # Add from library - search and add
+                    lib = player.scan_library()
+                    if lib:
+                        files = [str(p) for p in lib]
+                        import random
+                        random.shuffle(files)
+                        # Add first 10 matches
+                        for f in files[:10]:
+                            player.queue_add(f)
+                elif key == "d":
+                    if queue_items and 0 <= playing_idx < len(queue_items):
+                        removed = player.queue_remove(playing_idx)
+                        if removed:
+                            notification = art.box(
+                                [f"Removed: {removed.get('display', 'track')}"],
+                                title=" Siren ✦", width=50, body_style=(P.OK,)
+                            )
+                            notification_time = time.time()
+                elif key == "c":
+                    player.queue_clear()
+                    notification = art.box(["Queue cleared"], title=" Siren ✦", width=30, body_style=(P.OK,))
+                    notification_time = time.time()
+            else:
+                # EQ panel focused
+                if key in ("p", "enter", " "):
+                    if alive:
+                        player.cmd_pause()
+                    else:
+                        lib = player.scan_library()
+                        if lib:
+                            files = [str(p) for p in lib]
+                            import random
+                            random.shuffle(files)
+                            player.start_playlist(files, shuffle=False)
+                    time.sleep(0.1)
+                elif key == "n":
+                    if alive:
+                        player.cmd_next()
+                        time.sleep(0.1)
+                elif key == "b":
+                    if alive:
+                        player.cmd_prev()
+                        time.sleep(0.1)
+                elif key in ("+", "="):
+                    if alive:
+                        new_vol = min(150, vol + 5)
+                        player._global_player._send_mpv_command(["set_property", "volume", new_vol])
+                elif key == "-":
+                    if alive:
+                        new_vol = max(0, vol - 5)
+                        player._global_player._send_mpv_command(["set_property", "volume", new_vol])
+                elif key in ("s",):
+                    if alive:
+                        player._global_player._send_mpv_command(["cycle", "shuffle"])
+                elif key == "r":
+                    if alive:
+                        player.cycle_repeat()
+                elif key == "a":
+                    # Add current/selected to queue (in EQ mode, add shuffled library)
+                    lib = player.scan_library()
+                    if lib:
+                        files = [str(p) for p in lib]
+                        import random
+                        random.shuffle(files)
+                        for f in files[:10]:
+                            player.queue_add(f)
+                        notification = art.box([f"Added {min(10, len(files))} tracks to queue"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                        notification_time = time.time()
+
+    finally:
+        art.tui_cleanup()
+
+
+def cmd_queue_add(query: str, prepend: bool = False) -> int:
+    """Add tracks matching query to queue."""
+    files = player.resolve_play_args(query.split())
+    if not files:
+        print("No tracks found matching query.")
+        return 1
+    for f in files:
+        player.queue_add(f, prepend=prepend)
+    action = "Prepended" if prepend else "Added"
+    print(f"{action} {len(files)} track(s) to queue.")
+    return 0
+
+
+def cmd_queue_list() -> int:
+    items = player.queue_list()
+    if not items:
+        print("(queue empty)")
+        return 0
+    for i, item in enumerate(items):
+        mark = "▶" if i == 0 else " "
+        print(f"  {mark} {i+1:3d}. {item.get('display', 'Unknown')}")
+    return 0
+
+
+def cmd_queue_clear() -> int:
+    player.queue_clear()
+    print("Queue cleared.")
+    return 0
+
+
+def cmd_queue_play() -> int:
+    items = player.queue_list()
+    if not items:
+        print("Queue empty.")
+        return 1
+    # Validate first
+    removed = player.queue_validate()
+    if removed:
+        for r in removed:
+            item = r.get("item", {})
+            print(f"Removed missing: {os.path.basename(item.get('path', '?'))}")
+    items = player.queue_list()
+    if not items:
+        print("Queue empty after validation.")
+        return 1
+    return 0 if player.play_queue_from(0) else 1
+
+
+def cmd_queue_next() -> int:
+    items = player.queue_list()
+    if not items:
+        print("Queue empty.")
+        return 1
+    cur = player.get_prop("path") or ""
+    if cur.startswith("file://"):
+        cur = cur[7:]
+    idx = next((i for i, it in enumerate(items) if it.get("path") == cur), -1)
+    if idx < 0:
+        return 0 if player.play_queue_from(0) else 1
+    return 0 if player.play_queue_from((idx + 1) % len(items), wrap=True) else 1
+
+
+def cmd_playlist_save(name: str) -> int:
+    if player.save_playlist_json(name, player.queue_list()):
+        print(f"Saved playlist: {name}")
+        return 0
+    print("Failed to save playlist.")
+    return 1
+
+
+def cmd_playlist_load(name: str) -> int:
+    if player.play_playlist(name):
+        print(f"Playing playlist: {name}")
+        return 0
+    print(f"Playlist not found: {name}")
+    return 1
+
+
+def cmd_playlist_list() -> int:
+    playlists = player.list_playlists_json()
+    if not playlists:
+        print("(no saved playlists)")
+        return 0
+    for p in playlists:
+        print(f"  {p}")
+    return 0
+
+
+def cmd_playlist_remove(name: str) -> int:
+    if player.delete_playlist(name):
+        print(f"Deleted playlist: {name}")
+        return 0
+    print(f"Playlist not found: {name}")
+    return 1
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        return ui_loop()
+
+    cmd = argv[0].lower()
+    rest = argv[1:]
+
+    if cmd == "trove":
+        import ia
+        rest = argv[1:]
+        sub = (rest[0].lower() if rest else "")
+        if sub in ("get", "g"):
+            return ia.run_get(" ".join(rest[1:]))
+        if sub in ("about", "help", "-h", "--help"):
+            print()
+            print(art.box(
+                [
+                    "siren trove — free & legal media (Internet Archive)",
+                    "",
+                    "  siren trove 10 music lofi      search + pick",
+                    "  siren trove podcast history     kind + terms",
+                    "  siren trove get <identifier>    download one item",
+                    "  siren trove about",
+                    "",
+                    "downloads land in ~/Music/trove and ~/Videos/trove",
+                ],
+                title=" Siren ✦",
+                width=_compact_width([], min_width=60),
+            ))
+            print()
+            return 0
+        n = 10
+        kind = None
+        words = list(rest)
+        if words and words[0].isdigit():
+            n = int(words.pop(0))
+        return ia.run_trove(n=n, terms=words, kind=kind)
+
+    if cmd in ("play", "play-music"):
+        rest = argv[1:]
+        if not rest and player.sock_alive() and player.get_playlist_count() > 0:
+            player._global_player._send_mpv_command(["set_property", "pause", False])
+            if not player.now_label():
+                player._global_player._send_mpv_command(["playlist-play-index", 0])
+            import time; time.sleep(0.15)
+            msg = f"Playing: {player.now_label()}" if player.now_label() else "Playback resumed"
+            print()
+            print(art.box([msg], title=" Siren ✦", width=_compact_width([msg])))
+            print()
+            return 0
+
+        files = player.resolve_play_args(rest)
+        return player.start_playlist(files, shuffle=False)
+    elif cmd in ("pause", "toggle"):
+        player.cmd_pause()
+        print()
+        print(art.box(["Playback paused / resumed"], title=" Siren ✦", width=_compact_width(["Playback paused / resumed"])))
+        print()
+        return 0
+    elif cmd == "stop":
+        player.cmd_stop()
+        print()
+        print(art.box(["Playback stopped"], title=" Siren ✦", width=_compact_width(["Playback stopped"])))
+        print()
+        return 0
+    elif cmd in ("next", "nex"):
+        player.cmd_next()
+        import time; time.sleep(0.15)
+        msg = f"Next: {player.now_label()}"
+        print()
+        print(art.box([msg], title=" Siren ✦", width=_compact_width([msg])))
+        print()
+        return 0
+    elif cmd == "prev":
+        player.cmd_prev()
+        import time; time.sleep(0.15)
+        msg = f"Previous: {player.now_label()}"
+        print()
+        print(art.box([msg], title=" Siren ✦", width=_compact_width([msg])))
+        print()
+        return 0
+    elif cmd == "cove":
+        msg = f"Siren Cove Directory:\nMusic"
+        print()
+        print(art.box([msg], title=" Siren Cove ✦", width=_compact_width([msg])))
+        print()
+        return 0
+    elif cmd == "random":
+        lib = player.scan_library()
+        if not lib:
+            print("No tracks found in library.")
+            return 1
+        files = [str(p) for p in lib]
+        return player.start_playlist(files, shuffle=True)
+    
+    # ===== QUEUE COMMANDS =====
+    elif cmd == "queue":
+        sub = (rest[0].lower() if rest else "")
+        if sub in ("add", "a"):
+            query = " ".join(rest[1:]) if len(rest) > 1 else ""
+            prepend = "--next" in rest or "-n" in rest
+            return cmd_queue_add(query, prepend)
+        elif sub in ("list", "l", "ls"):
+            return cmd_queue_list()
+        elif sub in ("clear", "c"):
+            return cmd_queue_clear()
+        elif sub in ("play", "p"):
+            return cmd_queue_play()
+        elif sub in ("next", "n"):
+            return cmd_queue_next()
+        elif sub in ("remove", "rm", "del", "d"):
+            if len(rest) > 1 and rest[1].isdigit():
+                idx = int(rest[1]) - 1
+                removed = player.queue_remove(idx)
+                if removed:
+                    print(f"Removed: {removed.get('display', 'track')}")
+                else:
+                    print("Invalid index.")
+                return 0
+            print("Usage: siren queue remove <index>")
+            return 1
+        elif sub in ("move", "mv"):
+            if len(rest) >= 3 and rest[1].isdigit() and rest[2].isdigit():
+                from_idx = int(rest[1]) - 1
+                to_idx = int(rest[2]) - 1
+                if player.queue_move(from_idx, to_idx):
+                    print("Moved.")
+                else:
+                    print("Invalid indices.")
+                return 0
+            print("Usage: siren queue move <from> <to>")
+            return 1
+        else:
+            print("Queue commands: add, list, clear, play, next, remove, move")
+            return 1
+    
+    # ===== PLAYLIST COMMANDS =====
+    elif cmd == "playlist":
+        sub = (rest[0].lower() if rest else "")
+        if sub in ("save", "s"):
+            name = rest[1] if len(rest) > 1 else "playlist"
+            return cmd_playlist_save(name)
+        elif sub in ("load", "l"):
+            name = rest[1] if len(rest) > 1 else ""
+            if not name:
+                print("Usage: siren playlist load <name>")
+                return 1
+            return cmd_playlist_load(name)
+        elif sub in ("list", "ls"):
+            return cmd_playlist_list()
+        elif sub in ("remove", "rm", "delete", "del"):
+            name = rest[1] if len(rest) > 1 else ""
+            if not name:
+                print("Usage: siren playlist remove <name>")
+                return 1
+            return cmd_playlist_remove(name)
+        else:
+            print("Playlist commands: save, load, list, remove")
+            return 1
+    
+    elif cmd == "about":
+        lines = [
+            "Siren — the Aether's music vessel.",
+            "Commands: play, pause, stop, next, prev, random, cove",
+            "Queue:    siren queue add|list|clear|play|next|remove|move",
+            "Playlist: siren playlist save|load|list|remove",
+            "Free media:  siren trove  (the Archive keep)",
+            "TUI: / filter · o open · a add · S/L save·load · r repeat · g go to path · Tab focus · q quit",
+        ]
+        print()
+        print(art.box(lines, title=" Siren ✦", width=_compact_width(lines)))
+        print()
+        return 0
+    else:
+        files = player.resolve_play_args([cmd] + rest)
+        return player.start_playlist(files, shuffle=False)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        art.tui_cleanup()
+        print()
+        sys.exit(130)

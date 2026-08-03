@@ -1,495 +1,1137 @@
 #!/usr/bin/env python3
-"""ether — legally free media from the Internet Archive (terminal).
+"""ether — network paths & weaves for faeOS.
 
-Search public-domain / freely licensed audio & video on archive.org,
-list results, and optionally download with curl/wget/aria2c.
+A single weave that answers to several names (multi-call):
 
-  ether list 10 music album lofi
-  ether list 5 podcast history
-  ether list 8 movie silent
-  ether list 5 series documentary
-  ether search music lofi
-  ether get <identifier>
+  whisper ether   tune the ether to the ANC headphone (the quiet voice)
+  listen  ether   tune the ether to the JBL Go 3 (the loud voice)
+  ether           live TUI: bluetooth · wifi · lan (navigate · q to close)
+  status ether    one-shot report: bt · wifi · lan at a glance
 
-This is NOT a pirate client. Only archive.org (and similar free corpora
-you may add later). Commercial Netflix/Spotify/etc. content is not here.
+  ether net                    connectivity (IPv4/IPv6, archive.org probe)
+  ether veil [on|off|status]   raise/lower the VPN veil  (alias: ether vpn)
+  ether bridge                 phone-hotspot fallback (runs at boot via systemd)
+  ether about                  help
+
+Install as symlinks so each name reads as English:
+  ln -s ether ~/bin/whisper  &&  ln -s ether ~/bin/listen  &&  ln -s ether ~/bin/status
+
+Free media lives under Siren now:
+  siren trove list 10 music lofi
 """
 from __future__ import annotations
 
 import argparse
-import json
 import os
+import pty
 import re
+import select
 import shutil
+import socket
 import subprocess
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
+import time
 from pathlib import Path
-from typing import Any
 
-UA = "ether/1.0 (legal archive.org client; +https://archive.org)"
-IA_SEARCH = "https://archive.org/advancedsearch.php"
-IA_META = "https://archive.org/metadata/{ident}"
-IA_DOWNLOAD = "https://archive.org/download/{ident}/{name}"
+sys.path.insert(0, str(Path.home() / "bin"))
+import pixie_termart as art  # noqa: E402
 
-# Default download roots
-AUDIO_DIR = Path(os.environ.get("ETHER_AUDIO_DIR", Path.home() / "Music" / "ether"))
-VIDEO_DIR = Path(os.environ.get("ETHER_VIDEO_DIR", Path.home() / "Videos" / "ether"))
+os.environ.setdefault("PIXIE_UNICODE", "1")
+P = art.P
 
-# Map friendly kinds → IA query bits
-KIND_MAP: dict[str, dict[str, str]] = {
-    "music": {
-        "mediatype": "audio",
-        "hint": "(subject:(music) OR collection:(opensource_audio) OR collection:(netlabels))",
-    },
-    "album": {
-        "mediatype": "audio",
-        "hint": "(subject:(album) OR subject:(music) OR collection:(netlabels))",
-    },
-    "podcast": {
-        "mediatype": "audio",
-        "hint": "(subject:(podcast) OR collection:(podcasts) OR title:(podcast))",
-    },
-    "audiobook": {
-        "mediatype": "audio",
-        "hint": "(collection:(librivoxaudio) OR subject:(audiobook) OR creator:(LibriVox))",
-    },
-    "movie": {
-        "mediatype": "movies",
-        "hint": "(subject:(feature) OR subject:(film) OR collection:(feature_films))",
-    },
-    "movies": {
-        "mediatype": "movies",
-        "hint": "(subject:(feature) OR collection:(feature_films))",
-    },
-    "series": {
-        "mediatype": "movies",
-        "hint": "(subject:(series) OR subject:(television) OR subject:(episode))",
-    },
-    "video": {
-        "mediatype": "movies",
-        "hint": "",
-    },
-    "documentary": {
-        "mediatype": "movies",
-        "hint": "(subject:(documentary) OR collection:(documentary))",
-    },
+UA = "ether/1.2 (faeOS network tool; +https://archive.org)"
+
+# The voices of the ether: verb -> (MAC, pipewire sink name)
+WEAVES = {
+    "whisper": ("8F:E4:19:50:23:F9", "ANC headphone"),
+    "listen": ("70:99:1C:D0:40:E4", "JBL Go 3"),
 }
 
 
-def eprint(*a: Any, **k: Any) -> None:
+def _bootstrap() -> None:
+    """Make sure session bus + pipewire are reachable (tty sessions)."""
+    uid = os.getuid()
+    os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
+    os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{uid}/bus")
+
+
+# Phone hotspot weave (auto on boot via ether-bridge.service).
+# NEVER hardcode Wi‑Fi secrets in the repo. Load from env or local config:
+#   ~/.config/ether/netherweave.env   (chmod 600)
+#   ETHER_NETHER_SSID=…  ETHER_NETHER_PSK=…  ETHER_NETHER_CON=…
+def _load_nether_env() -> None:
+    candidates = (
+        Path.home() / ".config" / "ether" / "netherweave.env",
+        Path.home() / ".config" / "pixie" / "netherweave.env",
+    )
+    for cfg in candidates:
+        if not cfg.is_file():
+            continue
+        try:
+            for line in cfg.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k, v = k.strip(), v.strip().strip("'").strip('"')
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        except OSError:
+            pass
+
+
+_load_nether_env()
+NETHER_SSID = os.environ.get("ETHER_NETHER_SSID", "").strip()
+NETHER_PSK = os.environ.get("ETHER_NETHER_PSK", "").strip()
+NETHER_CON = os.environ.get("ETHER_NETHER_CON", "").strip() or NETHER_SSID
+
+
+def eprint(*a, **k) -> None:
     print(*a, file=sys.stderr, **k)
 
 
-def color(s: str, code: str) -> str:
-    if os.environ.get("NO_COLOR"):
-        return s
-    return f"\033[{code}m{s}\033[0m"
-
-
-P = "38;5;175"  # pink
-PD = "38;5;132"
-S = "38;5;252"
-SD = "38;5;245"
-OK = "38;5;78"
-W = "38;5;214"
-
-
-def http_json(url: str, timeout: float = 30) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
-
-
-def build_query(kind: str | None, terms: list[str]) -> str:
-    """Build IA lucene-ish query from kind + free text."""
-    parts: list[str] = []
-    k = (kind or "").lower().strip()
-    if k in KIND_MAP:
-        mt = KIND_MAP[k]["mediatype"]
-        parts.append(f"mediatype:({mt})")
-        hint = KIND_MAP[k].get("hint") or ""
-        if hint:
-            parts.append(hint)
-    elif k in ("audio",):
-        parts.append("mediatype:(audio)")
-    elif k in ("movies", "films"):
-        parts.append("mediatype:(movies)")
-    # free text — search title/subject/description
-    words = [t for t in terms if t]
-    if kind and kind.lower() not in KIND_MAP and kind.lower() not in (
-        "audio",
-        "movies",
-        "films",
-        "music",
-        "album",
-        "podcast",
-        "movie",
-        "series",
-        "video",
-        "documentary",
-        "audiobook",
-    ):
-        # first token was not a kind — include it as a term
-        words = [kind] + words
-    if words:
-        qtext = " ".join(words)
-        # prefer title/subject match
-        esc = qtext.replace('"', " ")
-        parts.append(f'(title:({esc}) OR subject:({esc}) OR description:({esc}) OR creator:({esc}))')
-    if not parts:
-        parts.append("mediatype:(audio)")
-    # prefer items that are downloadable / public
-    parts.append("NOT collection:(spotify)")  # no effect usually; harmless
-    return " AND ".join(parts)
-
-
-def search(query: str, rows: int = 10, page: int = 1) -> tuple[list[dict], int]:
-    rows = max(1, min(int(rows), 50))
-    page = max(1, int(page))
-    params = {
-        "q": query,
-        "fl[]": ["identifier", "title", "creator", "year", "mediatype", "downloads", "description"],
-        "sort[]": "downloads desc",
-        "rows": str(rows),
-        "page": str(page),
-        "output": "json",
-    }
-    # urllib doesn't do multi fl[] well with urlencode list — build manually
-    q = urllib.parse.urlencode({"q": query, "rows": rows, "page": page, "output": "json", "sort[]": "downloads desc"})
-    for fl in ("identifier", "title", "creator", "year", "mediatype", "downloads"):
-        q += f"&fl[]={fl}"
-    url = f"{IA_SEARCH}?{q}"
-    data = http_json(url)
-    resp = data.get("response") or {}
-    docs = resp.get("docs") or []
-    n = int(resp.get("numFound") or 0)
-    return docs, n
-
-
-def fmt_item(i: int, doc: dict) -> str:
-    title = (doc.get("title") or doc.get("identifier") or "?")
-    if isinstance(title, list):
-        title = title[0]
-    creator = doc.get("creator") or ""
-    if isinstance(creator, list):
-        creator = ", ".join(creator[:2])
-    year = doc.get("year") or ""
-    if isinstance(year, list):
-        year = year[0]
-    mt = doc.get("mediatype") or ""
-    if isinstance(mt, list):
-        mt = mt[0]
-    ident = doc.get("identifier") or ""
-    dl = doc.get("downloads") or ""
-    meta = " · ".join(x for x in (str(creator)[:40], str(year), str(mt), f"↓{dl}" if dl != "" else "") if x)
-    return (
-        f"{color(f'{i:>2}.', '1;' + P)} {color(str(title)[:70], S)}\n"
-        f"    {color(meta, SD)}  {color(ident, PD)}"
+def _nmcli(args: list[str], *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["nmcli", *args],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
     )
 
 
-def list_files(ident: str) -> list[dict]:
-    meta = http_json(IA_META.format(ident=urllib.parse.quote(ident)))
-    files = meta.get("files") or []
-    # prefer media extensions
-    audio_ext = {".mp3", ".ogg", ".flac", ".m4a", ".wav", ".opus"}
-    video_ext = {".mp4", ".mkv", ".webm", ".avi", ".ogv", ".mov"}
-    out = []
-    for f in files:
-        name = f.get("name") or ""
-        if name.endswith(".xml") or name.endswith(".sqlite") or "/." in name:
-            continue
-        low = name.lower()
-        ext = Path(low).suffix
-        if ext in audio_ext or ext in video_ext:
-            out.append(f)
-    # sort: larger-ish useful files first, skip tiny samples if possible
-    def score(f: dict) -> tuple:
-        name = (f.get("name") or "").lower()
-        ext = Path(name).suffix
-        prefer = 0 if ext in {".mp3", ".ogg", ".mp4", ".mkv", ".flac"} else 1
-        try:
-            sz = int(f.get("size") or 0)
-        except ValueError:
-            sz = 0
-        return (prefer, -sz)
+def banner(title: str, label: str) -> None:
+    print()
+    print(art.box([], title="Ether ✦", subtitle=label + "  ·  " + title, width=art.term_width()))
+    print()
 
-    out.sort(key=score)
+
+def net_diag() -> int:
+    """Quick IPv4/IPv6 + archive.org reachability report."""
+    banner("Ether ✦", "net — connectivity across the aether")
+    lines: list[str] = []
+
+    def try_tcp(host: str, port: int, family: int, label: str) -> bool:
+        try:
+            infos = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            lines.append(art.paint(f"  ✗ DNS    {label} aether: {e}", art.P.WARN))
+            return False
+        for fam, _, _, _, addr in infos:
+            tag = "v6" if fam == socket.AF_INET6 else "v4"
+            try:
+                s = socket.socket(fam, socket.SOCK_STREAM)
+                s.settimeout(3)
+                s.connect(addr[:2])
+                s.close()
+                lines.append(art.paint(f"  ✓ TCP    {tag} {host}:{port}  ({label})", art.P.OK))
+                return True
+            except OSError:
+                continue
+        lines.append(art.paint(f"  ✗ TCP    {host}:{port}  ({label})", art.P.WARN))
+        return False
+
+    def try_https(url: str) -> bool:
+        import urllib.request as u
+
+        try:
+            req = u.Request(url, headers={"User-Agent": UA})
+            with u.urlopen(req, timeout=6) as r:
+                code = getattr(r, "status", 200)
+            lines.append(art.paint(f"  ✓ HTTPS  {url} → {code}", art.P.OK))
+            return True
+        except Exception as e:
+            lines.append(art.paint(f"  ✗ HTTPS  {url}: {e}", art.P.WARN))
+            return False
+
+    lines.append(art.paint("  LAN / sockets", "1;" + art.P.PINK))
+    try_tcp("1.1.1.1", 80, socket.AF_INET, "IPv4 :80")
+    try_tcp("1.1.1.1", 443, socket.AF_INET, "IPv4 :443")
+    try_tcp("2606:4700:4700::1111", 443, socket.AF_INET6, "IPv6 :443")
+    lines.append("")
+    lines.append(art.paint("  Dual-stack web", "1;" + art.P.PINK))
+    try_https("https://example.com/")
+    lines.append("")
+    lines.append(art.paint("  archive.org (ether backend — IPv4-only A record today)", "1;" + art.P.PINK))
+    try_tcp("archive.org", 80, socket.AF_INET, "IA :80")
+    try_tcp("archive.org", 443, socket.AF_INET, "IA :443")
+    ok = try_https("https://archive.org/advancedsearch.php?q=test&rows=1&output=json")
+    print("\n".join(lines))
+    print()
+    if not ok:
+        print(art.box(
+            [
+                "ether needs HTTPS to archive.org (IPv4 A only, no AAAA).",
+                "If IPv4 :443 fails but IPv6 works, WAN IPv4/HTTPS is broken",
+                "(router firewall, ISP, or Vodafone filter). Dual-stack sites",
+                "still work over IPv6; archive.org will not until IPv4:443 works.",
+                "",
+                "Try:",
+                "  1) reboot the Vodafone router",
+                "  2) router admin → disable parental/HTTPS filter if any",
+                "  3) phone hotspot to confirm it's the LAN/ISP path",
+            ],
+            title="runes",
+            body_style=(art.P.MUTED,),
+            width=art.term_width(),
+        ))
+        return 1
+    print(art.box(
+        ["archive.org looks reachable — siren trove should work."],
+        title="runes",
+        body_style=(art.P.OK,),
+        width=art.term_width(),
+    ))
+    return 0
+
+
+def vpn_connections() -> list[tuple[str, str]]:
+    """(name, type) of NetworkManager VPN profiles."""
+    show = _nmcli(["-t", "-f", "NAME,TYPE", "con", "show"])
+    out = []
+    for ln in (show.stdout or "").splitlines():
+        parts = ln.rsplit(":", 1)
+        if len(parts) == 2 and "vpn" in parts[1].lower():
+            out.append((parts[0], parts[1]))
     return out
 
 
-def pick_download_targets(ident: str, mediatype: str = "") -> list[tuple[str, str, Path]]:
-    """Return list of (url, filename, dest_dir)."""
-    files = list_files(ident)
-    if not files:
-        return []
-    is_video = (mediatype or "").startswith("movie") or any(
-        Path((f.get("name") or "").lower()).suffix in {".mp4", ".mkv", ".webm", ".avi"} for f in files
-    )
-    dest_root = VIDEO_DIR if is_video else AUDIO_DIR
-    dest_dir = dest_root / re.sub(r"[^\w.\-]+", "_", ident)[:80]
-    targets = []
-    # For music albums: grab all audio files. For video: largest video file (+ maybe same base).
-    audio_ext = {".mp3", ".ogg", ".flac", ".m4a", ".wav", ".opus"}
-    video_ext = {".mp4", ".mkv", ".webm", ".avi", ".ogv", ".mov"}
-    media = []
-    for f in files:
-        name = f.get("name") or ""
-        ext = Path(name.lower()).suffix
-        if ext in audio_ext or ext in video_ext:
-            media.append(f)
-    if not media:
-        return []
-    if is_video:
-        # single best video
-        media = media[:1]
-    # album: all audio (cap 40 files to avoid huge dumps by accident)
-    if not is_video:
-        media = media[:40]
-    for f in media:
-        name = f["name"]
-        # nested paths in IA
-        base = Path(name).name
-        url = IA_DOWNLOAD.format(ident=urllib.parse.quote(ident), name=urllib.parse.quote(name, safe="/"))
-        targets.append((url, base, dest_dir))
-    return targets
-
-
-def download_file(url: str, dest: Path) -> bool:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and dest.stat().st_size > 0:
-        eprint(color(f"  skip (exists): {dest.name}", SD))
-        return True
-    # prefer aria2c, then curl, then wget
-    if shutil.which("aria2c"):
-        cmd = ["aria2c", "-x", "4", "-s", "4", "-c", "-d", str(dest.parent), "-o", dest.name, url]
-    elif shutil.which("curl"):
-        cmd = ["curl", "-L", "--fail", "--retry", "3", "-o", str(dest), url]
-    elif shutil.which("wget"):
-        cmd = ["wget", "-c", "-O", str(dest), url]
-    else:
-        eprint("need curl, wget, or aria2c")
-        return False
-    eprint(color(f"  ↓ {dest.name}", P))
-    try:
-        subprocess.run(cmd, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        eprint(color(f"  download failed: {e}", W))
-        if dest.exists() and dest.stat().st_size == 0:
-            dest.unlink(missing_ok=True)
-        return False
-
-
-def do_download(doc: dict) -> None:
-    ident = doc.get("identifier") or ""
-    mt = doc.get("mediatype") or ""
-    if isinstance(mt, list):
-        mt = mt[0]
-    title = doc.get("title") or ident
-    if isinstance(title, list):
-        title = title[0]
-    eprint(color(f"Fetching file list for {ident} …", PD))
-    try:
-        targets = pick_download_targets(ident, str(mt))
-    except Exception as e:
-        eprint(color(f"metadata error: {e}", W))
-        return
-    if not targets:
-        eprint(color("No audio/video files found on this item (metadata only?).", W))
-        eprint(f"  Browse: https://archive.org/details/{ident}")
-        return
-    eprint(color(f"Downloading {len(targets)} file(s) → {targets[0][2]}", OK))
-    ok = 0
-    for url, name, ddir in targets:
-        if download_file(url, ddir / name):
-            ok += 1
-    eprint(color(f"Done: {ok}/{len(targets)}  ({title})", OK))
-
-
-def interactive_list(docs: list[dict], num_found: int, query: str) -> str:
-    """Returns: quit | again | or empty after downloads."""
-    print()
-    print(color("┌─ ether · Internet Archive (legal free media) ─", PD))
-    print(color(f"│ query: {query}", SD))
-    print(color(f"│ matches: {num_found:,}  ·  showing {len(docs)}", SD))
-    print(color("└──────────────────────────────────────────────", PD))
-    print()
-    if not docs:
-        print(color("No results. Try different words.", W))
-        return "again"
-    for i, d in enumerate(docs, 1):
-        print(fmt_item(i, d))
-        print()
-    print(color("  [1–N] download   [a] download all listed   [s] search again   [q] quit", SD))
-    print(color("  Only freely hosted archive.org items — not commercial streaming catalogs.", SD))
-    while True:
-        try:
-            choice = input(color("ether> ", "1;" + P)).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return "quit"
-        if choice in ("q", "quit", "exit"):
-            return "quit"
-        if choice in ("s", "search", "again", "r"):
-            return "again"
-        if choice in ("a", "all"):
-            for d in docs:
-                do_download(d)
-            return ""
-        if choice.isdigit():
-            n = int(choice)
-            if 1 <= n <= len(docs):
-                do_download(docs[n - 1])
-                # offer more
-                print(color("Another number, [s] search again, or [q] quit?", SD))
-                continue
-        print(color("Pick a number, a, s, or q.", W))
-
-
-def cmd_list(args: argparse.Namespace) -> int:
-    n = args.n or 10
-    # parse: ether list 10 music album lofi  OR  ether list music lofi
-    tokens = list(args.terms or [])
-    kind = args.kind
-    # if first term is a known kind and kind not set
-    if not kind and tokens and tokens[0].lower() in KIND_MAP:
-        kind = tokens.pop(0).lower()
-    # second kind-ish word (album after music) — treat as extra filter term if not in map alone
-    query = build_query(kind, tokens)
-    eprint(color("◆ ether", "1;" + P) + color(f"  search  {query[:100]}…", S) if len(query) > 100 else color("◆ ether", "1;" + P) + color(f"  {query}", S))
-    try:
-        docs, total = search(query, rows=n, page=1)
-    except urllib.error.URLError as e:
-        eprint(color(f"Network error (archive.org): {e}", W))
-        return 1
-    except Exception as e:
-        eprint(color(f"Search failed: {e}", W))
-        return 1
-
-    while True:
-        action = interactive_list(docs, total, query)
-        if action == "quit":
-            return 0
-        if action == "again":
-            try:
-                line = input(color("new search (e.g. music lofi / movie silent)> ", "1;" + P)).strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return 0
-            if not line or line.lower() in ("q", "quit"):
-                return 0
-            parts = line.split()
-            kind2 = None
-            if parts and parts[0].lower() in KIND_MAP:
-                kind2 = parts.pop(0).lower()
-            query = build_query(kind2, parts)
-            eprint(color(f"◆ {query}", PD))
-            try:
-                docs, total = search(query, rows=n, page=1)
-            except Exception as e:
-                eprint(color(f"Search failed: {e}", W))
-                return 1
-            continue
-        # after download, loop menu again with same docs
-        action = interactive_list(docs, total, query)
-        if action == "quit":
-            return 0
-        if action == "again":
-            continue
+def cmd_veil(args: argparse.Namespace) -> int:
+    """Raise / lower the aetheric veil (VPN)."""
+    conns = vpn_connections()
+    if not conns:
+        banner("Ether ✦", "veil — no VPN woven yet")
+        print(art.box(
+            [
+                "No VPN connection is woven into NetworkManager yet.",
+                "",
+                "  nmcli connection add type wireguard con-name veil ...",
+                "  nmcli connection import type openvpn file fleet.ovpn",
+                "  nmcli connection import type vpn file vpn.conf",
+                "",
+                "then: ether veil on / off / status.",
+            ],
+            title="the veil",
+            body_style=(art.P.MUTED,),
+            width=art.term_width(),
+        ))
         return 0
 
+    active = set()
+    for ln in (_nmcli(["-t", "-f", "NAME", "con", "show", "--active"]).stdout or "").splitlines():
+        if ln.strip():
+            active.add(ln.strip())
 
-def cmd_get(args: argparse.Namespace) -> int:
-    ident = args.identifier.strip()
-    do_download({"identifier": ident, "title": ident, "mediatype": args.type or ""})
+    wanted = args.name or conns[0][0]
+    if args.name and not any(n == wanted for n, _ in conns):
+        banner("Ether ✦", f"veil — no such weave {wanted}")
+        return 1
+
+    action = _ACTION_ALIASES.get((args.action or "toggle").lower(), (args.action or "toggle").lower())
+    if action == "status":
+        banner("Ether ✦", "veil — status")
+        for name, typ in conns:
+            woven = name in active
+            line = art.paint(
+                f"  {'✓' if woven else '·'}  {name}  ({typ})  {'woven' if woven else 'drawn'}",
+                art.P.OK if woven else art.P.MUTED,
+            )
+            print(line)
+        print()
+        return 0
+
+    if action in ("on", "raise", "up"):
+        if wanted in active:
+            print(art.box([f"the veil already rises — {wanted}"], title="Ether ✦", body_style=(art.P.MUTED,), width=art.term_width()))
+            return 0
+        r = _nmcli(["con", "up", wanted], timeout=90)
+        if r.returncode != 0:
+            print(art.box([f"could not raise {wanted}: {(r.stderr or r.stdout or '').strip()}"], title="Ether ✦", body_style=(art.P.WARN,), width=art.term_width()))
+            return 1
+        print(art.box([f"the veil rises — {wanted}"], title="Ether ✦", body_style=(art.P.OK,), width=art.term_width()))
+        return 0
+
+    if action in ("off", "lower", "down"):
+        if wanted not in active:
+            print(art.box([f"the veil already falls — {wanted} is down"], title="Ether ✦", body_style=(art.P.MUTED,), width=art.term_width()))
+            return 0
+        r = _nmcli(["con", "down", wanted], timeout=90)
+        if r.returncode != 0:
+            print(art.box([f"could not lower {wanted}: {(r.stderr or r.stdout or '').strip()}"], title="Ether ✦", body_style=(art.P.WARN,), width=art.term_width()))
+            return 1
+        print(art.box([f"the veil falls — {wanted}"], title="Ether ✦", body_style=(art.P.OK,), width=art.term_width()))
+        return 0
+
+    # toggle
+    if wanted in active:
+        return cmd_veil(argparse.Namespace(action="off", name=args.name))
+    return cmd_veil(argparse.Namespace(action="on", name=args.name))
+
+
+def cmd_bridge(args: argparse.Namespace) -> int:
+    """Boot fallback used by ether-bridge.service: bridge to the phone hotspot
+    when no other real link is up."""
+    if not shutil.which("nmcli"):
+        return 1
+    if not NETHER_CON:
+        if not args.quiet:
+            eprint("no hotspot configured — nothing to weave")
+        return 1
+    active = _nmcli(["-t", "-f", "NAME,TYPE", "con", "show", "--active"])
+    has_real = False
+    for ln in (active.stdout or "").splitlines():
+        if ":loopback" in ln or ln.endswith(":lo"):
+            continue
+        has_real = True
+        break
+    if has_real:
+        return 0
+    if not args.quiet:
+        eprint(f"no real link up — bridging to phone hotspot ({NETHER_CON})…")
+    r = _nmcli(["con", "up", NETHER_CON], timeout=90)
+    if r.returncode != 0:
+        if not args.quiet:
+            eprint(f"bridge failed: {(r.stderr or r.stdout or '').strip()}")
+        return 1
+    if not args.quiet:
+        eprint("tether bound.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Bluetooth weave helpers
+# ---------------------------------------------------------------------------
+
+def _bt(mac: str, *verb: str, timeout: float = 30) -> str:
+    try:
+        r = subprocess.run(
+            ["bluetoothctl", *verb, mac],
+            text=True, capture_output=True, timeout=timeout, check=False,
+        )
+        return (r.stdout or "") + (r.stderr or "")
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def _bt_connected(mac: str) -> bool:
+    out = _bt(mac, "info", timeout=5)
+    return "Connected: yes" in out
+
+
+def _bt_devices() -> list[tuple[str, str]]:
+    """(mac, name) of every device bluetoothd has seen."""
+    out = []
+    try:
+        r = subprocess.run(
+            ["bluetoothctl", "devices"],
+            text=True, capture_output=True, timeout=8, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return out
+    for ln in (r.stdout or "").splitlines():
+        parts = ln.split()
+        if len(parts) >= 2 and parts[0] == "Device":
+            mac = parts[1]
+            name = " ".join(parts[2:]) or mac
+            out.append((mac, name))
+    return out
+
+
+def _bt_state(mac: str) -> dict:
+    """connected / paired / trusted / battery for one device."""
+    state = {"connected": False, "paired": False, "trusted": False, "battery": None}
+    out = _bt(mac, "info", timeout=5)
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if ln.startswith("Connected:"):
+            state["connected"] = ln.endswith("yes")
+        elif ln.startswith("Paired:"):
+            state["paired"] = ln.endswith("yes")
+        elif ln.startswith("Trusted:"):
+            state["trusted"] = ln.endswith("yes")
+        elif "Battery Percentage:" in ln:
+            raw = ln.rsplit(":", 1)[-1].strip().split()[0]
+            try:
+                state["battery"] = int(raw, 16) if raw.lower().startswith("0x") else int(raw)
+            except ValueError:
+                pass
+    return state
+
+
+def _wpctl_sinks() -> list[tuple[int, str, bool]]:
+    """(id, name, is_default) for every pipewire sink."""
+    out = []
+    try:
+        r = subprocess.run(
+            ["wpctl", "status"],
+            text=True, capture_output=True, timeout=8, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return out
+    for ln in (r.stdout or "").splitlines():
+        if "[vol:" not in ln:
+            continue
+        head = ln.split("[vol:")[0]
+        is_default = "*" in head
+        m = re.search(r"(\d+)\.\s+(.*?)\s*$", head)
+        if m:
+            out.append((int(m.group(1)), m.group(2).strip(), is_default))
+    return out
+
+
+def _find_sink_id(name: str, retries: int = 6) -> int | None:
+    for _ in range(retries):
+        for sid, sname, _d in _wpctl_sinks():
+            if sname == name or sname in name or name in sname:
+                return sid
+        time.sleep(1)
+    return None
+
+
+def _weave(verb: str) -> tuple[bool, str]:
+    """whisper / listen core — returns (ok, message); never prints."""
+    target_mac, target_name = WEAVES[verb]
+    others = [mac for v, (mac, _n) in WEAVES.items() if v != verb]
+
+    if not _bt_connected(target_mac):
+        out = _bt(target_mac, "connect", timeout=30)
+        if "Failed to connect" in out:
+            return False, f"could not reach the {verb}ing one — is it powered on?\n  ({target_name}  {target_mac})"
+
+    for mac in others:
+        if _bt_connected(mac):
+            _bt(mac, "disconnect", timeout=10)
+
+    sink_id = _find_sink_id(target_name)
+    if sink_id is None:
+        return False, f"sink '{target_name}' not found in pipewire — is the weave alive?"
+
+    try:
+        subprocess.run(["wpctl", "set-default", str(sink_id)], text=True, capture_output=True, timeout=10, check=False)
+    except OSError:
+        pass
+
+    if verb == "whisper":
+        msg = f"A quiet whisper threads through the ether — {target_name} (sink {sink_id})"
+    else:
+        msg = f"The ether bends to listen — {target_name} (sink {sink_id})"
+    return True, msg
+
+
+def cmd_weave(verb: str, token: str | None) -> int:
+    """whisper ether / listen ether — point the aether at one voice."""
+    if token not in (None, "", "ether"):
+        print(art.box(
+            [f"no such weave — {token}", "the ether only answers to: whisper / listen / status"],
+            title="Ether ✦", body_style=(art.P.WARN,), width=art.term_width(),
+        ))
+        print()
+        return 1
+
+    ok, msg = _weave(verb)
+    print(art.box([msg], title="Ether ✦",
+                  body_style=(art.P.OK,) if ok else (art.P.WARN,),
+                  width=art.term_width()))
+    print()
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# status TUI
+# ---------------------------------------------------------------------------
+
+def _collect_status() -> dict:
+    data: dict = {"bt": [], "wifi": [], "lan": [], "sinks": [], "conns": []}
+
+    for mac, name in _bt_devices():
+        state = _bt_state(mac)
+        state.update({"mac": mac, "name": name})
+        data["bt"].append(state)
+
+    try:
+        r = subprocess.run(
+            ["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL", "device", "wifi", "list"],
+            text=True, capture_output=True, timeout=8, check=False,
+        )
+        for ln in (r.stdout or "").splitlines():
+            parts = ln.split(":")
+            if len(parts) >= 3:
+                data["wifi"].append({"in_use": parts[0] == "*", "ssid": parts[1], "signal": parts[2]})
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    try:
+        r = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"], timeout=8)
+        for ln in (r.stdout or "").splitlines():
+            if not ln:
+                continue
+            parts = ln.split(":")
+            if len(parts) >= 3:
+                data["conns"].append({"name": parts[0], "type": parts[1], "dev": parts[2]})
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    def tcp_probe(host: str, port: int, family: int, label: str) -> bool:
+        try:
+            infos = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+        except socket.gaierror:
+            data["lan"].append((label, False))
+            return False
+        for fam, _, _, _, addr in infos:
+            try:
+                s = socket.socket(fam, socket.SOCK_STREAM)
+                s.settimeout(3)
+                s.connect(addr[:2])
+                s.close()
+                data["lan"].append((label, True))
+                return True
+            except OSError:
+                continue
+        data["lan"].append((label, False))
+        return False
+
+    tcp_probe("1.1.1.1", 443, socket.AF_INET, "IPv4 :443")
+    tcp_probe("2606:4700:4700::1111", 443, socket.AF_INET6, "IPv6 :443")
+    tcp_probe("archive.org", 443, socket.AF_INET, "IA :443")
+
+    data["sinks"] = _wpctl_sinks()
+    return data
+
+
+def _bt_panel(data: dict, width: int) -> str:
+    known = [d for d in data["bt"]
+             if d["paired"] or d["connected"] or d["mac"] in [m for m, _n in WEAVES.values()]]
+    lines = []
+    if not known:
+        lines.append(art.paint("  no devices woven yet — pair one with bluetoothctl", P.MUTED))
+    for d in known:
+        status = "on" if d["connected"] else "off"
+        color = P.OK if d["connected"] else P.MUTED
+        bat = f"  {d['battery']}%" if d["battery"] is not None else ""
+        lines.append(f"  {'▶' if d['connected'] else '·'}  {art.paint(d['name'], color)}  {d['mac']}  {art.paint(status, color)}{bat}")
+    if not known:
+        for mac, name in WEAVES.values():
+            lines.append(art.paint(f"  ·  {name}  {mac}  (unseen)", P.MUTED))
+    return art.box(lines, title="bluetooth", width=width, body_style=(P.SILVER,))
+
+
+def _wifi_panel(data: dict, width: int) -> str:
+    lines = []
+    if not data["wifi"]:
+        lines.append(art.paint("  no networks in sight", P.MUTED))
+    nets = sorted(data["wifi"], key=lambda x: -int(x["signal"] or 0))
+    in_use = next((w for w in nets if w["in_use"]), None)
+    shown = [w for w in nets[:8] if w is not in_use]
+    if in_use:
+        shown.insert(0, in_use)
+    shown = shown[:8]
+    for w in shown:
+        mark = art.paint("▰", P.OK) if w["in_use"] else "·"
+        sig = int(w["signal"] or 0)
+        bar = "█" * max(0, sig // 20) + "░" * (5 - max(0, sig // 20))
+        tag = art.paint("  ◀ woven", P.OK) if w["in_use"] else ""
+        lines.append(f"  {mark}  {w['ssid'] or '(hidden)'}  {sig}%  {bar}{tag}")
+    if len(nets) > len(shown):
+        lines.append(art.paint(f"  … {len(nets) - len(shown)} more", P.MUTED))
+    for c in data["conns"]:
+        if c["type"] not in ("ethernet", "wifi"):
+            continue
+        dev = f" ({c['dev']})" if c["dev"] else ""
+        lines.append(art.paint(f"  link: {c['name']}  ·  {c['type']}{dev}", P.PINK_DIM))
+    return art.box(lines, title="wifi", width=width, body_style=(P.SILVER,))
+
+
+def _lan_panel(data: dict, width: int) -> str:
+    lines = []
+    if not data["lan"]:
+        lines.append(art.paint("  probing…", P.MUTED))
+    for label, ok in data["lan"]:
+        mark = art.paint("✓", P.OK) if ok else art.paint("✗", P.WARN)
+        lines.append(f"  {mark}  {label}")
+    default = next((s for s in data["sinks"] if s[2]), None)
+    if default:
+        lines.append("")
+        lines.append(art.paint(f"  default sink: {default[1]}  (sink {default[0]})", P.MUTED))
+    return art.box(lines, title="lan · weave", width=width, body_style=(P.SILVER,))
+
+
+def build_frame(data: dict, width: int, height: int) -> str:
+    panel_w = max(44, min(width - 2, 88))
+    bt = _bt_panel(data, panel_w)
+    wifi = _wifi_panel(data, panel_w)
+    lan = _lan_panel(data, panel_w)
+    footer = art.box(
+        ["w whisper · l listen · s scan · n new · d remove · R restart · r refresh · q quit"],
+        title="runes", width=width, body_style=(P.MUTED,),
+    )
+    return "\n".join([bt, "", wifi, "", lan, "", footer])
+
+
+# ---------------------------------------------------------------------------
+# interactive TUI modes
+# ---------------------------------------------------------------------------
+
+def _menu_frame(title: str, items: list, sel: int, width: int) -> str:
+    lines = []
+    for i, (label, _cb) in enumerate(items):
+        mark = "❯" if i == sel else " "
+        style = P.SILVER if i == sel else P.MUTED
+        lines.append(art.paint(f" {mark} {label}", style))
+    return art.box(lines, title=title, width=width, body_style=(P.SILVER,))
+
+
+def _input_frame(prompt: str, value: str, secret: bool, width: int) -> str:
+    shown = "•" * len(value) if secret else value
+    return art.box([art.paint(f"  {prompt}", P.SILVER), "", f"  {shown}█"],
+                   title="weave · input", width=width, body_style=(P.SILVER,))
+
+
+def _confirm_frame(msg: str, width: int) -> str:
+    return art.box([f"  {msg}", "", "  y  yes        n / esc  no"],
+                   title="are you sure?", width=width, body_style=(P.WARN,))
+
+
+def _work_frame(msg: str, width: int) -> str:
+    return art.box([f"  {msg} …"], title="weaving", width=width, body_style=(P.MUTED,))
+
+
+def _result_frame(ok: bool, msg: str, width: int) -> str:
+    style = (P.OK,) if ok else (P.WARN,)
+    return art.box([f"  {msg}"], title="runes", width=width, body_style=style)
+
+
+def _footer_frame(width: int, hint: str) -> str:
+    return art.box([hint], title="runes", width=width, body_style=(P.MUTED,))
+
+
+def _start_work(ui: dict, msg: str, fn) -> None:
+    ui["mode"] = "work"
+    ui["work_msg"] = msg
+    ui["work_fn"] = fn
+
+
+def _btctl_raw(*args: str, timeout: float = 15) -> str:
+    try:
+        r = subprocess.run(["bluetoothctl", *args], text=True, capture_output=True,
+                           timeout=timeout, check=False)
+        return (r.stdout or "") + (r.stderr or "")
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def _bt_pair_pty(mac: str, pin: str | None = None, timeout: float = 30) -> tuple[bool, str]:
+    """Pair via bluetoothctl on a pty so legacy-PIN prompts can be answered."""
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(["bluetoothctl"], stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+    os.close(slave)
+
+    def send(cmd: str) -> None:
+        os.write(master, (cmd + "\n").encode())
+
+    send("agent NoInputNoOutput")
+    send("default-agent")
+    send(f"pair {mac}")
+    buf = b""
+    pin_sent = False
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            r, _, _ = select.select([master], [], [], 0.3)
+            if not r:
+                continue
+            data = os.read(master, 4096)
+            if not data:
+                break
+            buf += data
+            if b"Enter PIN code" in buf and pin and not pin_sent:
+                send(pin)
+                pin_sent = True
+                buf = buf[-200:]
+            elif b"Confirm passkey" in buf and not pin_sent:
+                send("yes")
+                pin_sent = True
+                buf = buf[-200:]
+            if b"Pairing successful" in buf:
+                return True, "pairing successful"
+            if b"Failed" in buf or b"not available" in buf:
+                return False, buf.decode(errors="replace").strip().splitlines()[-1]
+    finally:
+        try:
+            send("quit")
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            proc.kill()
+        try:
+            os.close(master)
+        except OSError:
+            pass
+    return False, "pairing timed out"
+
+
+def _scan_bt_top5() -> list[tuple[str, str]]:
+    """Fresh bluetooth scan — up to 5 NEW devices as (mac, name)."""
+    devs: list[tuple[str, str]] = []
+    try:
+        r = subprocess.run(["bluetoothctl", "--timeout", "12", "scan", "on"],
+                           text=True, capture_output=True, timeout=20, check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return devs
+    for ln in (r.stdout or "").splitlines():
+        if "[NEW]" not in ln:
+            continue
+        m = re.search(r"Device ([0-9A-F:]+) ?(.*)", ln)
+        if not m:
+            continue
+        mac, name = m.group(1), m.group(2).strip() or m.group(1)
+        if not any(x == mac for x, _ in devs):
+            devs.append((mac, name))
+        if len(devs) >= 5:
+            break
+    return devs
+
+
+def _scan_wifi_top5() -> list[dict]:
+    """Rescan + list wifi, top 5 by signal."""
+    try:
+        subprocess.run(["nmcli", "device", "wifi", "rescan"], text=True, capture_output=True,
+                       timeout=10, check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    nets: list[dict] = []
+    try:
+        r = subprocess.run(["nmcli", "-t", "-f", "IN-USE,SSID,SECURITY,SIGNAL", "device", "wifi", "list"],
+                           text=True, capture_output=True, timeout=10, check=False)
+        for ln in (r.stdout or "").splitlines():
+            p = ln.split(":")
+            if len(p) >= 4:
+                nets.append({"in_use": p[0] == "*", "ssid": p[1], "security": p[2], "signal": int(p[3] or 0)})
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    nets.sort(key=lambda n: -n["signal"])
+    return nets[:5]
+
+
+def _saved_wifi_connections() -> list[str]:
+    out: list[str] = []
+    show = _nmcli(["-t", "-f", "NAME,TYPE", "con", "show"])
+    for ln in (show.stdout or "").splitlines():
+        parts = ln.rsplit(":", 1)
+        if len(parts) == 2 and "wireless" in parts[1]:
+            out.append(parts[0])
+    return out
+
+
+def _scan_menu(ui: dict) -> None:
+    ui["mode"] = "menu"
+    ui["title"] = "scan the aether"
+    ui["sel"] = 0
+    ui["items"] = [
+        ("bluetooth voices", lambda u: _scan_bt_flow(u)),
+        ("wifi airwaves", lambda u: _scan_wifi_flow(u)),
+    ]
+
+
+def _scan_bt_flow(ui: dict) -> None:
+    def run() -> tuple[bool, str] | None:
+        devs = _scan_bt_top5()
+        if not devs:
+            return False, "no bluetooth voices heard"
+        ui["mode"] = "menu"
+        ui["title"] = "bluetooth · top 5"
+        ui["sel"] = 0
+        ui["items"] = [(f"{n}  {m}", lambda u, mac=m, name=n: _pair_flow(u, mac, name)) for m, n in devs]
+        return None
+    _start_work(ui, "listening to the aether", run)
+
+
+def _scan_wifi_flow(ui: dict) -> None:
+    def run() -> tuple[bool, str] | None:
+        nets = _scan_wifi_top5()
+        if not nets:
+            return False, "no wifi airwaves heard"
+        ui["mode"] = "menu"
+        ui["title"] = "wifi · top 5"
+        ui["sel"] = 0
+        ui["items"] = []
+        for n in nets:
+            label = f"{n['ssid'] or '(hidden)'}  {n['signal']}%  {n['security'] or 'open'}"
+            if n["in_use"]:
+                label += "  ◀ woven"
+            ui["items"].append((label, lambda u, net=n: _wifi_connect_flow(u, net)))
+        return None
+    _start_work(ui, "reading the airwaves", run)
+
+
+def _pair_flow(ui: dict, mac: str, name: str) -> None:
+    def run() -> tuple[bool, str]:
+        ok, msg = _bt_pair_pty(mac)
+        if ok:
+            _btctl_raw("trust", mac)
+            return True, f"paired with {name}"
+        return False, msg
+    _start_work(ui, f"pairing with {name}", run)
+
+
+def _wifi_connect_flow(ui: dict, net: dict) -> None:
+    if net["security"]:
+        ui["mode"] = "input"
+        ui["prompt"] = f"password for {net['ssid']}:"
+        ui["value"] = ""
+        ui["secret"] = True
+        ui["input_cb"] = lambda u, psk: _wifi_connect_do(u, net, psk)
+        return
+
+    def run() -> tuple[bool, str]:
+        r = _nmcli(["device", "wifi", "connect", net["ssid"]], timeout=40)
+        if r.returncode != 0:
+            r = _nmcli(["device", "wifi", "connect", net["ssid"]], timeout=40)
+            if r.returncode != 0:
+                return False, "open-network connect failed"
+        return True, f"woven into {net['ssid']}"
+    _start_work(ui, f"weaving into {net['ssid']}", run)
+
+
+def _wifi_connect_do(ui: dict, net: dict, psk: str) -> None:
+    def run() -> tuple[bool, str]:
+        cmd = ["device", "wifi", "connect", net["ssid"], "password", psk]
+        r = _nmcli(cmd, timeout=40)
+        if r.returncode != 0:
+            r = _nmcli(cmd, timeout=40)
+            if r.returncode != 0:
+                return False, "connect failed — wrong password?"
+        return True, f"woven into {net['ssid']}"
+    _start_work(ui, f"weaving into {net['ssid']}", run)
+
+
+def _new_menu(ui: dict) -> None:
+    ui["mode"] = "menu"
+    ui["title"] = "weave a new thread"
+    ui["sel"] = 0
+    ui["items"] = [
+        ("wifi network", lambda u: _scan_wifi_flow(u)),
+        ("bluetooth device", lambda u: _scan_bt_flow(u)),
+    ]
+
+
+def _remove_menu(ui: dict) -> None:
+    ui["mode"] = "menu"
+    ui["title"] = "unravel a thread"
+    ui["sel"] = 0
+    ui["items"] = [
+        ("bluetooth device", lambda u: _remove_bt_menu(u)),
+        ("wifi connection", lambda u: _remove_wifi_menu(u)),
+    ]
+
+
+def _remove_bt_menu(ui: dict) -> None:
+    devs = [(m, n) for m, n in _bt_devices() if _bt_state(m)["paired"]]
+    if not devs:
+        ui["mode"] = "result"
+        ui["result"] = (False, "nothing paired yet")
+        return
+    ui["mode"] = "menu"
+    ui["title"] = "paired bluetooth"
+    ui["sel"] = 0
+    ui["items"] = [(f"{n}  {m}", lambda u, mac=m, name=n: _confirm_remove_bt(u, mac, name)) for m, n in devs]
+
+
+def _confirm_remove_bt(ui: dict, mac: str, name: str) -> None:
+    def run() -> tuple[bool, str]:
+        out = _bt(mac, "remove", timeout=10)
+        if "not available" in out:
+            return False, "device already gone"
+        return True, f"unravelled {name}"
+    ui["mode"] = "confirm"
+    ui["confirm_msg"] = f"unravel {name}? (unpair + forget)"
+    ui["confirm_cb"] = lambda: _start_work(ui, f"unravelling {name}", run)
+
+
+def _remove_wifi_menu(ui: dict) -> None:
+    conns = _saved_wifi_connections()
+    if not conns:
+        ui["mode"] = "result"
+        ui["result"] = (False, "no saved wifi connections")
+        return
+    ui["mode"] = "menu"
+    ui["title"] = "saved wifi connections"
+    ui["sel"] = 0
+    ui["items"] = [(c, lambda u, name=c: _confirm_remove_wifi(u, name)) for c in conns]
+
+
+def _confirm_remove_wifi(ui: dict, name: str) -> None:
+    def run() -> tuple[bool, str]:
+        r = _nmcli(["con", "delete", name], timeout=20)
+        if r.returncode != 0:
+            return False, "could not delete connection"
+        return True, f"forgot {name}"
+    ui["mode"] = "confirm"
+    ui["confirm_msg"] = f"forget {name}? (deletes saved connection)"
+    ui["confirm_cb"] = lambda: _start_work(ui, f"forgetting {name}", run)
+
+
+def _restart_menu(ui: dict) -> None:
+    ui["mode"] = "menu"
+    ui["title"] = "stir the sleeping powers"
+    ui["sel"] = 0
+    ui["items"] = [
+        ("bluetooth · soft", lambda u: _restart_soft(u, "bluetooth")),
+        ("bluetooth · full (sudo)", lambda u: _restart_sudo(u, "bluetooth")),
+        ("wifi · soft", lambda u: _restart_soft(u, "wifi")),
+        ("wifi · full (sudo)", lambda u: _restart_sudo(u, "NetworkManager")),
+    ]
+
+
+def _restart_soft(ui: dict, target: str) -> None:
+    def run() -> tuple[bool, str]:
+        if target == "bluetooth":
+            _btctl_raw("power", "off")
+            time.sleep(1)
+            out = _btctl_raw("power", "on")
+            ok = "Powered: yes" in _btctl_raw("show") or "Changing power on succeeded" in out
+            return (True, "bluetooth folded and refolded") if ok else (False, "soft restart failed — try full (sudo)")
+        r = _nmcli(["networking", "off"], timeout=20)
+        time.sleep(2)
+        r = _nmcli(["networking", "on"], timeout=30)
+        return (True, "wifi folded and refolded") if r.returncode == 0 else (False, "soft restart failed — try full (sudo)")
+    _start_work(ui, f"folding {target} over", run)
+
+
+def _restart_sudo(ui: dict, target: str) -> None:
+    ui["mode"] = "input"
+    ui["prompt"] = "sudo password:"
+    ui["value"] = ""
+    ui["secret"] = True
+    ui["input_cb"] = lambda u, pw: _restart_sudo_do(u, target, pw)
+
+
+def _restart_sudo_do(ui: dict, target: str, pw: str) -> None:
+    def run() -> tuple[bool, str]:
+        try:
+            r = subprocess.run(["sudo", "-S", "-p", "", "systemctl", "restart", target],
+                               input=pw + "\n", text=True, capture_output=True, timeout=60, check=False)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return False, f"restart failed: {e}"
+        if r.returncode != 0:
+            return False, (r.stderr or "restart failed").strip()
+        return True, f"{target} stirred back to life"
+    _start_work(ui, f"restarting {target}", run)
+
+
+def cmd_status(_: argparse.Namespace | None = None) -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        print(art.paint("status needs a real TTY (not a pipe).", P.ERR), file=sys.stderr)
+        return 2
+
+    art.tui_begin(fd, "ether")
+    last_refresh = 0.0
+    data: dict = {}
+    ui: dict = {
+        "mode": "home", "sel": 0, "items": [], "title": "",
+        "prompt": "", "value": "", "secret": True, "input_cb": None,
+        "confirm_msg": "", "confirm_cb": None,
+        "work_msg": "", "work_fn": None,
+        "result": (True, ""),
+    }
+    try:
+        while True:
+            if ui["mode"] == "home" and time.monotonic() - last_refresh > 3.0:
+                data = _collect_status()
+                last_refresh = time.monotonic()
+            width = art.term_width()
+            height = art.term_height()
+
+            if ui["mode"] == "home":
+                frame = build_frame(data, width, height)
+            elif ui["mode"] == "menu":
+                frame = _menu_frame(ui["title"], ui["items"], ui["sel"], width)
+                hint = "↑/↓ or j/k move · enter pick · esc back"
+            elif ui["mode"] == "input":
+                frame = _input_frame(ui["prompt"], ui["value"], ui["secret"], width)
+                hint = "enter confirm · esc cancel"
+            elif ui["mode"] == "confirm":
+                frame = _confirm_frame(ui["confirm_msg"], width)
+                hint = "y yes · n/esc no"
+            elif ui["mode"] == "work":
+                frame = _work_frame(ui["work_msg"], width)
+                hint = ""
+            else:
+                ok, msg = ui["result"]
+                frame = _result_frame(ok, msg, width)
+                hint = "enter / esc continue"
+            if ui["mode"] != "home":
+                frame += "\n\n" + _footer_frame(width, hint)
+
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                art.tty_write(fd, art.clear_screen() + frame + "\n")
+
+            if ui["mode"] == "work" and ui["work_fn"] is not None:
+                fn, ui["work_fn"] = ui["work_fn"], None
+                res = fn()
+                if res is not None:
+                    ui["result"] = res
+                    ui["mode"] = "result"
+                last_refresh = 0.0
+                continue
+
+            key = art.tui_read_key(fd, timeout=0.2)
+            if key in ("q", "esc", "ctrl-c", "Q") and ui["mode"] == "home":
+                return 0
+
+            if ui["mode"] == "home":
+                if key in ("w", "W"):
+                    _start_work(ui, "whispering to the ether", lambda: _weave("whisper"))
+                elif key in ("l", "L"):
+                    _start_work(ui, "bending the ether to listen", lambda: _weave("listen"))
+                elif key in ("s", "S"):
+                    _scan_menu(ui)
+                elif key in ("n", "N"):
+                    _new_menu(ui)
+                elif key in ("d", "D"):
+                    _remove_menu(ui)
+                elif key in ("R",):
+                    _restart_menu(ui)
+                elif key in ("r",):
+                    last_refresh = 0.0
+            elif ui["mode"] == "menu":
+                if key in ("esc", "q"):
+                    ui["mode"] = "home"
+                elif key in ("up", "k"):
+                    ui["sel"] = (ui["sel"] - 1) % len(ui["items"])
+                elif key in ("down", "j"):
+                    ui["sel"] = (ui["sel"] + 1) % len(ui["items"])
+                elif key in ("enter", "space"):
+                    _, cb = ui["items"][ui["sel"]]
+                    cb(ui)
+            elif ui["mode"] == "input":
+                if key in ("esc", "q"):
+                    ui["mode"] = "home"
+                elif key in ("enter",):
+                    cb = ui["input_cb"]
+                    val = ui["value"]
+                    ui["value"] = ""
+                    if cb:
+                        cb(ui, val)
+                elif key in ("backspace",):
+                    ui["value"] = ui["value"][:-1]
+                elif len(key) == 1 and key.isprintable():
+                    ui["value"] += key
+                elif key == "space":
+                    ui["value"] += " "
+            elif ui["mode"] == "confirm":
+                if key in ("y", "Y", "enter"):
+                    cb = ui["confirm_cb"]
+                    if cb:
+                        cb()
+                elif key in ("n", "N", "esc", "q"):
+                    ui["mode"] = "home"
+            elif ui["mode"] == "result":
+                if key in ("enter", "esc", "space"):
+                    ui["mode"] = "home"
+                    last_refresh = 0.0
+    finally:
+        art.tui_cleanup()
+
+
+def cmd_info(_: argparse.Namespace | None = None) -> int:
+    """ether status / status ether — one-shot report (no TUI)."""
+    data = _collect_status()
+    width = art.term_width()
+    panel_w = max(44, min(width - 2, 88))
+    print()
+    print(art.box([], title="Ether ✦", subtitle="status — the aether at a glance", width=width))
+    print(_bt_panel(data, panel_w))
+    print()
+    print(_wifi_panel(data, panel_w))
+    print()
+    print(_lan_panel(data, panel_w))
+    print()
     return 0
 
 
 def cmd_about(_: argparse.Namespace) -> int:
-    print(
-        """
-ether — legal free media (Internet Archive)
-
-Sources (lawful / free-to-download corpora, not piracy sites):
-  • archive.org     public domain, Creative Commons, open collections
-  • LibriVox        public-domain audiobooks (via IA collection)
-  • Netlabels       free/CC music collections on IA
-  • Feature Films   public-domain & freely licensed films on IA
-
-NOT supported (and not legal to bulk-rip):
-  Netflix, Spotify, commercial torrents, paywalled catalogs, etc.
-
-Examples:
-  ether list 10 music lofi
-  ether list 5 podcast science
-  ether list 8 movie silent
-  ether list 5 audiobook verne
-  ether get SomeIdentifier
-
-Downloads default to:
-  ~/Music/ether/   and   ~/Videos/ether/
-  override: ETHER_AUDIO_DIR / ETHER_VIDEO_DIR
-""".strip()
-    )
+    print()
+    print(art.box(
+        [
+            "ether — network paths & weaves for faeOS",
+            "",
+            "the ether answers to several names (multi-call):",
+            "  whisper ether               tune the ANC headphone in",
+            "  listen  ether               tune the JBL Go 3 in",
+            "  ether                      live TUI: bt · wifi · lan (q to close)",
+            "  status ether               one-shot report: bt · wifi · lan",
+            "",
+            "  ether net                  connectivity across the weave",
+            "  ether veil [on|off|status] raise/lower the VPN (alias: vpn)",
+            "  ether bridge               phone hotspot on boot (systemd)",
+            "  ether about",
+            "",
+            "Free media lives under Siren now:",
+            "  siren trove list 10 music lofi",
+            "  siren trove get <identifier>",
+            "",
+            "Phone hotspot (local only — never commit):",
+            "  ~/.config/ether/netherweave.env",
+            "    ETHER_NETHER_SSID=…  ETHER_NETHER_PSK=…",
+        ],
+        title="Ether ✦",
+        subtitle="network paths & weaves",
+        body_style=(art.P.MUTED,),
+        width=art.term_width(),
+    ))
+    print()
     return 0
 
 
+_ACTION_ALIASES = {
+    "raise": "on", "up": "on",
+    "lower": "off", "down": "off",
+    "check": "status",
+}
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        prog="ether",
-        description="Browse & download legally free audio/video from Internet Archive",
-    )
+    _bootstrap()
+
+    prog = os.path.basename(sys.argv[0])
+    rest = sys.argv[1:]
+
+    if prog == "whisper":
+        return cmd_weave("whisper", rest[0] if rest else None)
+    if prog == "listen":
+        return cmd_weave("listen", rest[0] if rest else None)
+    if prog == "status":
+        return cmd_info()
+
+    ap = argparse.ArgumentParser(prog="ether", description="network paths & weaves for faeOS")
     sub = ap.add_subparsers(dest="cmd")
 
-    p = sub.add_parser("list", help="search and interactively download")
-    p.add_argument("n", nargs="?", type=int, default=None, help="how many results (default 10)")
-    p.add_argument(
-        "terms",
-        nargs="*",
-        help="kind + keywords, e.g. music album lofi | podcast history | movie silent",
-    )
-    p.add_argument("--kind", default=None, help="force kind: music, podcast, movie, series, …")
-    p.set_defaults(func=cmd_list)
+    p = sub.add_parser("net", help="IPv4/IPv6 + archive.org reachability")
+    p.set_defaults(func=lambda _a: net_diag())
 
-    # convenience: ether search … == list
-    p = sub.add_parser("search", help="alias for list")
-    p.add_argument("n", nargs="?", type=int, default=None)
-    p.add_argument("terms", nargs="*")
-    p.add_argument("--kind", default=None)
-    p.set_defaults(func=cmd_list)
+    p = sub.add_parser("veil", help="raise/lower the VPN", aliases=["vpn"])
+    p.add_argument("action", nargs="?", default="toggle", help="on|off|status  (aliases raise/lower/up/down/check)")
+    p.add_argument("--name", default=None, help="specific VPN connection name")
+    p.set_defaults(func=cmd_veil)
 
-    p = sub.add_parser("get", help="download by archive.org identifier")
-    p.add_argument("identifier")
-    p.add_argument("--type", default="", help="audio|movies hint")
-    p.set_defaults(func=cmd_get)
+    p = sub.add_parser("bridge", help="boot fallback: tether to phone hotspot (systemd)")
+    p.add_argument("--quiet", action="store_true")
+    p.set_defaults(func=cmd_bridge)
 
-    p = sub.add_parser("about", help="legal sources & help")
+    p = sub.add_parser("about")
     p.set_defaults(func=cmd_about)
 
-    # bare "ether 10 music lofi" → list
-    # If first arg is digits or known subcommand…
-    argv = sys.argv[1:]
-    if argv and argv[0] not in ("list", "search", "get", "about", "-h", "--help") and not argv[0].startswith("-"):
-        # rewrite to list
-        argv = ["list"] + argv
+    p = sub.add_parser("status", help="one-shot report: bt · wifi · lan")
+    p.set_defaults(func=cmd_info)
 
-    args = ap.parse_args(argv)
+    args = ap.parse_args()
     if not getattr(args, "cmd", None):
-        ap.print_help()
-        print()
-        return cmd_about(args)
-    # list: if n missing but terms[0] is int-like already handled; if terms start with number
-    if args.cmd in ("list", "search") and args.n is None and args.terms:
-        if args.terms[0].isdigit():
-            args.n = int(args.terms.pop(0))
-        else:
-            args.n = 10
-    elif args.cmd in ("list", "search") and args.n is None:
-        args.n = 10
+        return cmd_status()
     return args.func(args)
 
 
@@ -499,3 +1141,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print()
         raise SystemExit(130)
+

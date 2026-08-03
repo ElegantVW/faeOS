@@ -1,25 +1,41 @@
 #!/usr/bin/env bash
-# One-shot CPU busy % for starship (from /proc/stat)
-# shellcheck disable=SC2034
-read -r _ u1 n1 s1 i1 rest </proc/stat
-sleep 0.12
-read -r _ u2 n2 s2 i2 rest </proc/stat
-idle1=$i1
-idle2=$i2
-# approx total from first 4 fields
-t1=$((u1 + n1 + s1 + i1))
-t2=$((u2 + n2 + s2 + i2))
-di=$((idle2 - idle1))
-dt=$((t2 - t1))
-if (( dt <= 0 )); then
-  echo "CPU ?%"
+# One-shot CPU busy % for starship — Linux / macOS / BSD
+set -euo pipefail
+bars=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+busy=""
+
+if [[ -r /proc/stat ]]; then
+  # Linux
+  # shellcheck disable=SC2034
+  read -r _ u1 n1 s1 i1 rest </proc/stat
+  sleep 0.12
+  read -r _ u2 n2 s2 i2 rest </proc/stat
+  di=$((i2 - i1))
+  dt=$(( (u2 + n2 + s2 + i2) - (u1 + n1 + s1 + i1) ))
+  if (( dt > 0 )); then
+    busy=$(( (100 * (dt - di)) / dt ))
+  fi
+elif command -v top >/dev/null 2>&1 && [[ "$(uname -s)" == Darwin ]]; then
+  # macOS: sample CPU idle from top
+  idle=$(top -l 2 -n 0 -s 0 2>/dev/null | awk '/CPU usage/ {idle=$7} END {gsub(/%/,"",idle); print idle}')
+  if [[ -n "${idle:-}" ]]; then
+    busy=$(awk -v i="$idle" 'BEGIN {b=100-i; if(b<0)b=0; if(b>100)b=100; printf "%d", b+0}')
+  fi
+elif command -v sysctl >/dev/null 2>&1; then
+  # FreeBSD-ish load average proxy (not true busy %)
+  load=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
+  ncpu=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
+  if [[ -n "$load" ]]; then
+    busy=$(awk -v l="$load" -v n="$ncpu" 'BEGIN {b=100*l/n; if(b>100)b=100; if(b<0)b=0; printf "%d", b}')
+  fi
+fi
+
+if [[ -z "${busy:-}" ]]; then
+  echo "CPU ?"
   exit 0
 fi
-busy=$(( (100 * (dt - di)) / dt ))
-if (( busy < 0 )); then busy=0; fi
-if (( busy > 100 )); then busy=100; fi
-# tiny load bars (glyph) — fill by bucket
-bars=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+(( busy < 0 )) && busy=0
+(( busy > 100 )) && busy=100
 idx=$(( busy * 7 / 100 ))
 (( idx > 7 )) && idx=7
 (( idx < 0 )) && idx=0

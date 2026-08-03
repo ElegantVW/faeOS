@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""scry-log — session command + output store for SCRY.
+
+~/.cache/pixie/scry/
+  index.jsonl     metadata per event
+  out/<id>.txt    full captured output
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import uuid
+from pathlib import Path
+
+ROOT = Path.home() / ".cache" / "pixie" / "scry"
+INDEX = ROOT / "index.jsonl"
+OUT_DIR = ROOT / "out"
+MAX_PREVIEW = 160
+MAX_STORE = int(os.environ.get("SCRY_MAX_OUTPUT", str(1024_000)))
+MAX_ENTRIES = int(os.environ.get("SCRY_MAX_ENTRIES", "3000"))
+
+
+def ensure() -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _trim() -> None:
+    if not INDEX.is_file():
+        return
+    try:
+        lines = INDEX.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    if len(lines) <= MAX_ENTRIES:
+        return
+    keep = lines[-MAX_ENTRIES:]
+    ids = set()
+    for ln in keep:
+        try:
+            ids.add(json.loads(ln).get("id", ""))
+        except json.JSONDecodeError:
+            pass
+    try:
+        for p in OUT_DIR.glob("*.txt"):
+            if p.stem not in ids:
+                p.unlink(missing_ok=True)
+    except OSError:
+        pass
+    INDEX.write_text("\n".join(keep) + "\n", encoding="utf-8")
+
+
+def _write_rec(rec: dict, text: str) -> str:
+    ensure()
+    eid = rec["id"]
+    if len(text.encode("utf-8")) > MAX_STORE:
+        text = text.encode("utf-8")[:MAX_STORE].decode("utf-8", "ignore")
+        text += "\n\n… [scry: output truncated]\n"
+    (OUT_DIR / f"{eid}.txt").write_text(text, encoding="utf-8")
+    plain = re.sub(r"\033\[[0-9;]*[mK]", "", text)
+    preview = " ".join(plain.split())
+    if len(preview) > MAX_PREVIEW:
+        preview = preview[: MAX_PREVIEW - 1] + "…"
+    rec["preview"] = preview
+    rec["bytes"] = len(text.encode("utf-8"))
+    with INDEX.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    _trim()
+    return eid
+
+
+def cmd_append(args: argparse.Namespace) -> int:
+    cmd = (args.cmd or "").strip()
+    if not cmd or re.match(r"^(scry|up)(\s|$)", cmd):
+        return 0
+    raw = b""
+    if args.output_file:
+        try:
+            raw = Path(args.output_file).read_bytes()
+        except OSError:
+            raw = b""
+    elif not sys.stdin.isatty():
+        raw = sys.stdin.buffer.read()
+    text = raw.decode("utf-8", "replace").replace("\x00", "")
+    eid = uuid.uuid4().hex[:12]
+    rec = {
+        "id": eid,
+        "kind": "cmd",
+        "cmd": cmd,
+        "cmd_time": args.cmd_time or _now(),
+        "end_time": args.end_time or _now(),
+        "exit": int(args.exit),
+        "cwd": args.cwd or os.environ.get("PWD") or str(Path.home()),
+    }
+    print(_write_rec(rec, text))
+    return 0
+
+
+def cmd_pixie(args: argparse.Namespace) -> int:
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8", errors="replace")
+    else:
+        text = sys.stdin.read()
+    text = text.strip() + "\n"
+    if not text.strip():
+        return 0
+    eid = uuid.uuid4().hex[:12]
+    t = _now()
+    rec = {
+        "id": eid,
+        "kind": "pixie",
+        "cmd": "pixie",
+        "cmd_time": t,
+        "end_time": t,
+        "exit": 0,
+        "cwd": os.environ.get("PWD") or str(Path.home()),
+    }
+    print(_write_rec(rec, text))
+    return 0
+
+
+def read_index() -> list[dict]:
+    if not INDEX.is_file():
+        return []
+    rows = []
+    for ln in INDEX.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not ln.strip():
+            continue
+        try:
+            rows.append(json.loads(ln))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def load_output(eid: str) -> str:
+    p = OUT_DIR / f"{eid}.txt"
+    if not p.is_file():
+        return ""
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    rows = list(reversed(read_index()))[: args.n or 500]
+    for r in rows:
+        print(json.dumps(r, ensure_ascii=False))
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    eid = args.id.strip()
+    for r in read_index():
+        if r.get("id") == eid:
+            print(json.dumps({**r, "output": load_output(eid)}, ensure_ascii=False))
+            return 0
+    return 1
+
+
+def cmd_export_cmd(args: argparse.Namespace) -> int:
+    for r in read_index():
+        if r.get("id") == args.id.strip():
+            print(r.get("cmd") or "")
+            return 0
+    return 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="scry-log")
+    sub = ap.add_subparsers(dest="c", required=True)
+
+    p = sub.add_parser("append")
+    p.add_argument("--cmd", required=True)
+    p.add_argument("--cmd-time", default="")
+    p.add_argument("--end-time", default="")
+    p.add_argument("--exit", type=int, default=0)
+    p.add_argument("--cwd", default="")
+    p.add_argument("--output-file", default="")
+    p.set_defaults(func=cmd_append)
+
+    p = sub.add_parser("pixie")
+    p.add_argument("file", nargs="?")
+    p.set_defaults(func=cmd_pixie)
+
+    p = sub.add_parser("list")
+    p.add_argument("-n", type=int, default=500)
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("show")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("cmd")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_export_cmd)
+
+    args = ap.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

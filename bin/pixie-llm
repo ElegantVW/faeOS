@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
-# pixie-llm — fully offline llama.cpp server for Pixie (localhost only)
+# pixie-llm — fully offline llama.cpp server(s) for Pixie + friends
 #
-# Uses llama-server (llama.cpp). No cloud, no ollama.com after models exist.
-# Model default: ~/.local/share/pixie/models/mistral-7b-instruct.gguf
+# Profiles (models under ~/.local/share/pixie/models/):
+#   qwen     Qwen2.5-3B-Instruct   port 8080  (default Pixie)
+#   kur      SmolLM2-360M-Instruct port 8081  (haiku dragon — tiny/fast)
+#   mistral  Mistral-7B-Instruct   port 8080  (legacy quality)
+#   default  same as qwen if present, else mistral
 #
 # Usage:
-#   pixie-llm start|stop|status|restart|logs|path
-#   pixie-llm chat "hello"     # quick offline test (needs curl + jq optional)
+#   pixie-llm start [qwen|kur|mistral|default]
+#   pixie-llm stop  [qwen|kur|mistral|all]
+#   pixie-llm status [profile|all]
+#   pixie-llm restart [profile]
+#   pixie-llm chat [profile] "hello"
+#   pixie-llm path|logs [profile]
 #
 set -euo pipefail
 
@@ -14,27 +21,65 @@ CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pixie"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pixie/llm"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pixie"
 MODEL_DIR="${PIXIE_LLM_MODEL_DIR:-$DATA_DIR/models}"
-MODEL="${PIXIE_LLM_MODEL:-$MODEL_DIR/mistral-7b-instruct.gguf}"
 
 HOST="${PIXIE_LLM_HOST:-127.0.0.1}"
-PORT="${PIXIE_LLM_PORT:-8080}"
-CTX="${PIXIE_LLM_CTX:-2048}"
-THREADS="${PIXIE_LLM_THREADS:-$(nproc 2>/dev/null || echo 4)}"
-NGL="${PIXIE_LLM_NGL:-0}"   # 0 = CPU only (safe offline default)
-ALIAS="${PIXIE_LLM_ALIAS:-mistral}"
-
-PID_FILE="$CACHE_DIR/llama-server.pid"
-LOG_FILE="$CACHE_DIR/llama-server.log"
-URL="http://${HOST}:${PORT}"
+_NPROC="$(nproc 2>/dev/null || echo 4)"
+THREADS_DEFAULT="${PIXIE_LLM_THREADS:-$(( _NPROC > 1 ? _NPROC - 1 : 1 ))}"
+NGL="${PIXIE_LLM_NGL:-0}"
 
 mkdir -p "$CFG_DIR" "$CACHE_DIR" "$MODEL_DIR"
+
+# profile → model file, port, ctx, alias, threads
+resolve_profile() {
+  local p="${1:-default}"
+  case "$p" in
+    default|pixie|"")
+      if [[ -f "$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf" ]]; then
+        p=qwen
+      else
+        p=mistral
+      fi
+      ;;
+  esac
+  PROFILE="$p"
+  case "$PROFILE" in
+    qwen)
+      MODEL="${PIXIE_LLM_MODEL:-$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf}"
+      PORT="${PIXIE_LLM_PORT:-8080}"
+      CTX="${PIXIE_LLM_CTX:-4096}"
+      ALIAS="${PIXIE_LLM_ALIAS:-qwen}"
+      THREADS="${PIXIE_LLM_THREADS:-$THREADS_DEFAULT}"
+      ;;
+    kur)
+      MODEL="${KUR_LLM_MODEL:-$MODEL_DIR/smollm2-360m-instruct-q4_k_m.gguf}"
+      PORT="${KUR_LLM_PORT:-8081}"
+      CTX="${KUR_LLM_CTX:-1024}"
+      ALIAS="${KUR_LLM_ALIAS:-kur}"
+      # tiny model: all cores OK for snappy haiku
+      THREADS="${KUR_LLM_THREADS:-$_NPROC}"
+      ;;
+    mistral)
+      MODEL="${PIXIE_LLM_MODEL_MISTRAL:-$MODEL_DIR/mistral-7b-instruct.gguf}"
+      PORT="${PIXIE_LLM_PORT:-8080}"
+      CTX="${PIXIE_LLM_CTX:-2048}"
+      ALIAS="${PIXIE_LLM_ALIAS:-mistral}"
+      THREADS="${PIXIE_LLM_THREADS:-$THREADS_DEFAULT}"
+      ;;
+    *)
+      echo "unknown profile: $p  (qwen|kur|mistral|default)" >&2
+      return 1
+      ;;
+  esac
+  PID_FILE="$CACHE_DIR/llama-server.${PROFILE}.pid"
+  LOG_FILE="$CACHE_DIR/llama-server.${PROFILE}.log"
+  URL="http://${HOST}:${PORT}"
+}
 
 find_server() {
   if [[ -n "${PIXIE_LLAMA_SERVER:-}" && -x "${PIXIE_LLAMA_SERVER}" ]]; then
     echo "$PIXIE_LLAMA_SERVER"
     return
   fi
-  # Prefer user-local llama.cpp (no Ollama)
   if [[ -x "$HOME/bin/llama-server" ]]; then
     echo "$HOME/bin/llama-server"
     return
@@ -64,7 +109,6 @@ is_running() {
       return 0
     fi
   fi
-  # fallback: something listening on port
   if command -v ss >/dev/null 2>&1; then
     ss -ltn 2>/dev/null | grep -qE ":${PORT}\\b" && return 0
   fi
@@ -79,13 +123,15 @@ health() {
 cmd_status() {
   local srv
   srv=$(find_server 2>/dev/null || echo "(llama-server not found)")
+  echo "profile:  $PROFILE"
   echo "backend:  llama.cpp (offline)"
   echo "server:   $srv"
   echo "model:    $MODEL"
   echo "listen:   ${HOST}:${PORT}  (localhost only)"
   echo "url:      $URL"
+  echo "ctx/thr:  $CTX / $THREADS"
   if is_running && health; then
-    echo "status:   running ✓"
+    echo "status:   running"
     [[ -f "$PID_FILE" ]] && echo "pid:      $(cat "$PID_FILE")"
     return 0
   elif is_running; then
@@ -97,32 +143,43 @@ cmd_status() {
   fi
 }
 
+cmd_status_all() {
+  local p rc=0
+  for p in qwen kur mistral; do
+    echo "── $p ──"
+    resolve_profile "$p"
+    cmd_status || true
+    echo
+  done
+}
+
 cmd_start() {
   if is_running && health; then
-    echo "pixie-llm already running at $URL"
+    echo "pixie-llm [$PROFILE] already running at $URL"
     return 0
+  fi
+  # if something else holds the port, stop our profile's pid first
+  if is_running; then
+    cmd_stop >/dev/null || true
   fi
   local srv
   if ! srv=$(find_server); then
     echo "error: llama-server not found." >&2
-    echo "Expected user-local: ~/bin/llama-server + ~/.local/lib/pixie/" >&2
-    echo "Or install: sudo pacman -S llama-cpp" >&2
     return 1
   fi
   if [[ ! -e "$MODEL" ]]; then
     echo "error: model not found: $MODEL" >&2
-    echo "Place a .gguf at that path (Mistral-7B-Instruct GGUF works well)." >&2
+    echo "  expected under $MODEL_DIR" >&2
+    ls -lh "$MODEL_DIR" 2>/dev/null || true
     return 1
   fi
 
-  # Resolve symlink for clarity in logs
   local model_path
   model_path=$(readlink -f "$MODEL" 2>/dev/null || echo "$MODEL")
 
-  echo "starting llama.cpp offline on ${HOST}:${PORT} …"
+  echo "starting llama.cpp [$PROFILE] on ${HOST}:${PORT} …"
   echo "  model: $model_path"
-  # --host 127.0.0.1 : never expose to LAN
-  # --jinja : chat templates from GGUF
+  echo "  ctx=$CTX threads=$THREADS alias=$ALIAS"
   nohup "$srv" \
     -m "$MODEL" \
     --host "$HOST" \
@@ -132,18 +189,17 @@ cmd_start() {
     -ngl "$NGL" \
     --alias "$ALIAS" \
     --jinja \
+    --chat-template gemma2 \
     >"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
 
-  # wait for health
   local i
   for i in $(seq 1 90); do
     if health; then
-      echo "ready: $URL  (pid $(cat "$PID_FILE"))"
+      echo "ready: $URL  (pid $(cat "$PID_FILE"))  [$PROFILE]"
       echo "logs:  $LOG_FILE"
       return 0
     fi
-    # died?
     if [[ -f "$PID_FILE" ]] && ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
       echo "error: llama-server exited while loading. Last log lines:" >&2
       tail -30 "$LOG_FILE" >&2 || true
@@ -162,23 +218,37 @@ cmd_stop() {
     pid=$(cat "$PID_FILE")
     if kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
-      sleep 0.5
+      sleep 0.4
       kill -9 "$pid" 2>/dev/null || true
-      echo "stopped pid $pid"
+      echo "stopped [$PROFILE] pid $pid"
     fi
     rm -f "$PID_FILE"
   fi
-  # anything leftover on port?
   if command -v fuser >/dev/null 2>&1; then
     fuser -k "${PORT}/tcp" 2>/dev/null || true
   fi
-  echo "pixie-llm stopped"
+  echo "pixie-llm [$PROFILE] stopped"
+}
+
+cmd_stop_all() {
+  local p
+  for p in qwen kur mistral; do
+    resolve_profile "$p"
+    cmd_stop 2>/dev/null || true
+  done
+  # legacy single pid file
+  if [[ -f "$CACHE_DIR/llama-server.pid" ]]; then
+    local pid
+    pid=$(cat "$CACHE_DIR/llama-server.pid" 2>/dev/null || true)
+    [[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true
+    rm -f "$CACHE_DIR/llama-server.pid"
+  fi
 }
 
 cmd_chat() {
   local prompt="${*:-hello}"
   if ! health; then
-    echo "server not up — try: pixie-llm start" >&2
+    echo "server not up — try: pixie-llm start $PROFILE" >&2
     return 1
   fi
   curl -fsS --max-time 300 "${URL}/v1/chat/completions" \
@@ -186,12 +256,13 @@ cmd_chat() {
     -d "$(python3 -c "
 import json,sys
 print(json.dumps({
-  'model': '$ALIAS',
+  'model': sys.argv[2],
   'messages': [{'role':'user','content': sys.argv[1]}],
   'temperature': 0.2,
+  'max_tokens': 256,
   'stream': False,
 }))
-" "$prompt")" \
+" "$prompt" "$ALIAS")" \
   | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -200,6 +271,7 @@ print((d.get('choices') or [{}])[0].get('message',{}).get('content','') or d)
 }
 
 cmd_path() {
+  echo "PROFILE=$PROFILE"
   echo "MODEL=$MODEL"
   echo "URL=$URL"
   echo "LOG=$LOG_FILE"
@@ -207,19 +279,61 @@ cmd_path() {
   find_server || true
 }
 
-case "${1:-status}" in
-  start)   shift; cmd_start "$@" ;;
-  stop)    cmd_stop ;;
-  restart) cmd_stop; cmd_start ;;
-  status)  cmd_status ;;
-  logs)    tail -n "${2:-80}" "$LOG_FILE" 2>/dev/null || echo "(no log yet)" ;;
-  chat)    shift; cmd_chat "$@" ;;
-  path)    cmd_path ;;
+cmd_models() {
+  echo "models in $MODEL_DIR:"
+  ls -lh "$MODEL_DIR"/*.gguf 2>/dev/null || echo "  (none)"
+}
+
+# ── argv ──────────────────────────────────────────────────────────────
+cmd="${1:-status}"
+shift || true
+
+# commands that take optional profile as first remaining arg
+case "$cmd" in
+  start|stop|restart|status|logs|chat|path)
+    prof=default
+    if [[ "${1:-}" =~ ^(qwen|kur|mistral|default|pixie|all)$ ]]; then
+      prof="$1"
+      shift || true
+    fi
+    if [[ "$cmd" == "status" && "$prof" == "all" ]]; then
+      cmd_status_all
+      exit 0
+    fi
+    if [[ "$cmd" == "stop" && "$prof" == "all" ]]; then
+      cmd_stop_all
+      exit 0
+    fi
+    resolve_profile "$prof"
+    case "$cmd" in
+      start)   cmd_start ;;
+      stop)    cmd_stop ;;
+      restart) cmd_stop; cmd_start ;;
+      status)  cmd_status ;;
+      logs)    tail -n "${1:-80}" "$LOG_FILE" 2>/dev/null || echo "(no log yet)" ;;
+      chat)    cmd_chat "$@" ;;
+      path)    cmd_path ;;
+    esac
+    ;;
+  models|ls)
+    cmd_models
+    ;;
   -h|--help|help)
-    sed -n '2,12p' "$0" | sed 's/^# \?//'
+    cat <<'H'
+pixie-llm — offline llama.cpp profiles
+
+  pixie-llm start [qwen|kur|mistral]   start a profile (default: qwen if present)
+  pixie-llm stop  [qwen|kur|mistral|all]
+  pixie-llm status [profile|all]
+  pixie-llm restart [profile]
+  pixie-llm chat [profile] "hello"
+  pixie-llm models
+
+Ports:  qwen/mistral → 8080    kur → 8081
+H
     ;;
   *)
-    echo "Usage: pixie-llm {start|stop|restart|status|logs|chat|path}" >&2
+    echo "Usage: pixie-llm {start|stop|restart|status|logs|chat|path|models}" >&2
     exit 1
     ;;
 esac

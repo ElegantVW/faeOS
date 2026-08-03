@@ -1,0 +1,930 @@
+#!/usr/bin/env python3
+"""magpie — privacy-first terminal search. Formerly `duck`.
+
+  magpie arch linux              # auto: DDG → DDG HTML → Marginalia
+  magpie -a ufw tutorial         # fetch top pages, then ONE AI summary
+  magpie --tor query             # engines via Tor
+  magpie --engine marginalia q   # force independent index
+  magpie --any query             # if all fail: Wikipedia extras (no Google)
+
+Design:
+  - Privacy engines only (DDG + Marginalia). Never Google.
+  - Cookie-less HTTP (no jar, no Cookie headers). Pixie LLM is local only.
+  - -a deepens top results once, then one local AI pass.
+  - Never print URLs in normal output (privacy/UX).
+"""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import html as html_lib
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+
+# Import pixie_termart for shared color palette
+import sys as _sys
+_sys.path.insert(0, str(Path.home() / "bin"))
+import pixie_termart as art  # noqa: E402
+
+from pixie_termart import Palette as P, PIXIE_WAIT
+
+# Force Unicode box drawing for smooth round corners
+os.environ["PIXIE_UNICODE"] = "1"
+
+LLAMA = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
+MODEL = os.environ.get("ASK_MODEL", os.environ.get("ASK_WEB_MODEL", "mistral"))
+UA = "duck/3.0 (terminal search; +https://github.com/jarun/ddgr)"
+# How many top hits to open when -a / --deep
+DEEP_DEFAULT = 3
+DEEP_MAX = 5
+PAGE_CHARS = 2500
+FETCH_TIMEOUT = 8
+# Reply length. Potato default 512 (8GB + CPU 7B). Override with env.
+def _max_tokens(default: int = 512) -> int:
+    for key in ("MAGPIE_MAX_TOKENS", "PIXIE_MAX_TOKENS"):
+        raw = os.environ.get(key, "").strip()
+        if raw.isdigit():
+            return max(128, min(4096, int(raw)))
+    return default
+
+# Use art.paint() which internally handles color detection via art.color_ok()
+# Color palette from pixie_termart.P:
+# PINK=175, DARK=168, PINK_DIM=132, BLUSH=218, SILVER=252, MUTED=245
+# ERR=197, WARN=214, OK=78, RESET, BOLD, DIM
+
+
+def eprint(*a, **k):
+    print(*a, file=sys.stderr, **k)
+
+
+def term_width(default: int = 72) -> int:
+    try:
+        return max(40, min(shutil.get_terminal_size((default, 24)).columns, 100))
+    except Exception:
+        return default
+
+
+def box(title: str, body: str, *, accent: str = P.PINK, width: int | None = None) -> str:
+    """Unicode box around multiline body."""
+    return art.box(
+        body,
+        title=title,
+        accent=accent,
+        width=width,
+        body_style=(P.SILVER,),
+    )
+
+
+def strip_urls(text: str) -> str:
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"www\.\S+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _http_get(url: str, *, timeout: float = 12, tor: bool = False) -> bytes | None:
+    """Cookie-less GET. No Cookie header, no jar — nothing stored for the engines."""
+    if tor and shutil.which("torsocks"):
+        try:
+            proc = subprocess.run(
+                [
+                    "torsocks",
+                    "--isolate",
+                    "curl",
+                    "-fsSL",
+                    "-A",
+                    UA,
+                    "--max-time",
+                    str(int(timeout)),
+                    url,
+                ],
+                capture_output=True,
+                timeout=timeout + 5,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                return proc.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return None
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.8",
+                # explicitly no cookies
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(900_000)
+    except Exception:
+        return None
+
+
+def _http_post_form(
+    url: str, fields: dict[str, str], *, timeout: float = 12, tor: bool = False
+) -> bytes | None:
+    data = urllib.parse.urlencode(fields).encode()
+    if tor and shutil.which("torsocks"):
+        try:
+            proc = subprocess.run(
+                [
+                    "torsocks",
+                    "--isolate",
+                    "curl",
+                    "-fsSL",
+                    "-A",
+                    UA,
+                    "--max-time",
+                    str(int(timeout)),
+                    "-X",
+                    "POST",
+                    "--data",
+                    data.decode(),
+                    url,
+                ],
+                capture_output=True,
+                timeout=timeout + 5,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                return proc.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return None
+    try:
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.8",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(900_000)
+    except Exception:
+        return None
+
+
+def _unwrap_ddg_redirect(url: str) -> str:
+    """Resolve //duckduckgo.com/l/?uddg=… to the real target."""
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = "https:" + url
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if "duckduckgo.com" in (parsed.netloc or "") and "uddg=" in (parsed.query or ""):
+            qs = urllib.parse.parse_qs(parsed.query)
+            real = (qs.get("uddg") or [""])[0]
+            return urllib.parse.unquote(real) if real else url
+    except Exception:
+        pass
+    return url
+
+
+def run_ddgr(query: str, n: int = 8, tor: bool = False) -> tuple[list[dict], str]:
+    ddgr = shutil.which("ddgr")
+    if not ddgr:
+        return [], "ddgr not installed"
+    cmd = [ddgr, "-n", str(n), "--np", "--json", "-C", "--expand", query]
+    env = os.environ.copy()
+    env["DDGR_COLORS"] = ""
+    if tor:
+        if not shutil.which("torsocks"):
+            return [], "torsocks not installed (install torsocks for --tor)"
+        cmd = ["torsocks", "--isolate"] + cmd
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=45 if not tor else 90,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return [], "DuckDuckGo timed out" + (" (via Tor)" if tor else "")
+    except FileNotFoundError as e:
+        return [], str(e)
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    if not out:
+        msg = "No DuckDuckGo results (ddgr)."
+        if proc.returncode:
+            msg += f" exit={proc.returncode}."
+        if err:
+            msg += f" {err[:200]}"
+        return [], msg
+
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        # empty JSON list often printed as []
+        if out in ("[]", ""):
+            return [], err or "ddgr returned empty list (often HTTP 202 bot wall)"
+        return [
+            {"title": line, "url": "", "abstract": "", "body": ""}
+            for line in out.splitlines()
+            if line.strip() and line.strip() != "[]"
+        ], ""
+
+    if isinstance(data, dict):
+        data = data.get("results") or data.get("items") or []
+    if not isinstance(data, list):
+        return [], "Unexpected ddgr JSON shape"
+
+    results = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        results.append(
+            {
+                "title": item.get("title") or item.get("t") or "",
+                "url": item.get("url") or item.get("u") or "",
+                "abstract": item.get("abstract")
+                or item.get("a")
+                or item.get("snippet")
+                or "",
+                "body": "",
+            }
+        )
+    if not results:
+        return [], err or "DuckDuckGo returned empty result list (ddgr)."
+    return results, ""
+
+
+def run_ddg_html(query: str, n: int = 8, tor: bool = False, page: int = 1) -> tuple[list[dict], str]:
+    """DuckDuckGo HTML endpoint — same privacy model as DDG, no API key, no cookies.
+
+    ddgr often hits HTTP 202 bot walls; this path still works on clearnet.
+    """
+    s = (page - 1) * 30
+    raw = _http_post_form(
+        "https://html.duckduckgo.com/html/",
+        {"q": query, "kl": "us-en", "df": "", "s": str(s)},
+        timeout=15,
+        tor=tor,
+    )
+    if not raw:
+        return [], "DDG HTML: no response"
+    text = raw.decode("utf-8", "replace")
+    if "anomaly" in text.lower() and "result__a" not in text:
+        return [], "DDG HTML: bot check / empty page"
+    results: list[dict] = []
+    # Each hit: result__a title+href, nearby result__snippet
+    for m in re.finditer(
+        r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
+        r'(?:.*?'
+        r'class="result__snippet"[^>]*>(.*?)</(?:a|td|div)>)?',
+        text,
+        re.I | re.S,
+    ):
+        url = _unwrap_ddg_redirect(html_lib.unescape(m.group(1) or ""))
+        title = html_lib.unescape(re.sub(r"<[^>]+>", "", m.group(2) or "")).strip()
+        snip = html_lib.unescape(re.sub(r"<[^>]+>", "", m.group(3) or "")).strip()
+        if not title:
+            continue
+        results.append(
+            {"title": title, "url": url, "abstract": snip, "body": ""}
+        )
+        if len(results) >= n:
+            break
+    if not results:
+        return [], "DDG HTML: parsed zero results"
+    return results, ""
+
+
+def run_marginalia(query: str, n: int = 8, tor: bool = False, page: int = 1) -> tuple[list[dict], str]:
+    """Marginalia — independent small-web crawler, no Google, no profile cookies.
+
+    Uses the old text-friendly UI (new UI is JS-only). Good DDG alternative.
+    """
+    offset = (page - 1) * 20
+    url = "https://old-search.marginalia.nu/search?" + urllib.parse.urlencode(
+        {"query": query, "offset": str(offset)}
+    )
+    raw = _http_get(url, timeout=15, tor=tor)
+    if not raw:
+        return [], "Marginalia: no response"
+    text = raw.decode("utf-8", "replace")
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    # Prefer structured cards: <section class="card search-result">
+    cards = re.findall(
+        r'<section[^>]*class="[^"]*search-result[^"]*"[^>]*>(.*?)</section>',
+        text,
+        re.I | re.S,
+    )
+    blocks = cards if cards else [text]
+
+    for block in blocks:
+        # title link: prefer non-URL text anchors
+        title = ""
+        href = ""
+        for m in re.finditer(
+            r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>',
+            block,
+            re.I | re.S,
+        ):
+            h = m.group(1).strip()
+            t = html_lib.unescape(re.sub(r"<[^>]+>", "", m.group(2) or "")).strip()
+            t = re.sub(r"\s+", " ", t)
+            if not t or "marginalia" in h:
+                continue
+            # skip pure-URL labels if we can get a real title later
+            if t.startswith("http://") or t.startswith("https://"):
+                if not href:
+                    href = h
+                continue
+            title, href = t, h
+            break
+        if not href:
+            continue
+        if href in seen:
+            continue
+        host = urllib.parse.urlparse(href).netloc.lower()
+        if "marginalia" in host:
+            continue
+        if not title:
+            title = host or href
+        # description / snippet fields
+        snip = ""
+        for pat in (
+            r'class="[^"]*description[^"]*"[^>]*>(.*?)</(?:div|p|span|td)>',
+            r'class="[^"]*snippet[^"]*"[^>]*>(.*?)</(?:div|p|span|td)>',
+            r'class="[^"]*body[^"]*"[^>]*>(.*?)</(?:div|p|span)>',
+        ):
+            sm = re.search(pat, block, re.I | re.S)
+            if sm:
+                snip = html_lib.unescape(re.sub(r"<[^>]+>", " ", sm.group(1)))
+                snip = re.sub(r"\s+", " ", snip).strip()
+                if len(snip) > 40:
+                    break
+        if not snip:
+            # fall back: strip tags from card body, drop title/url noise
+            plain = html_lib.unescape(re.sub(r"<[^>]+>", " ", block))
+            plain = re.sub(r"\s+", " ", plain).strip()
+            if title and title in plain:
+                plain = plain.split(title, 1)[-1].strip()
+            snip = plain[:280]
+        seen.add(href)
+        results.append(
+            {"title": title, "url": href, "abstract": snip[:320], "body": ""}
+        )
+        if len(results) >= n:
+            break
+
+    if not results:
+        return [], "Marginalia: parsed zero results"
+    return results, ""
+
+
+def search_chain(
+    query: str, n: int = 8, tor: bool = False, page: int = 1
+) -> tuple[list[dict], str, str]:
+    """Privacy-safe engine chain. Returns (results, source_label, error).
+
+    Order:
+      1) ddgr (DDG) - page 1 only
+      2) DDG HTML (same DDG, no cookies, no Google)
+      3) Marginalia (independent index, no Google)
+    Never Google. No cookie jars.
+    """
+    errors: list[str] = []
+
+    if page == 1:
+        results, err = run_ddgr(query, n=n, tor=tor)
+        if results:
+            return results, "ddg/ddgr", ""
+        if err:
+            errors.append(err)
+
+    results, err = run_ddg_html(query, n=n, tor=tor, page=page)
+    if results:
+        return results, "ddg/html", ""
+    if err:
+        errors.append(err)
+
+    results, err = run_marginalia(query, n=n, tor=tor, page=page)
+    if results:
+        return results, "marginalia", ""
+    if err:
+        errors.append(err)
+
+    return [], "", " | ".join(errors) if errors else "all engines failed"
+
+
+def format_results(results: list[dict], source: str, show_body: bool = False) -> str:
+    """Titles + snippets (no URLs), colored + boxed."""
+    lines: list[str] = []
+    for i, r in enumerate(results, 1):
+        title = strip_urls((r.get("title") or "(no title)").strip())
+        ab = strip_urls((r.get("abstract") or "").strip())
+        body = strip_urls((r.get("body") or "").strip())
+        num = art.paint(f"{i}.", P.BOLD, P.PINK)
+        ttl = art.paint(title, P.BOLD, P.SILVER)
+        lines.append(f"{num} {ttl}")
+        if ab and ab.lower() != title.lower():
+            snip = ab[:350] + ("…" if len(ab) > 350 else "")
+            lines.append(art.paint(f"   {snip}", P.MUTED))
+        elif not ab:
+            lines.append(art.paint("   (no snippet)", P.DIM))
+        if show_body and body:
+            excerpt = body[:420]
+            if len(body) > 420:
+                excerpt = excerpt.rsplit(" ", 1)[0] + "…"
+            lines.append(art.paint("   · ", P.PINK_DIM) + art.paint(excerpt, P.MUTED))
+        lines.append("")  # gap between hits
+    body = "\n".join(lines).rstrip()
+    title = f"magpie · {source}"
+    return box(title, body, accent=P.PINK_DIM)
+
+
+# ── page fetch / text extract ────────────────────────────────────────────────
+
+class _TextExtractor(HTMLParser):
+    SKIP = {"script", "style", "noscript", "svg", "nav", "footer", "header"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip = 0
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in self.SKIP:
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag.lower() in self.SKIP and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if self._skip:
+            return
+        t = data.strip()
+        if t:
+            self.parts.append(t)
+
+
+def html_to_text(raw: bytes) -> str:
+    try:
+        s = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        s = raw.decode("latin-1", "replace")
+    # drop obvious junk
+    s = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", s)
+    p = _TextExtractor()
+    try:
+        p.feed(s)
+        p.close()
+    except Exception:
+        return strip_urls(re.sub(r"<[^>]+>", " ", s))
+    text = " ".join(p.parts)
+    text = html_lib.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return strip_urls(text)
+
+
+def fetch_url(url: str, timeout: float = FETCH_TIMEOUT, tor: bool = False) -> bytes | None:
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        if tor and shutil.which("torsocks"):
+            proc = subprocess.run(
+                [
+                    "torsocks",
+                    "--isolate",
+                    "curl",
+                    "-fsSL",
+                    "-A",
+                    UA,
+                    "--max-time",
+                    str(int(timeout)),
+                    url,
+                ],
+                capture_output=True,
+                timeout=timeout + 5,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                return proc.stdout
+            return None
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            # cap download size
+            return r.read(800_000)
+    except Exception as e:
+        eprint(f"[deep skip] {urllib.parse.urlparse(url).netloc}: {e}")
+        return None
+
+
+def deepen_results(
+    results: list[dict], k: int = DEEP_DEFAULT, tor: bool = False
+) -> list[dict]:
+    """Fetch top-k pages and attach body text for better AI context."""
+    k = max(1, min(k, DEEP_MAX, len(results)))
+    eprint(f"Deepening top {k} result(s) (page text for AI + you)…")
+    for i in range(k):
+        url = (results[i].get("url") or "").strip()
+        if not url:
+            continue
+        eprint(f"  [{i+1}/{k}] fetching…")
+        raw = fetch_url(url, tor=tor)
+        if not raw:
+            continue
+        text = html_to_text(raw)
+        if len(text) < 80:
+            continue
+        results[i]["body"] = text[:PAGE_CHARS]
+    return results
+
+
+def context_for_ai(results: list[dict], query: str) -> str:
+    """Build one rich block for a single AI call (no URLs)."""
+    chunks = [f"User query: {query}", ""]
+    for i, r in enumerate(results, 1):
+        title = strip_urls(r.get("title") or "")
+        ab = strip_urls(r.get("abstract") or "")
+        body = strip_urls(r.get("body") or "")
+        chunks.append(f"### Result {i}: {title}")
+        if ab:
+            chunks.append(f"Snippet: {ab}")
+        if body:
+            chunks.append(f"Page extract: {body[:PAGE_CHARS]}")
+        chunks.append("")
+    # Keep context small on low-RAM boxes (less prompt = faster + less KV pressure)
+    return "\n".join(chunks)[:7000]
+
+
+def fetch(url: str, timeout: float = 8) -> bytes | None:
+    return fetch_url(url, timeout=timeout, tor=False)
+
+
+def fallback_any(query: str) -> str:
+    """Opt-in extras only. No Google. Wikipedia summaries (public API, no cookies)."""
+    blocks: list[str] = []
+    oq = urllib.parse.quote(query)
+    raw = _http_get(
+        f"https://en.wikipedia.org/w/api.php?action=opensearch&search={oq}&limit=3&format=json"
+    )
+    if raw:
+        try:
+            data = json.loads(raw.decode())
+            titles = data[1] if len(data) > 1 else []
+            for title in titles[:3]:
+                tq = urllib.parse.quote(title.replace(" ", "_"))
+                sraw = _http_get(
+                    f"https://en.wikipedia.org/api/rest_v1/page/summary/{tq}"
+                )
+                if not sraw:
+                    continue
+                s = json.loads(sraw.decode())
+                extract = (s.get("extract") or "")[:350]
+                if extract:
+                    blocks.append(f"* [Wikipedia] {title}: {extract}")
+        except Exception as e:
+            eprint(f"[fallback skip] wikipedia: {e}")
+
+    if not blocks:
+        return "(No Wikipedia extras either.)"
+    return (
+        "EXTRAS (Wikipedia only — you passed --any; still no Google)\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+def llm_up() -> bool:
+    for path in ("/health", "/v1/models"):
+        try:
+            with urllib.request.urlopen(f"{LLAMA}{path}", timeout=1.5) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def llm_generate(prompt: str, *, max_tokens: int | None = None) -> str:
+    """One-shot generation via offline llama.cpp (localhost only)."""
+    if not llm_up():
+        raise RuntimeError("pixie-llm not running")
+    mt = max_tokens if max_tokens is not None else _max_tokens()
+    body = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.25,
+        "max_tokens": mt,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        f"{LLAMA}/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=300) as r:
+        data = json.loads(r.read().decode())
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    text = str((choices[0].get("message") or {}).get("content") or "")
+    # Surface hard cuts so the box can note them (finish_reason=length)
+    fr = choices[0].get("finish_reason") or (choices[0].get("finish_details") or {})
+    if isinstance(fr, dict):
+        fr = fr.get("type") or fr.get("reason")
+    if fr in ("length", "max_tokens") and text and not text.rstrip().endswith(("…", "...")):
+        text = text.rstrip() + "\n\n(Pixie ran out of breath — reply hit the token ceiling.)"
+    return text
+
+
+def ai_summary(query: str, context: str) -> str:
+    """ONE model call: overall answer from deepened results — as Pixie."""
+    prompt = (
+        "You are Pixie: a cute, witty, helpful terminal companion (she/her).\n"
+        "Using ONLY the search material below, answer the user.\n"
+        "Voice rules:\n"
+        "- ALWAYS open with a short Pixie line, e.g. "
+        "\"Pixie thinks that…\", \"Pixie reckons…\", \"Hmm, Pixie would say…\", "
+        "or \"Pixie peeked at the web and…\" (vary it; don't always use the same one).\n"
+        "- Then give a clear, useful answer (paragraphs or bullets as needed).\n"
+        "- Friendly and a little playful, never mean.\n"
+        "- Prefer facts from page extracts over thin snippets.\n"
+        "- No URLs, no domain names, no 'according to result 3'.\n"
+        "- If material is thin or conflicting, say so in character "
+        "(\"Pixie isn't sure, but…\").\n"
+        "- Be complete but compact (about 150–350 words). Prefer tight bullets "
+        "over essays. Do not stop mid-bullet.\n"
+        "- Do NOT invent facts not in the material.\n\n"
+        f"{context}\n"
+    )
+    import threading
+    import time as _t
+
+    stop = threading.Event()
+    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    state = {
+        "i": 0,
+        "label": random.choice(PIXIE_WAIT),
+        "t0": _t.time(),
+        "drawn": False,
+    }
+    lock = threading.Lock()
+    BOX_H = 3
+
+    def _box_lines():
+        f = frames[state["i"] % len(frames)]
+        plain = f"{f}  {state['label']}"
+        inner = max(28, min(56, len(plain) + 2))
+        title = "Pixie"
+        pad = max(0, inner - len(title) - 2)
+        top = (
+            art.paint("┌─", P.PINK_DIM)
+            + art.paint(f" {title} ", P.BOLD, P.PINK)
+            + art.paint("─" * pad + "┐", P.PINK_DIM)
+        )
+        space = max(0, inner - len(plain))
+        mid = (
+            art.paint("│", P.PINK_DIM)
+            + " "
+            + art.paint(f, P.PINK)
+            + "  "
+            + art.paint(state["label"], P.BOLD, P.PINK)
+            + (" " * space)
+            + " "
+            + art.paint("│", P.PINK_DIM)
+        )
+        bot = art.paint("└" + "─" * (inner + 2) + "┘", P.PINK_DIM)
+        return [top, mid, bot]
+
+    def _draw():
+        with lock:
+            lines = _box_lines()
+            if state["drawn"]:
+                eprint(f"\033[{BOX_H}A", end="")
+            for line in lines:
+                eprint(f"\r\033[K{line}")
+            state["drawn"] = True
+
+    def _erase():
+        with lock:
+            if not state["drawn"]:
+                return
+            eprint(f"\033[{BOX_H}A", end="")
+            for _ in range(BOX_H):
+                eprint("\r\033[K")
+            eprint(f"\033[{BOX_H}A", end="")
+            state["drawn"] = False
+
+    def _anim():
+        while not stop.wait(0.12):
+            state["i"] += 1
+            if _t.time() - state["t0"] >= 10:
+                choices = [m for m in PIXIE_WAIT if m != state["label"]] or list(
+                    PIXIE_WAIT
+                )
+                state["label"] = random.choice(choices)
+                state["t0"] = _t.time()
+            _draw()
+
+    busy = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"pixie-busy.{os.getpid()}"
+    try:
+        busy.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        busy = None
+    thr = threading.Thread(target=_anim, daemon=True)
+    thr.start()
+    _draw()
+    text = ""
+    try:
+        text = llm_generate(prompt)
+    finally:
+        stop.set()
+        thr.join(timeout=0.5)
+        _erase()
+        if busy is not None:
+            try:
+                busy.unlink()
+            except OSError:
+                pass
+    return (text or "").strip()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Privacy-first terminal search & CLI browser (DDG + Marginalia; no Google)"
+    )
+    ap.add_argument("query", nargs="*", help="search terms")
+    ap.add_argument(
+        "-a",
+        "--ai",
+        action="store_true",
+        help=f"deepen top pages + ONE local AI summary ({MODEL})",
+    )
+    ap.add_argument(
+        "--deep",
+        type=int,
+        default=0,
+        metavar="N",
+        help=f"fetch top N pages for richer text (default with -a: {DEEP_DEFAULT})",
+    )
+    ap.add_argument("--tor", action="store_true", help="search + fetches via Tor")
+    ap.add_argument(
+        "--any",
+        action="store_true",
+        help="if engines fail, also try Wikipedia summaries (still no Google)",
+    )
+    ap.add_argument(
+        "--engine",
+        choices=("auto", "ddg", "ddg-html", "marginalia"),
+        default="auto",
+        help="force one engine (default: auto chain)",
+    )
+    ap.add_argument("-n", type=int, default=8, help="number of results (default 8)")
+    ap.add_argument("-p", "--page", type=int, default=1, help="search result page (default 1)")
+    args = ap.parse_args()
+
+    if not args.query:
+        try:
+            query_input = input(art.paint("magpie browser > Enter search query: ", P.BOLD, P.PINK)).strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return 0
+        if not query_input:
+            return 0
+        q = query_input
+    else:
+        q = " ".join(args.query).strip()
+
+    page = args.page
+    ai_requested = args.ai
+
+    while True:
+        mode = "tor" if args.tor else "clearnet"
+        eprint(
+            art.paint("◆ magpie browser", P.BOLD, P.PINK)
+            + art.paint(f"  {q}", P.SILVER)
+            + art.paint(f"  (page {page}, {mode})", P.MUTED)
+        )
+
+        n = max(1, min(args.n, 25))
+        if args.engine == "auto":
+            results, eng, err = search_chain(q, n=n, tor=args.tor, page=page)
+        elif args.engine == "ddg":
+            results, err = run_ddgr(q, n=n, tor=args.tor)
+            eng = "ddg/ddgr" if results else ""
+        elif args.engine == "ddg-html":
+            results, err = run_ddg_html(q, n=n, tor=args.tor, page=page)
+            eng = "ddg/html" if results else ""
+        else:
+            results, err = run_marginalia(q, n=n, tor=args.tor, page=page)
+            eng = "marginalia" if results else ""
+
+        if results and eng:
+            eprint(art.paint(f"  via {eng}", P.MUTED))
+        text_parts: list[str] = []
+
+        deep_n = args.deep
+        if ai_requested and deep_n <= 0:
+            deep_n = DEEP_DEFAULT
+
+        if results:
+            if deep_n > 0:
+                results = deepen_results(results, k=deep_n, tor=args.tor)
+            src_label = f"{mode} · {eng} · page {page}" if eng else mode
+            human = format_results(results, src_label, show_body=bool(deep_n))
+            text_parts.append(re.sub(r"\033\[[0-9;]*m", "", human))
+            print(human)
+        else:
+            eprint(art.paint("!! SEARCH FAILED", P.BOLD, P.ERR))
+            eprint(art.paint("error: ", P.BOLD, P.ERR) + (err or "unknown"))
+            print(
+                box(
+                    f"magpie · offline · page {page}",
+                    err or "All privacy engines unavailable",
+                    accent=P.ERR,
+                )
+            )
+
+        if ai_requested and page == args.page:
+            if not llm_up():
+                eprint(
+                    art.paint(
+                        "⚠ AI skip: no local LLM (try: pixie-llm start)",
+                        P.BOLD,
+                        P.WARN,
+                    )
+                )
+            else:
+                if results:
+                    ctx = context_for_ai(results, q)
+                else:
+                    ctx = "\n\n".join(text_parts) or err or "(no material)"
+                try:
+                    summary = ai_summary(q, ctx)
+                    print()
+                    print(box("Pixie · search notes", summary, accent=P.PINK))
+                except Exception as e:
+                    eprint(art.paint("!! AI FAILED", P.BOLD, P.ERR))
+                    eprint(art.paint(str(e), P.ERR))
+
+        try:
+            choice = input(art.paint("\n[magpie browser] Enter result # to read, 'n' (next page), 'p' (prev page), new query, or 'q' (quit): ", P.BOLD, P.PINK)).strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            break
+
+        choice_lower = choice.lower()
+        if choice_lower in ("q", "quit", "exit"):
+            break
+        elif choice_lower == "n":
+            page += 1
+            ai_requested = False
+            continue
+        elif choice_lower == "p":
+            page = max(1, page - 1)
+            ai_requested = False
+            continue
+        elif choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(results):
+                r = results[idx - 1]
+                url = r.get("url")
+                title = r.get("title")
+                eprint(art.paint(f"Fetching full page: {title}...", P.WARN))
+                raw = fetch_url(url, tor=args.tor)
+                if raw:
+                    article_text = html_to_text(raw)
+                    if not article_text:
+                        article_text = "(Could not extract text from page)"
+                    print()
+                    print(box(f"magpie · reader · {title[:40]}", article_text[:9000], accent=P.PINK))
+                else:
+                    print(box("magpie · reader error", f"Failed to fetch {url}", accent=P.ERR))
+                input(art.paint("\nPress Enter to return to search results...", P.MUTED))
+            else:
+                eprint(art.paint("Invalid result number.", P.ERR))
+        else:
+            if choice:
+                q = choice
+                page = 1
+                ai_requested = False
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

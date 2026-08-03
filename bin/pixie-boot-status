@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Quick health check after reboot into pixie/kmscon
+echo "══ pixie boot status ══"
+echo "host:    $(hostname)  user: $USER"
+echo "tty:     $(tty 2>/dev/null || echo '?')  TERM=${TERM:-?}"
+echo "shell:   $SHELL"
+echo
+echo "── console ──"
+systemctl is-active kmsconvt@tty1.service 2>/dev/null | sed 's/^/kmscon tty1: /'
+readlink /etc/systemd/system/autovt@.service 2>/dev/null | sed 's/^/autovt:      /'
+echo "default: $(systemctl get-default)"
+echo
+echo "── user services ──"
+loginctl show-user "$USER" -p Linger 2>/dev/null
+systemctl --user is-active pixie-llm.service 2>/dev/null | sed 's/^/pixie-llm:  /'
+systemctl --user is-enabled pixie-llm.service 2>/dev/null | sed 's/^/  enabled:  /'
+echo
+echo "── pixie ──"
+echo "tick:    $(head -1 "${XDG_CONFIG_HOME:-$HOME/.config}/pixie/tick" 2>/dev/null || echo on/default)"
+"$HOME/bin/pixie-screen" status 2>/dev/null || true
+command -v pixie-llm >/dev/null && pixie-llm status 2>/dev/null | head -8 || true
+echo
+echo "── keys ──"
+echo "  Ctrl++ / Ctrl+-   font zoom (kmscon)"
+echo "  Shift+↑/↓         scrollback"
+echo "  Shift-Tab / scry  command history"
+echo "  scroll            command board"
+echo "  tick status       idle clear policy"

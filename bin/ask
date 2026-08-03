@@ -30,6 +30,16 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
+# Import pixie_termart for shared color palette
+import sys as _sys
+_sys.path.insert(0, str(Path.home() / "bin"))
+import pixie_termart as art  # noqa: E402
+
+from pixie_termart import Palette as P, PIXIE_WAIT, PIXIE_SCREEN
+
+# Force Unicode box drawing for smooth round corners
+os.environ["PIXIE_UNICODE"] = "1"
+
 HOME = Path.home().resolve()
 # Offline llama.cpp only (pixie-llm)
 LLAMA = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -44,40 +54,6 @@ UA = "ask/1.0 (local offline agent)"
 # How often to rotate wait copy while model runs (does not clear the screen)
 WAIT_ROTATE_SEC = float(os.environ.get("PIXIE_WAIT_SEC", "10"))
 
-# Shown while the model runs (rotated at random — keep many for long thinks)
-PIXIE_WAIT = (
-    "Pixie is poking around…",
-    "Contacting the fey world, please wait…",
-    "Pixie is dusting off her spellbook…",
-    "Pixie is chasing a thought through the wires…",
-    "Pixie is listening to the machine spirits…",
-    "Pixie is braiding a reply out of moonlight…",
-    "Hold still — Pixie is concentrating…",
-    "Pixie wandered into /tmp and got distracted…",
-    "Pixie is counting sparkles in the cache…",
-    "Pixie is negotiating with the kernel gnomes…",
-    "Pixie is untangling a knot of pointers…",
-    "Pixie is whispering to the inode fairies…",
-    "Pixie is polishing her answer with starlight…",
-    "Pixie is peeking under the root of the problem…",
-    "Pixie is sipping tea from a thimble of RAM…",
-    "Pixie is mapping the lay of the home directory…",
-    "Pixie is asking the pipes which way is north…",
-    "Pixie is humming a little compile song…",
-    "Pixie is sorting wishes by priority…",
-    "Pixie is chasing a runaway null…",
-    "Pixie is rolling up her sleeves (figuratively)…",
-    "Pixie is consulting the ancient man pages…",
-    "Pixie is balancing on a stack frame…",
-    "Pixie is bribing the scheduler with cookies…",
-    "Pixie is drawing a tiny map of your request…",
-    "Pixie is waiting for the moon to align with /dev…",
-    "Pixie is shaking the magic 8-bit ball…",
-    "Pixie is retying her boots for another try…",
-    "Pixie is listening for the click of a good idea…",
-    "Pixie is sweeping cobwebs out of the heap…",
-)
-
 # Verbose agent debug (round/cwd): ~/.config/pixie/verbose = on|off
 PIXIE_CONFIG = Path.home() / ".config" / "pixie"
 VERBOSE_FILE = PIXIE_CONFIG / "verbose"
@@ -88,34 +64,6 @@ BLOCKED_PREFIXES = (
     HOME / ".gnupg",
     HOME / ".grok" / "credentials",
 )
-
-
-def _use_color() -> bool:
-    if os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE"):
-        return True
-    if os.environ.get("NO_COLOR", "").strip():
-        return False
-    return sys.stderr.isatty() or sys.stdout.isatty()
-
-
-class C:
-    """256-color pink palette (matches system theme)."""
-
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    PINK = "\033[38;5;175m"
-    DARK_PINK = "\033[38;5;168m"
-    PINK_DIM = "\033[38;5;132m"
-    SILVER = "\033[38;5;252m"
-    SILVER_DIM = "\033[38;5;245m"
-    OK = "\033[38;5;78m"
-    WARN = "\033[38;5;214m"
-
-    @staticmethod
-    def paint(text: str, *codes: str) -> str:
-        if not _use_color() or not codes:
-            return text
-        return "".join(codes) + text + C.RESET
 
 
 def eprint(*a: Any, **k: Any) -> None:
@@ -200,6 +148,32 @@ def _busy_purge_stale() -> None:
         pass
 
 
+def _screen_hold(name: str, seconds: float | None = None) -> None:
+    try:
+        import subprocess as _sp
+
+        argv = [str(PIXIE_SCREEN), "hold", name]
+        if seconds is not None:
+            argv.append(str(seconds))
+        _sp.run(argv, check=False, timeout=1, capture_output=True)
+    except Exception:
+        pass
+
+
+def _screen_release(name: str) -> None:
+    try:
+        import subprocess as _sp
+
+        _sp.run(
+            [str(PIXIE_SCREEN), "release", name],
+            check=False,
+            timeout=1,
+            capture_output=True,
+        )
+    except Exception:
+        pass
+
+
 def _busy_acquire() -> Path:
     _busy_purge_stale()
     p = _busy_path()
@@ -207,6 +181,8 @@ def _busy_acquire() -> Path:
         p.write_text(str(os.getpid()), encoding="utf-8")
     except OSError:
         pass
+    # Central policy — new features use the same hold API
+    _screen_hold(f"busy.{os.getpid()}")
     return p
 
 
@@ -217,17 +193,19 @@ def _busy_release(p: Path | None = None) -> None:
             path.unlink()
     except OSError:
         pass
+    _screen_release(f"busy.{os.getpid()}")
     _busy_purge_stale()
 
 
 class PixieWaitDisplay:
-    """Full-screen clear on each new wait message; spinner animates in the box.
+    """In-place wait spinner (stderr only). Never full-screen clears.
 
-    Sets pixie-busy so idle tick will not fight us during thinking.
+    Full-screen clear was fighting zsh's info box / cursor and painting the
+    prompt on top of the final reply. We only redraw the wait box in place,
+    then erase it cleanly before the reply is printed on stdout.
     """
 
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    BOX_H = 3
 
     def __init__(self, extra: str = "", rotate_sec: float = WAIT_ROTATE_SEC) -> None:
         self.extra = extra
@@ -238,67 +216,85 @@ class PixieWaitDisplay:
         self._i = 0
         self._last_label_at = 0.0
         self._drawn = False
+        self._box_h = 0
         self._lock = threading.Lock()
         self._busy: Path | None = None
 
+    def set_extra(self, extra: str) -> None:
+        with self._lock:
+            self.extra = extra or ""
+
     def _box_lines(self) -> list[str]:
         f = self.FRAMES[self._i % len(self.FRAMES)]
-        plain_mid = f"{f}  {self._label}"
-        if self.extra:
-            plain_mid += self.extra
-        inner = max(28, min(56, len(plain_mid) + 2))
-        title = "Pixie"
-        pad = max(0, inner - len(title) - 2)
-        top = (
-            C.paint("┌─", C.PINK_DIM)
-            + C.paint(f" {title} ", C.BOLD, C.PINK)
-            + C.paint("─" * pad + "┐", C.PINK_DIM)
-        )
-        spin = C.paint(f, C.PINK)
-        msg = C.paint(self._label, C.BOLD, C.PINK)
-        if self.extra:
-            msg += C.paint(self.extra, C.SILVER_DIM)
-        mid_plain = f"{f}  {self._label}{self.extra}"
-        space = max(0, inner - len(mid_plain))
-        mid = (
-            C.paint("│", C.PINK_DIM)
-            + " "
-            + spin
-            + "  "
-            + msg
-            + (" " * space)
-            + " "
-            + C.paint("│", C.PINK_DIM)
-        )
-        bot = C.paint("└" + "─" * (inner + 2) + "┘", C.PINK_DIM)
-        return [top, mid, bot]
+        label = self._label
+        extra = self.extra or ""
+        try:
+            sys.path.insert(0, str(Path.home() / "bin"))
+            import pixie_termart as art  # type: ignore
 
-    def _draw(self, *, full_clear: bool = False) -> None:
+            body = f"{f}  {label}{extra}"
+            framed = art.box(
+                body,
+                title="Pixie",
+                width=min(64, art.term_width()),
+                body_style=(art.P.PINK, art.P.BOLD),
+            )
+            return framed.splitlines()
+        except Exception:
+            inner = max(28, min(56, len(f"{f}  {label}{extra}") + 2))
+            top = art.paint("╭─ ✦ Pixie ", P.PINK_DIM) + art.paint(
+                "─" * max(0, inner - 10) + "╮", P.PINK_DIM
+            )
+            mid_plain = f"{f}  {label}{extra}"
+            space = max(0, inner - len(mid_plain))
+            mid = (
+                art.paint("│", P.PINK_DIM)
+                + " "
+                + art.paint(f, P.PINK)
+                + "  "
+                + art.paint(label, P.BOLD, P.PINK)
+                + art.paint(extra, P.MUTED)
+                + (" " * space)
+                + " "
+                + art.paint("│", P.PINK_DIM)
+            )
+            bot = art.paint("╰" + "─" * (inner + 2) + "╯", P.PINK_DIM)
+            return [top, mid, bot]
+
+    def _draw(self) -> None:
         with self._lock:
             lines = self._box_lines()
-            if full_clear:
-                # New wait message: clear whole screen (console "tick" feel)
-                eprint("\033[2J\033[H", end="")
-                self._drawn = False
-            elif self._drawn:
-                eprint(f"\033[{self.BOX_H}A", end="")
+            h = len(lines)
+            if self._drawn and self._box_h:
+                # move to top of previous box, then rewrite
+                eprint(f"\033[{self._box_h}A", end="")
             for line in lines:
                 eprint(f"\r\033[K{line}")
+            # if new box shorter, clear leftover lines
+            if self._drawn and h < self._box_h:
+                for _ in range(self._box_h - h):
+                    eprint("\r\033[K")
+                eprint(f"\033[{self._box_h - h}A", end="")
+            self._box_h = h
             self._drawn = True
 
     def _erase(self) -> None:
         with self._lock:
-            if not self._drawn:
+            if not self._drawn or not self._box_h:
+                self._drawn = False
                 return
-            eprint(f"\033[{self.BOX_H}A", end="")
-            for _ in range(self.BOX_H):
+            # cursor is just under the box; go up and blank each row
+            eprint(f"\033[{self._box_h}A", end="")
+            for _ in range(self._box_h):
                 eprint("\r\033[K")
-            eprint(f"\033[{self.BOX_H}A", end="")
+            # leave cursor at the first blanked row (clean for stdout reply)
             self._drawn = False
+            self._box_h = 0
+            eprint("", flush=True)
 
     def _run(self) -> None:
         self._last_label_at = time.monotonic()
-        self._draw(full_clear=True)  # first paint
+        self._draw()
         while not self._stop.wait(0.12):
             self._i += 1
             now = time.monotonic()
@@ -306,12 +302,10 @@ class PixieWaitDisplay:
                 choices = [m for m in PIXIE_WAIT if m != self._label] or list(PIXIE_WAIT)
                 self._label = random.choice(choices)
                 self._last_label_at = now
-                self._draw(full_clear=True)  # clear on new message
-            else:
-                self._draw(full_clear=False)  # spinner only
+            self._draw()
 
     def __enter__(self) -> "PixieWaitDisplay":
-        self._busy = _busy_acquire()
+        self._busy = _busy_acquire()  # file lock + pixie-screen hold busy.<pid>
         self._thread = threading.Thread(target=self._run, name="pixie-wait", daemon=True)
         self._thread.start()
         return self
@@ -393,6 +387,18 @@ def normalize_chat_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
+def _pixie_max_tokens(default: int = 512) -> int:
+    """Generation budget for Pixie finals/tools.
+
+    Potato-friendly default (512): 8GB RAM + CPU Mistral-7B times out / swaps
+    with 1.5k–2k. Override: PIXIE_MAX_TOKENS=768 (still light) or 256 (snappy).
+    """
+    raw = os.environ.get("PIXIE_MAX_TOKENS", "").strip()
+    if raw.isdigit():
+        return max(128, min(4096, int(raw)))
+    return default
+
+
 def llm_chat(model: str, messages: list[dict], temperature: float = 0.2) -> str:
     """Chat via offline llama.cpp (OpenAI-compatible, localhost only)."""
     if not llm_up():
@@ -404,6 +410,7 @@ def llm_chat(model: str, messages: list[dict], temperature: float = 0.2) -> str:
         "model": model or "mistral",
         "messages": normalized,
         "temperature": temperature,
+        "max_tokens": _pixie_max_tokens(),
         "stream": False,
     }
     data = _http_json(f"{LLAMA}/v1/chat/completions", body, timeout=600)
@@ -411,7 +418,13 @@ def llm_chat(model: str, messages: list[dict], temperature: float = 0.2) -> str:
     if not choices:
         return ""
     msg = choices[0].get("message") or {}
-    return str(msg.get("content") or "")
+    text = str(msg.get("content") or "")
+    fr = choices[0].get("finish_reason")
+    # Only annotate obvious hard cuts on final-looking text (not tool JSON)
+    if fr in ("length", "max_tokens") and text and '"tool"' not in text[:40]:
+        if not text.rstrip().endswith(("…", "...", "}")):
+            text = text.rstrip() + "\n\n(Pixie ran out of breath — token ceiling. On this box stay near PIXIE_MAX_TOKENS=512–768.)"
+    return text
 
 
 # ── path safety + session cwd ────────────────────────────────────────────────
@@ -845,28 +858,28 @@ def tool_grep(fs: FSSession, pattern: str, path: str | None = None, max_hits: in
     return "\n".join(lines_out) if lines_out else f"no matches for /{pattern}/ under {root}"
 
 
-# --- Mail (aerc IMAP → ~/.cache/pixie/mail/{unread,read,trash}/*.txt) ---
+# --- Mail (aerc IMAP → ~/.cache/goblin/mail/{unread,read,trash}/*.txt) ---
 
-PIXIE_MAIL = Path.home() / "bin" / "pixie-mail"
+GOBLIN = Path.home() / "bin" / "goblin"
 MAIL_ROOT = Path.home() / ".cache" / "pixie" / "mail"
 
 
-def _run_pixie_mail(argv: list[str], timeout: int = 120) -> str:
-    """Run pixie-mail CLI; return stdout+stderr text for the agent."""
-    if not PIXIE_MAIL.is_file():
-        return f"error: pixie-mail not found at {PIXIE_MAIL}"
+def _run_goblin(argv: list[str], timeout: int = 120) -> str:
+    """Run goblin CLI; return stdout+stderr text for the agent."""
+    if not GOBLIN.is_file():
+        return f"error: goblin not found at {GOBLIN}"
     try:
         proc = subprocess.run(
-            [str(PIXIE_MAIL), *argv],
+            [str(GOBLIN), *argv],
             capture_output=True,
             text=True,
             timeout=timeout,
             env={**os.environ, "PATH": f"{Path.home() / 'bin'}:{os.environ.get('PATH', '')}"},
         )
     except subprocess.TimeoutExpired:
-        return f"error: pixie-mail timed out after {timeout}s (IMAP slow or unreachable?)"
+        return f"error: goblin timed out after {timeout}s (IMAP slow or unreachable?)"
     except OSError as e:
-        return f"error: could not run pixie-mail: {e}"
+        return f"error: could not run goblin: {e}"
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
     parts = []
@@ -875,14 +888,14 @@ def _run_pixie_mail(argv: list[str], timeout: int = 120) -> str:
     if err:
         parts.append(f"[log]\n{err}")
     if proc.returncode != 0 and not parts:
-        parts.append(f"error: pixie-mail exit {proc.returncode}")
+        parts.append(f"error: goblin exit {proc.returncode}")
     elif proc.returncode != 0:
         parts.append(f"(exit {proc.returncode})")
     return "\n".join(parts) if parts else "(no output)"
 
 
 def tool_mail_sync(folder: str | None = None, all_recent: bool = False) -> str:
-    """Download mail from aerc IMAP into ~/.cache/pixie/mail/unread/*.txt.
+    """Download mail from aerc IMAP into ~/.cache/goblin/mail/unread/*.txt.
 
     Default: UNSEEN only. all_recent=True pulls newest messages even if Seen
     (used when local unread is empty after a prior fetch).
@@ -892,7 +905,7 @@ def tool_mail_sync(folder: str | None = None, all_recent: bool = False) -> str:
         argv.extend(["--folder", folder])
     if all_recent:
         argv.append("--all")
-    return _run_pixie_mail(argv, timeout=180)
+    return _run_goblin(argv, timeout=180)
 
 
 def tool_mail_list(box: str = "unread") -> str:
@@ -900,19 +913,19 @@ def tool_mail_list(box: str = "unread") -> str:
     box = (box or "unread").strip().lower()
     if box not in ("unread", "read", "trash"):
         return "error: box must be unread, read, or trash"
-    return _run_pixie_mail(["list", box])
+    return _run_goblin(["list", box, "--plain"])
 
 
 def tool_mail_bundle() -> str:
     """All unread messages as one text blob for summarization."""
-    return _run_pixie_mail(["bundle"])
+    return _run_goblin(["bundle"])
 
 
 def tool_mail_show(file: str) -> str:
     """Print one local mail .txt (filename or path under unread/)."""
     if not file or not str(file).strip():
         return "error: file name required"
-    return _run_pixie_mail(["show", str(file).strip()])
+    return _run_goblin(["show", str(file).strip(), "--plain"])
 
 
 def tool_mail_move(
@@ -935,7 +948,7 @@ def tool_mail_move(
             argv.append(str(f))
     if not all_unread and not files:
         return "error: pass files=[...] or all=true"
-    return _run_pixie_mail(argv, timeout=180)
+    return _run_goblin(argv, timeout=180)
 
 
 def run_tool(fs: FSSession, name: str, args: dict, quiet: bool = True) -> str:
@@ -1311,10 +1324,10 @@ def agent(
         # at multi-step tool use, and we must never invent email content.
         if show_debug:
             eprint(
-                C.paint("✦ ", C.PINK)
-                + C.paint("Pixie uses ", C.PINK_DIM)
-                + C.paint("mail_sync", C.BOLD, C.DARK_PINK)
-                + C.paint("  (prefetch)", C.SILVER_DIM),
+                art.paint("✦ ", P.PINK)
+                + art.paint("Pixie uses ", P.PINK_DIM)
+                + art.paint("mail_sync", P.BOLD, P.DARK)
+                + art.paint("  (prefetch)", P.MUTED),
                 flush=True,
             )
         sync_out = tool_mail_sync()
@@ -1325,19 +1338,19 @@ def agent(
         ):
             if show_debug:
                 eprint(
-                    C.paint("✦ ", C.PINK)
-                    + C.paint("Pixie uses ", C.PINK_DIM)
-                    + C.paint("mail_sync", C.BOLD, C.DARK_PINK)
-                    + C.paint('  {"all":true} (prefetch)', C.SILVER_DIM),
+                    art.paint("✦ ", P.PINK)
+                    + art.paint("Pixie uses ", P.PINK_DIM)
+                    + art.paint("mail_sync", P.BOLD, P.DARK)
+                    + art.paint('  {"all":true} (prefetch)', P.MUTED),
                     flush=True,
                 )
             sync_out = tool_mail_sync(all_recent=True)
         if show_debug:
             eprint(
-                C.paint("✦ ", C.PINK)
-                + C.paint("Pixie uses ", C.PINK_DIM)
-                + C.paint("mail_bundle", C.BOLD, C.DARK_PINK)
-                + C.paint("  (prefetch)", C.SILVER_DIM),
+                art.paint("✦ ", P.PINK)
+                + art.paint("Pixie uses ", P.PINK_DIM)
+                + art.paint("mail_bundle", P.BOLD, P.DARK)
+                + art.paint("  (prefetch)", P.MUTED),
                 flush=True,
             )
         digest = tool_mail_bundle()
@@ -1345,9 +1358,9 @@ def agent(
             preview = digest if len(digest) < 280 else digest[:280] + "…"
             preview = preview.replace("\n", " ↵ ")
             eprint(
-                C.paint("✧ ", C.OK)
-                + C.paint("result  ", C.PINK_DIM)
-                + C.paint(preview, C.SILVER),
+                art.paint("✧ ", P.OK)
+                + art.paint("result  ", P.PINK_DIM)
+                + art.paint(preview, P.SILVER),
                 flush=True,
             )
         messages.append(
@@ -1383,30 +1396,30 @@ def agent(
         if dest:
             if show_debug:
                 eprint(
-                    C.paint("✦ ", C.PINK)
-                    + C.paint("Pixie uses ", C.PINK_DIM)
-                    + C.paint("mail_move", C.BOLD, C.DARK_PINK)
-                    + C.paint(f'  {{"dest":"{dest}","all":true}}', C.SILVER_DIM),
+                    art.paint("✦ ", P.PINK)
+                    + art.paint("Pixie uses ", P.PINK_DIM)
+                    + art.paint("mail_move", P.BOLD, P.DARK)
+                    + art.paint(f'  {{"dest":"{dest}","all":true}}', P.MUTED),
                     flush=True,
                 )
             result = tool_mail_move(dest=dest, all_unread=True)
             if show_debug:
                 preview = result if len(result) < 280 else result[:280] + "…"
                 eprint(
-                    C.paint("✧ ", C.OK)
-                    + C.paint("result  ", C.PINK_DIM)
-                    + C.paint(preview.replace("\n", " ↵ "), C.SILVER),
+                    art.paint("✧ ", P.OK)
+                    + art.paint("result  ", P.PINK_DIM)
+                    + art.paint(preview.replace("\n", " ↵ "), P.SILVER),
                     flush=True,
                 )
             if dest == "trash":
                 return (
                     f"Pixie swept them into the trash — done.\n{result}\n"
                     "Say if you need anything fished back out (local copies live in "
-                    "~/.cache/pixie/mail/trash/)."
+                    "~/.cache/goblin/mail/trash/)."
                 )
             return (
                 f"Pixie marked them read and filed them away.\n{result}\n"
-                "Local copies are in ~/.cache/pixie/mail/read/."
+                "Local copies are in ~/.cache/goblin/mail/read/."
             )
         # Selective move: give the model the file list + prior reply
         listing = tool_mail_list("unread")
@@ -1423,151 +1436,145 @@ def agent(
             }
         )
 
-    for round_i in range(1, MAX_ROUNDS + 1):
-        t0 = time.time()
-        extra = ""
-        if show_debug:
-            extra = f"  (round {round_i}/{MAX_ROUNDS}, cwd={fs.cwd})"
-        try:
-            with PixieWaitDisplay(extra=extra):
+    # One wait spinner for the whole agent run (no per-round full clears)
+    with PixieWaitDisplay() as wait:
+        for round_i in range(1, MAX_ROUNDS + 1):
+            t0 = time.time()
+            if show_debug:
+                wait.set_extra(f"  (round {round_i}/{MAX_ROUNDS}, cwd={fs.cwd})")
+            try:
                 content = llm_chat(model, messages)
-        except Exception as e:
-            clear_line()
-            return f"Local LLM request failed: {e}"
-        elapsed = time.time() - t0
-        if show_debug:
-            eprint(
-                C.paint("· ", C.PINK_DIM)
-                + C.paint(f"Pixie landed in {elapsed:.0f}s", C.SILVER_DIM),
-                flush=True,
-            )
+            except Exception as e:
+                return f"Local LLM request failed: {e}"
+            elapsed = time.time() - t0
+            if show_debug:
+                eprint(
+                    art.paint("· ", P.PINK_DIM)
+                    + art.paint(f"Pixie landed in {elapsed:.0f}s", P.MUTED),
+                    flush=True,
+                )
 
-        obj = extract_json(content)
-        if obj is None:
-            return content.strip()
+            obj = extract_json(content)
+            if obj is None:
+                return content.strip()
 
-        if "final" in obj and "tool" not in obj:
-            return str(obj["final"]).strip()
-
-        tool = obj.get("tool")
-        args = obj.get("args") or {}
-        if not tool:
-            if "final" in obj:
+            if "final" in obj and "tool" not in obj:
                 return str(obj["final"]).strip()
-            return content.strip()
 
-        if show_debug:
-            args_s = json.dumps(args, ensure_ascii=False)[:200]
-            eprint(
-                C.paint("✦ ", C.PINK)
-                + C.paint("Pixie uses ", C.PINK_DIM)
-                + C.paint(str(tool), C.BOLD, C.DARK_PINK)
-                + C.paint(f"  {args_s}", C.SILVER_DIM),
-                flush=True,
-            )
-        result = run_tool(
-            fs,
-            str(tool),
-            args if isinstance(args, dict) else {},
-            quiet=not show_debug,
-        )
-        if show_debug:
-            preview = result if len(result) < 280 else result[:280] + "…"
-            # single-line-ish preview
-            preview = preview.replace("\n", " ↵ ")
-            eprint(
-                C.paint("✧ ", C.OK)
-                + C.paint("result  ", C.PINK_DIM)
-                + C.paint(preview, C.SILVER),
-                flush=True,
-            )
+            tool = obj.get("tool")
+            args = obj.get("args") or {}
+            if not tool:
+                if "final" in obj:
+                    return str(obj["final"]).strip()
+                return content.strip()
 
-        messages.append({"role": "assistant", "content": json.dumps(obj, ensure_ascii=False)})
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"TOOL_RESULT ({tool}):\n{result}\n\n"
-                    f"cwd is now: {fs.cwd}\n"
-                    'Continue. Call another tool or return {"final":"..."}.'
-                ),
-            }
-        )
+            if show_debug:
+                args_s = json.dumps(args, ensure_ascii=False)[:200]
+                eprint(
+                    art.paint("✦ ", P.PINK)
+                    + art.paint("Pixie uses ", P.PINK_DIM)
+                    + art.paint(str(tool), P.BOLD, P.DARK)
+                    + art.paint(f"  {args_s}", P.MUTED),
+                    flush=True,
+                )
+            result = run_tool(
+                fs,
+                str(tool),
+                args if isinstance(args, dict) else {},
+                quiet=not show_debug,
+            )
+            if show_debug:
+                preview = result if len(result) < 280 else result[:280] + "…"
+                preview = preview.replace("\n", " ↵ ")
+                eprint(
+                    art.paint("✧ ", P.OK)
+                    + art.paint("result  ", P.PINK_DIM)
+                    + art.paint(preview, P.SILVER),
+                    flush=True,
+                )
+
+            messages.append(
+                {"role": "assistant", "content": json.dumps(obj, ensure_ascii=False)}
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"TOOL_RESULT ({tool}):\n{result}\n\n"
+                        f"cwd is now: {fs.cwd}\n"
+                        'Continue. Call another tool or return {"final":"..."}.'
+                    ),
+                }
+            )
 
     return "Stopped: too many tool rounds. Try a simpler request."
 
 
 def _term_width(default: int = 72) -> int:
     try:
-        import shutil as _sh
+        sys.path.insert(0, str(Path.home() / "bin"))
+        import pixie_termart as art  # type: ignore
 
-        return max(40, min(_sh.get_terminal_size((default, 24)).columns, 100))
+        return art.term_width(default)
     except Exception:
-        return default
+        try:
+            import shutil as _sh
+
+            return max(40, min(_sh.get_terminal_size((default, 24)).columns, 100))
+        except Exception:
+            return default
 
 
-def _box(title: str, body: str, *, accent: str = C.PINK) -> str:
-    """Unicode box (same spirit as duck)."""
-    w = _term_width()
-    inner = max(20, w - 4)
-    plain_title = re.sub(r"\033\[[0-9;]*m", "", title)[: inner - 2]
-    pad = max(0, inner - len(plain_title) - 2)
-    top = (
-        C.paint("┌─", accent)
-        + C.paint(f" {plain_title} ", C.BOLD, accent)
-        + C.paint("─" * pad + "┐", accent)
-    )
-    lines_out = [top]
-    for raw in (body.splitlines() or [""]):
-        plain = re.sub(r"\033\[[0-9;]*m", "", raw)
-        indent_m = re.match(r"^(\s*)", plain)
-        indent = indent_m.group(1) if indent_m else ""
-        content = plain[len(indent) :]
-        if len(plain) <= inner:
-            chunks = [plain]
-        else:
-            chunks = []
-            cur = ""
-            max_c = inner - len(indent)
-            for word in content.split(" "):
-                trial = (cur + " " + word).strip() if cur else word
-                if len(trial) <= max_c:
-                    cur = trial
-                else:
-                    if cur:
-                        chunks.append(indent + cur)
-                    cur = word
-            if cur:
-                chunks.append(indent + cur)
-        for ch in chunks:
-            space = max(0, inner - len(re.sub(r"\033\[[0-9;]*m", "", ch)))
-            # color body lines silver if not already styled
-            if "\033" not in ch:
-                ch = C.paint(ch, C.SILVER)
-            lines_out.append(
-                C.paint("│", accent) + " " + ch + (" " * space) + " " + C.paint("│", accent)
-            )
-    lines_out.append(C.paint("└" + "─" * (inner + 2) + "┘", accent))
-    return "\n".join(lines_out)
+def _box(title: str, body: str, *, accent: str = P.PINK) -> str:
+    """Unicode masterpiece box (shared pixie_termart)."""
+    try:
+        # Map ask accents → termart still uses pink family for chrome
+        return art.box(
+            body,
+            title=title,
+            width=art.term_width(),
+            body_style=(P.SILVER,),
+        )
+    except Exception:
+        # Fallback minimal frame
+        w = _term_width()
+        inner = max(20, w - 4)
+        lines = [f"+- {title} " + "-" * max(0, inner - len(title) - 4) + "+"]
+        for raw in (body.splitlines() or [""]):
+            lines.append("| " + raw[:inner] + " |")
+        lines.append("+" + "-" * (inner + 2) + "+")
+        return "\n".join(lines)
 
 
 def format_final(text: str) -> str:
     """Boxed, color-coded Pixie final reply."""
     text = (text or "").strip()
     if not text:
-        boxed = _box("Pixie", "(said nothing.)", accent=C.PINK_DIM)
+        boxed = _box("Pixie", "(said nothing — only starlight.)")
     else:
-        boxed = _box("Pixie", text, accent=C.PINK)
-    # Persist for `up` / `up message` and set read-grace so tick won't wipe it
+        boxed = _box("Pixie", text)
+    # Persist for grace + scry log (Shift-Tab history of replies)
     try:
         import subprocess as _sp
 
+        payload = text if text else "(said nothing.)"
         _sp.run(
             [str(Path.home() / "bin" / "pixie-session"), "save-reply"],
-            input=text if text else "(said nothing.)",
+            input=payload,
             text=True,
             check=False,
             timeout=2,
+            capture_output=True,  # never leak ids/noise into the reply box
+        )
+        # Dedicated scry entry (kind=pixie) so SCRY lists replies even if
+        # shell capture missed the boxed output.
+        _sp.run(
+            [str(Path.home() / "bin" / "scry-log"), "pixie"],
+            input=payload,
+            text=True,
+            check=False,
+            timeout=2,
+            capture_output=True,
         )
     except Exception:
         pass
@@ -1620,8 +1627,17 @@ def main() -> int:
         verb = False
 
     answer = agent(question, args.model, force_web=args.web, verbose=verb)
-    # Default UX: wait spinner + final Pixie reply only
-    print(format_final(answer))
+    # Wait spinner already erased itself on stderr. Print reply on stdout with
+    # breathing room so zsh's info-box + cursor land *below*, never over, it.
+    sys.stdout.write("\n")
+    sys.stdout.write(format_final(answer))
+    sys.stdout.write("\n\n")
+    sys.stdout.flush()
+    # Hold tick clear so the idle info-box redraw cannot wipe the reply
+    try:
+        _screen_hold("grace", float(os.environ.get("PIXIE_READ_SEC", "45")))
+    except Exception:
+        pass
     return 0
 
 

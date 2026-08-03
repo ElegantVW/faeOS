@@ -1,0 +1,462 @@
+#!/usr/bin/env python3
+"""scroll — themed command directory.
+
+  scroll             arrow picker → prints insert text (for zsh print -z)
+  scroll list       static boxed board once
+  scroll menu       raw tab-separated lines
+  scroll board      old modal board (view only)
+
+UI paints on /dev/tty; selection goes to stdout so the shell can capture it.
+"""
+from __future__ import annotations
+
+import atexit
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# shared art / TTY helpers
+sys.path.insert(0, str(Path.home() / "bin"))
+import pixie_termart as art  # noqa: E402
+
+# Force Unicode box drawing for smooth round corners
+os.environ["PIXIE_UNICODE"] = "1"
+
+P = art.P
+PIXIE_SCREEN = Path.home() / "bin" / "pixie-screen"
+
+NAME = "scroll"
+
+SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
+    (
+        "SIREN - MUSIC",
+        [
+            ("siren", "Interactive player TUI"),
+            ("siren play", "Shuffle ~/Music (recursive)"),
+            ("siren play music", "Same - explicit library"),
+            ("next", "Next track"),
+            ("prev", "Previous track"),
+            ("now", "Now playing"),
+            ("stop", "Stop playback"),
+            ("pause", "Pause / resume"),
+            ("volume", "Get/set sink volume 0-150"),
+            ("yt", "YouTube -> fzf -> mpv"),
+            ("siren trove list 10 music lofi", "Legal free media (IA)"),
+            ("siren trove get <id>", "Download one item to ~/Music/trove"),
+        ],
+    ),
+    (
+        "ETHER - NETWORK",
+        [
+            ("ether", "Live TUI: bt · wifi · lan (navigate · q to close)"),
+            ("whisper ether", "Tune the ANC headphone in"),
+            ("listen ether", "Tune the JBL Go 3 in"),
+            ("ether status", "One-shot report: bt · wifi · lan"),
+            ("ether net", "IPv4/IPv6 + archive.org check"),
+            ("ether veil on", "Raise the VPN"),
+            ("ether veil off", "Lower the VPN"),
+            ("ether bridge", "Phone hotspot fallback (netherweave.env)"),
+            ("ether about", "Network weaves help"),
+        ],
+    ),
+    (
+        "BREAK",
+        [
+            ("zen", "Browser on F7 - shell stays free"),
+            ("zen focus", "Switch to browser VT"),
+            ("zen stop", "Quit browser + X"),
+            ("zen https://", "Open URL - finish the URL"),
+        ],
+    ),
+    (
+        "AI - PIXIE",
+        [
+            ("pixie-llm start", "Offline llama.cpp server"),
+            ("pixie-llm status", "URL / model / running"),
+            ("pixie-llm stop", "Stop local LLM"),
+            ('pixie "', "Local agent - finish the quote"),
+            ("pixie -v \"", "Show tools this run"),
+            ("pixie verbose on", "Always show tools"),
+            ("pixie verbose off", "Quiet tools"),
+            ('ask "', "Same engine as pixie"),
+            ('ask-web "', "Agent biased to web"),
+            ('pixie-llm chat "', "Raw offline chat"),
+            ("kur", "Haiku bard (local LLM + voice)"),
+        ],
+    ),
+    (
+        "MAIL",
+        [
+            ("mail", "aerc client"),
+            ("goblin", "Mail spirit TUI (aerc -> local text)"),
+            ("goblin sync", "IMAP -> unread/*.txt"),
+            ("goblin list", "List local mail files"),
+            ("goblin bundle", "All unread as text"),
+            ('pixie "check my emails"', "Sync + summarize"),
+        ],
+    ),
+    (
+        "MAGPIE - SEARCH",
+        [
+            ("magpie ", "Private search - add words"),
+            ("magpie --deep 3 ", "Fetch top pages - add words"),
+            ("magpie -a ", "Deep + AI summary - add words"),
+            ("magpie --tor ", "Via Tor - add words"),
+            ("duck ", "Alias -> magpie (old name)"),
+        ],
+    ),
+    (
+        "ROUTER",
+        [
+            ("router probe", "Gateway + vendor"),
+            ("router status", "PC IPv4/IPv6 check"),
+            ("router wan", "WAN IP (creds)"),
+            ("router login", "Admin page probe"),
+            ("router forget", "Drop saved creds"),
+        ],
+    ),
+    (
+        "SYSTEM",
+        [
+            ("scroll", "This menu"),
+            ("scroll list", "Static board (no pick)"),
+            ("termfix", "Reset TTY + line-edit after glitches"),
+            ("tick status", "Tick + grace state"),
+            ("tick on 10", "Idle clear every 10s"),
+            ("tick off", "Freeze idle clear"),
+            ("scry", "Cmd + output history (also Shift-Tab)"),
+            ("spellbook", "Themed command directory"),
+            ("faectl", "FaeOS control panel (status / restart-llm)"),
+            ("pixie-term fancy", "Fancy DRM terminal (no X/startx)"),
+            ("pixie-term dress", "Pink palette + big font on this VT"),
+        ],
+    ),
+]
+
+# ── entries ────────────────────────────────────────────────────────────
+
+def all_entries() -> list[tuple[str, str, str]]:
+    """(section, cmd, blurb) flat list."""
+    out: list[tuple[str, str, str]] = []
+    for section, entries in SECTIONS:
+        for cmd, blurb in entries:
+            out.append((section, cmd, blurb))
+    return out
+
+
+def insert_text(cmd: str) -> str:
+    """Text to put on the shell prompt."""
+    return cmd.replace("…", "").replace("...", "").rstrip()
+
+
+# ── static list board ──────────────────────────────────────────────────
+
+def strip_ansi(s: str) -> str:
+    return art.strip_ansi(s)
+
+
+def vis_len(s: str) -> int:
+    return art.vis_len(s)
+
+
+def term_size() -> tuple[int, int]:
+    cols, rows = art.winsize()
+    return max(40, cols), max(12, rows)
+
+
+def pad_vis(s: str, width: int) -> str:
+    return art.pad_vis(s, width)
+
+
+def build_list_box_lines() -> list[str]:
+    """Static multi-column board (list mode)."""
+    tw = art.term_width(cap=120, floor=48)
+    lines: list[str] = []
+    for section, entries in SECTIONS:
+        lines.append(f"[{section}]")
+        for cmd, blurb in entries:
+            lines.append(f"  {cmd}  -  {blurb}")
+        lines.append("")
+    return art.box(
+        lines or ["(empty)"],
+        title=NAME,
+        width=tw,
+        body_style=(P.SILVER,),
+    ).splitlines()
+
+
+def print_list_box() -> int:
+    for line in build_list_box_lines():
+        print(line)
+    return 0
+
+
+def print_menu_lines() -> None:
+    for section, entries in SECTIONS:
+        for cmd, blurb in entries:
+            insert = insert_text(cmd)
+            display = f"{cmd}  -  {blurb}  [{section}]"
+            print(f"{insert}\t{display}")
+
+
+# ── arrow picker (primary UI) ──────────────────────────────────────────
+
+def _filter_entries(
+    entries: list[tuple[str, str, str]], q: str
+) -> list[tuple[str, str, str]]:
+    q = q.strip().lower()
+    if not q:
+        return list(entries)
+    out = []
+    for sec, cmd, blurb in entries:
+        hay = f"{sec} {cmd} {blurb}".lower()
+        if all(tok in hay for tok in q.split()):
+            out.append((sec, cmd, blurb))
+    return out
+
+
+def _picker_frame(
+    visible: list[tuple[str, str, str]],
+    sel: int,
+    filt: str,
+    status: str = "",
+) -> str:
+    tw = art.term_width()
+    th = art.term_height()
+    # header
+    head = art.box(
+        [
+            "arrow pick a spell → Enter puts it on the prompt",
+            f"filter: {filt}_",
+            f"showing {len(visible)}  ·  {status}" if status else f"showing {len(visible)}",
+        ],
+        title=NAME.upper(),
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+    # list window
+    h = max(8, th - 14)
+    if not visible:
+        rows = ["(no matches — backspace to clear filter)"]
+    else:
+        sel = max(0, min(sel, len(visible) - 1))
+        start = max(0, min(sel - h // 2, max(0, len(visible) - h)))
+        end = min(len(visible), start + h)
+        rows = []
+        name_w = max(12, tw - 14)
+        last_sec = ""
+        for i in range(start, end):
+            sec, cmd, blurb = visible[i]
+            if sec != last_sec:
+                rows.append(f"-- {sec} --")
+                last_sec = sec
+            mark = "> " if i == sel else "  "
+            line = f"{mark}{cmd}  -  {blurb}"
+            rows.append(art.strip_ansi(art.pad_vis(line, name_w)).rstrip())
+    body = art.box(
+        rows,
+        title="spells",
+        width=tw,
+        body_style=(P.SILVER,),
+    )
+    runes = art.box(
+        [
+            "up/dn move | type filter | backspace erase | Ctrl-U clear filter",
+            "Enter select | Esc / q leave",
+        ],
+        title="runes",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+    return "\n".join([head, "", body, "", runes])
+
+
+def run_picker() -> int:
+    """Arrow-key selector. UI on /dev/tty; chosen insert on stdout."""
+    fd = art.tui_open_tty()
+    if fd is None:
+        # non-interactive: dump list
+        return print_list_box()
+
+    art.tui_begin(fd, NAME)
+
+    catalog = all_entries()
+    filt = ""
+    sel = 0
+    status = ""
+
+    try:
+        while True:
+            visible = _filter_entries(catalog, filt)
+            if sel >= len(visible):
+                sel = max(0, len(visible) - 1)
+            frame = _picker_frame(visible, sel, filt, status)
+            status = ""
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                # fallback paint
+                art.tty_write(fd, art.clear_screen() + frame + "\n")
+
+            key = art.tui_read_key(fd)
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 1
+            if key in ("up", "k"):
+                sel = max(0, sel - 1)
+            elif key in ("down", "j"):
+                sel = min(max(0, len(visible) - 1), sel + 1)
+            elif key == "enter":
+                if not visible:
+                    status = "(nothing to cast)"
+                    continue
+                cmd = visible[sel][1]
+                insert = insert_text(cmd)
+                art.tui_cleanup()
+                # selection → stdout only (shell captures for print -z)
+                print(insert)
+                return 0
+            elif key == "backspace":
+                filt = filt[:-1]
+                sel = 0
+            elif key == "clear":
+                filt = ""
+                sel = 0
+            elif key == "delete":
+                pass
+            elif len(key) == 1 and key.isprintable():
+                filt += key
+                sel = 0
+            elif key == "space":
+                filt += " "
+                sel = 0
+            # ignore other keys
+    except Exception:
+        art.tui_cleanup()
+        raise
+    finally:
+        art.tui_cleanup()
+
+
+def run_fzf_picker() -> int:
+    """Optional fzf path (fixed: UI on tty, selection on stdout only)."""
+    if not shutil.which("fzf"):
+        return run_picker()
+
+    art.tui_screen_hold(True, NAME)
+    atexit.register(lambda: art.tui_screen_hold(False, NAME))
+
+    lines = []
+    for section, cmd, blurb in all_entries():
+        ins = insert_text(cmd)
+        display = f"{cmd}  -  {blurb}  [{section}]"
+        lines.append(f"{ins}\t{display}")
+
+    env = {
+        **os.environ,
+        "FZF_DEFAULT_OPTS": (
+            "--color=fg:#c0c0c8,bg:#1a0a12,hl:#e879a0,fg+:#ffebf2,bg+:#2a1520,"
+            "hl+:#ff2d55,info:#9d5c75,prompt:#e879a0,pointer:#ffb020,"
+            "marker:#3dd68c,spinner:#c44d7a,header:#c44d7a"
+        ),
+    }
+    cmd = [
+        "fzf",
+        "--height=80%",
+        "--layout=reverse",
+        "--border=rounded",
+        "--ansi",
+        "--delimiter=\t",
+        "--with-nth=2",
+        "--nth=2",
+        f"--header={NAME}  ·  up/dn move  ·  type filter  ·  Enter select  ·  Esc quit",
+        f"--prompt={NAME} > ",
+        "--info=inline",
+        "--cycle",
+    ]
+    try:
+        # CRITICAL: do not capture stderr — fzf UI needs a real TTY.
+        # Only stdout is the selection (zsh captures it).
+        tty_out = open("/dev/tty", "w", encoding="utf-8", errors="replace")
+        try:
+            proc = subprocess.run(
+                cmd,
+                input="\n".join(lines) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=tty_out,
+                env=env,
+            )
+        finally:
+            tty_out.close()
+    except (FileNotFoundError, OSError):
+        art.tui_screen_hold(False, NAME)
+        return run_picker()
+
+    art.tui_screen_hold(False, NAME)
+    if proc.returncode != 0:
+        return 1 if proc.returncode in (1, 130) else proc.returncode
+    sel = (proc.stdout or "").strip()
+    if not sel:
+        return 1
+    insert = sel.split("\t", 1)[0]
+    print(insert)
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog=NAME,
+        description="Scroll — themed command directory (arrow pick → prompt)",
+    )
+    ap.add_argument(
+        "mode",
+        nargs="?",
+        default="pick",
+        help="pick (default) | list | menu | board | fzf",
+    )
+    ap.add_argument("--list", "-l", action="store_true", help="static board once")
+    ap.add_argument("--menu", action="store_true", help="raw lines")
+    ap.add_argument(
+        "--fzf",
+        action="store_true",
+        help="use fzf instead of built-in arrow picker",
+    )
+    ap.add_argument(
+        "--board",
+        action="store_true",
+        help="static board then wait for a key (legacy)",
+    )
+    args = ap.parse_args()
+    mode = (args.mode or "pick").lower()
+
+    if args.menu or mode == "menu":
+        print_menu_lines()
+        return 0
+    if args.list or mode in ("list", "ls"):
+        return print_list_box()
+    if args.board or mode == "board":
+        # legacy view-only board
+        print_list_box()
+        print()
+        print("  (view only — run scroll for arrow pick)")
+        return 0
+    if args.fzf or mode == "fzf":
+        return run_fzf_picker()
+    # default: built-in arrow picker (works on kmscon without fzf TTY quirks)
+    if mode in ("pick", "i", "interactive", ""):
+        return run_picker()
+    # unknown mode → picker
+    return run_picker()
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        art.tui_cleanup()
+        print()
+        raise SystemExit(130)

@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""faectl — FaeOS Control Panel & Service Supervisor.
+
+Usage:
+  faectl status           # Show dashboard of all services (LLM, Kur, Siren, Audio)
+  faectl restart-llm      # Restart local LLM / pixie-llm
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+# Force Unicode box drawing for smooth round corners
+os.environ["PIXIE_UNICODE"] = "1"
+
+import sys as _sys
+_sys.path.insert(0, str(Path.home() / "bin"))
+import pixie_termart as art
+from pixie_termart import Palette as P
+
+def check_llm() -> tuple[bool, str]:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=1.0) as r:
+            if r.status == 200:
+                return True, "Running (Port 8080)"
+    except Exception:
+        pass
+    return False, "Stopped / Offline"
+
+def check_kur() -> tuple[bool, str]:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8081/", timeout=0.8) as r:
+            pass
+    except urllib.error.HTTPError:
+        return True, "Running (Port 8081)"
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["pgrep", "-f", "kur-server"], text=True, timeout=0.5)
+        if out.strip():
+            return True, "Running (Port 8081)"
+    except Exception:
+        pass
+    return False, "Stopped / Offline"
+
+def check_siren() -> tuple[bool, str]:
+    sock = "/tmp/siren-mpv.sock"
+    if os.path.exists(sock):
+        try:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(0.5)
+            client.connect(sock)
+            client.sendall((json.dumps({"command": ["get_property", "pause"]}) + "\n").encode())
+            raw = client.recv(1024).decode()
+            client.close()
+            paused = "true" in raw.lower()
+            return True, ("Paused" if paused else "Playing")
+        except Exception:
+            return True, "Socket active (Idle)"
+    return False, "Offline"
+
+def check_volume() -> str:
+    try:
+        out = subprocess.check_output(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"], text=True, timeout=0.5)
+        return out.strip()
+    except Exception:
+        return "Unknown"
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="FaeOS Control Panel & Service Supervisor")
+    ap.add_argument("action", nargs="?", default="status", choices=("status", "restart-llm"))
+    args = ap.parse_args()
+
+    if args.action == "status":
+        llm_ok, llm_status = check_llm()
+        kur_ok, kur_status = check_kur()
+        siren_ok, siren_status = check_siren()
+        vol = check_volume()
+
+        lines = [
+            f"Pixie LLM (8080):  {llm_status}",
+            f"Kur Server (8081):  {kur_status}",
+            f"Siren Music Player: {siren_status}",
+            f"Audio Sink Vol:     {vol}",
+        ]
+        w = max(45, min(65, art.term_width()))
+        print()
+        print(art.box(lines, title=" Fae OS Control Panel ✦ ", accent=P.PINK, width=w))
+        print()
+        return 0
+
+    elif args.action == "restart-llm":
+        print("Restarting local LLM (pixie-llm)...")
+        subprocess.run(["pkill", "-f", "llama-server"], stderr=subprocess.DEVNULL)
+        subprocess.Popen([str(Path.home() / "bin" / "pixie-llm")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        print("Done.")
+        return 0
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -5,7 +5,8 @@ export PATH="$HOME/bin:$PATH"
 MODEL="${PIXIE_LLM_MODEL:-$HOME/.local/share/pixie/models/mistral-7b-instruct.gguf}"
 HOST="${PIXIE_LLM_HOST:-127.0.0.1}"
 PORT="${PIXIE_LLM_PORT:-8080}"
-CTX="${PIXIE_LLM_CTX:-2048}"
+# 2048 was too small — long agent chats return HTTP 400 (context exceeded)
+CTX="${PIXIE_LLM_CTX:-8192}"
 THREADS="${PIXIE_LLM_THREADS:-$(nproc 2>/dev/null || echo 4)}"
 NGL="${PIXIE_LLM_NGL:-0}"
 ALIAS="${PIXIE_LLM_ALIAS:-mistral}"
@@ -25,4 +26,4 @@ else
   exit 1
 fi
 [[ -e "$MODEL" ]] || { echo "model missing: $MODEL" >&2; exit 1; }
-exec "$SRV" -m "$MODEL" --host "$HOST" --port "$PORT" -c "$CTX" -t "$THREADS" -ngl "$NGL" --alias "$ALIAS" --jinja
+exec "$SRV" -m "$MODEL" --host "$HOST" --port "$PORT" -c "$CTX" -t "$THREADS" -ngl "$NGL" --alias "$ALIAS" --chat-template "{%- if tools -%}{{- '<|im_start|>system\nYou have access to the following tools:\n' -}}{%- for tool in tools -%}{{- tool | tojson -}}{{- '\n\n' -}}{%- endfor -%}{{- 'To call a function, respond with a JSON object containing name and arguments.\n<|im_end|>\n' -}}{%- endif -%}{%- for message in messages -%}{{- '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' -}}{%- endfor -%}{{- '<|im_start|>assistant\n' -}}" --timeout 300

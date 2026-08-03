@@ -1,0 +1,982 @@
+#!/usr/bin/env python3
+"""goblin — the fae mail spirit.
+
+Interactive TUI + CLI:
+  goblin                 interactive mail spirit (TUI)
+  goblin list [box]      boxed list of mail (unread|read|trash)
+  goblin list --plain    old tab-separated view (for Pixie tools)
+  goblin show <file|#>   read one mail
+  goblin sync            fetch new mail  (--quiet, --no-notify)
+  goblin bundle          compact unread digest (for Pixie)
+  goblin move <dest>     move to read|trash (+ IMAP)
+  goblin sound [--set f] play the goblin voice / install one
+
+Layout:
+  ~/.cache/goblin/mail/{unread,read,trash}/*.txt
+  ~/.cache/goblin/state.json
+Sound: ~/.config/goblin/notify.{mp3,wav,ogg,m4a}  (drop your goblin here)
+"""
+from __future__ import annotations
+
+import argparse
+import email
+import email.policy
+import imaplib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from email.header import decode_header, make_header
+from pathlib import Path
+from typing import Optional
+from urllib.parse import unquote, urlparse
+
+os.environ.setdefault("PIXIE_UNICODE", "1")
+
+import pixie_termart as art  # noqa: E402
+from pixie_termart import P  # noqa: E402
+
+MAIL_ROOT = Path.home() / ".cache" / "goblin" / "mail"
+UNREAD = MAIL_ROOT / "unread"
+READ = MAIL_ROOT / "read"
+TRASH = MAIL_ROOT / "trash"
+STATE_FILE = Path.home() / ".cache" / "goblin" / "state.json"
+CONF_DIR = Path.home() / ".config" / "goblin"
+AERC_ACCOUNTS = Path.home() / ".config" / "aerc" / "accounts.conf"
+
+SOUND_EXTS = (".mp3", ".wav", ".ogg", ".m4a", ".flac")
+
+
+def eprint(*a, **k):
+    print(*a, file=sys.stderr, **k)
+
+
+def ensure_dirs() -> None:
+    for d in (UNREAD, READ, TRASH):
+        d.mkdir(parents=True, exist_ok=True)
+    CONF_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ── aerc account ──────────────────────────────────────────────
+
+def parse_aerc_account(name: Optional[str] = None) -> dict:
+    """Parse first (or named) account from aerc accounts.conf."""
+    if not AERC_ACCOUNTS.is_file():
+        raise SystemExit(f"no aerc accounts at {AERC_ACCOUNTS}")
+    text = AERC_ACCOUNTS.read_text(encoding="utf-8", errors="replace")
+    sections: dict[str, dict] = {}
+    cur = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            cur = line[1:-1]
+            sections[cur] = {"name": cur}
+            continue
+        if cur is None or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        sections[cur][k.strip().lower()] = v.strip()
+    if not sections:
+        raise SystemExit("no accounts in aerc config")
+    if name and name in sections:
+        acc = sections[name]
+    else:
+        acc = next(iter(sections.values()))
+    src = acc.get("source", "")
+    u = urlparse(src)
+    if u.scheme not in ("imaps", "imap"):
+        raise SystemExit(f"unsupported source: {src[:40]}…")
+    user = unquote(u.username or "")
+    password = unquote(u.password or "")
+    host = u.hostname or ""
+    port = u.port or (993 if u.scheme == "imaps" else 143)
+    if not user or not password or not host:
+        raise SystemExit("could not parse IMAP credentials from aerc")
+    return {
+        "name": acc.get("name", "Personal"),
+        "user": user,
+        "password": password,
+        "host": host,
+        "port": port,
+        "ssl": u.scheme == "imaps",
+        "folder": acc.get("default", "INBOX"),
+        "from": acc.get("from", ""),
+    }
+
+
+# ── message helpers ───────────────────────────────────────────
+
+def decode_mime(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    try:
+        return str(make_header(decode_header(s)))
+    except Exception:
+        return s
+
+
+def html_to_text(html: str) -> str:
+    """Rough HTML → plain text (good enough for summaries)."""
+    html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</p>", "\n", html)
+    html = re.sub(r"(?i)</div>", "\n", html)
+    html = re.sub(r"(?i)</tr>", "\n", html)
+    html = re.sub(r"(?i)</li>", "\n", html)
+    html = re.sub(r"<[^>]+>", " ", html)
+    html = re.sub(r"&nbsp;", " ", html)
+    html = re.sub(r"&amp;", "&", html)
+    html = re.sub(r"&lt;", "<", html)
+    html = re.sub(r"&gt;", ">", html)
+    html = re.sub(r"&quot;", '"', html)
+    html = re.sub(r"&#\d+;", " ", html)
+    html = re.sub(r"[ \t]+", " ", html)
+    html = re.sub(r"\n\s*\n+", "\n\n", html)
+    return html.strip()
+
+
+def body_to_text(msg: email.message.Message) -> str:
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disp = str(part.get("Content-Disposition") or "")
+            if "attachment" in disp.lower():
+                continue
+            try:
+                content = part.get_content()
+            except Exception:
+                payload = part.get_payload(decode=True) or b""
+                content = payload.decode(part.get_content_charset() or "utf-8", "replace")
+            if ctype == "text/plain":
+                plain_parts.append(str(content))
+            elif ctype == "text/html":
+                html_parts.append(str(content))
+    else:
+        try:
+            content = msg.get_content()
+        except Exception:
+            payload = msg.get_payload(decode=True) or b""
+            content = payload.decode("utf-8", "replace")
+        if msg.get_content_type() == "text/html":
+            html_parts.append(str(content))
+        else:
+            plain_parts.append(str(content))
+    if plain_parts:
+        text = "\n".join(plain_parts)
+    elif html_parts:
+        text = html_to_text("\n".join(html_parts))
+    else:
+        text = ""
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > 4000:
+        text = text[:4000] + "…"
+    return text
+
+
+def safe_filename(uid: str, subject: str) -> str:
+    sub = re.sub(r"[^\w\s.-]", "", subject)[:60].strip() or "no-subject"
+    sub = re.sub(r"\s+", "_", sub)
+    return f"uid{uid}_{sub}.txt"
+
+
+def write_mail_file(folder: Path, meta: dict, body: str) -> Path:
+    ensure_dirs()
+    path = folder / safe_filename(meta["uid"], meta["subject"])
+    if path.exists() and f"uid: {meta['uid']}" not in path.read_text(encoding="utf-8", errors="replace"):
+        path = folder / f"uid{meta['uid']}.txt"
+    lines = [
+        f"uid: {meta['uid']}",
+        f"account: {meta.get('account', '')}",
+        f"folder: {meta.get('folder', 'INBOX')}",
+        f"from: {meta['from']}",
+        f"to: {meta.get('to', '')}",
+        f"date: {meta.get('date', '')}",
+        f"subject: {meta['subject']}",
+        f"message-id: {meta.get('message_id', '')}",
+        "---",
+        body or "(empty body)",
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def parse_mail_file(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    headers, _, body = text.partition("\n---\n")
+    meta = {"path": str(path), "body": body.strip()}
+    for line in headers.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            meta[k.strip().lower()] = v.strip()
+    return meta
+
+
+def connect(acc: dict) -> imaplib.IMAP4:
+    if acc["ssl"]:
+        M = imaplib.IMAP4_SSL(acc["host"], acc["port"])
+    else:
+        M = imaplib.IMAP4(acc["host"], acc["port"])
+    M.login(acc["user"], acc["password"])
+    return M
+
+
+def known_uids() -> set[str]:
+    uids: set[str] = set()
+    for folder in (UNREAD, READ, TRASH):
+        if not folder.is_dir():
+            continue
+        for p in folder.glob("*.txt"):
+            try:
+                m = parse_mail_file(p)
+            except OSError:
+                continue
+            if m.get("uid"):
+                uids.add(str(m["uid"]))
+    return uids
+
+
+def box_dir(box: str) -> Path:
+    return {"unread": UNREAD, "read": READ, "trash": TRASH}[box]
+
+
+def load_mails(box: str) -> list[dict]:
+    d = box_dir(box)
+    mails = []
+    for p in sorted(d.glob("*.txt")):
+        try:
+            m = parse_mail_file(p)
+        except OSError:
+            continue
+        m["name"] = p.name
+        mails.append(m)
+    return mails
+
+
+def short_date(date: str) -> str:
+    d = date.strip()
+    return d[:17] if d else ""
+
+
+def _trunc_vis(s: str, w: int) -> str:
+    if art.vis_len(s) <= w:
+        return s
+    if w <= 1:
+        return "…"
+    out = []
+    n = 0
+    for ch in s:
+        cw = art._char_width(ch)
+        if n + cw > w - 1:
+            break
+        out.append(ch)
+        n += cw
+    return "".join(out) + "…"
+
+
+def _row_parts(i: int, m: dict, width: int) -> tuple[str, str, str, str]:
+    """(num, from_part, subject_part, date_s) summing exactly to width."""
+    frm = m.get("from", "")
+    if "<" in frm:
+        frm = frm.split("<", 1)[0].strip().strip('"') or frm
+    subj = m.get("subject", "") or "(no subject)"
+    date = short_date(m.get("date", ""))
+    num = f"[{i:>2}]"
+    fw = min(20, max(8, width // 3))
+    date_s = f" {date}" if date else ""
+    avail_subj = width - len(num) - 1 - fw - 3 - art.vis_len(date_s)
+    subj_part = _trunc_vis(subj, max(2, avail_subj)).ljust(max(2, avail_subj))
+    return num, _trunc_vis(frm, fw).ljust(fw), subj_part, date_s
+
+
+def list_rows(mails: list[dict], width: int) -> list[str]:
+    rows = []
+    for i, m in enumerate(mails, 1):
+        num, frm, subj, date = _row_parts(i, m, width)
+        rows.append(f"{num} {frm} │ {subj}{date}")
+    return rows
+
+
+# ── state ─────────────────────────────────────────────────────
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_state(state: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+# ── the goblin voice ──────────────────────────────────────────
+
+def find_sound() -> Optional[Path]:
+    env = os.environ.get("GOBLIN_SOUND", "")
+    if env and Path(env).is_file():
+        return Path(env)
+    for ext in SOUND_EXTS:
+        p = CONF_DIR / f"notify{ext}"
+        if p.is_file():
+            return p
+    return None
+
+
+def play_sound(path: Optional[Path]) -> bool:
+    if not path or not path.is_file():
+        return False
+    for player in (
+        ["mpv", "--no-video", "--no-config", "--volume=85", "--really-quiet", str(path)],
+        ["pw-play", str(path)],
+        ["paplay", str(path)],
+        ["aplay", "-q", str(path)],
+    ):
+        try:
+            r = subprocess.run(player, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode == 0:
+            return True
+    return False
+
+
+def cmd_sound(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    if args.set:
+        src = Path(args.set).expanduser()
+        if not src.is_file():
+            eprint(f"no such sound: {src}")
+            return 1
+        ext = src.suffix.lower() if src.suffix.lower() in SOUND_EXTS else ".mp3"
+        dst = CONF_DIR / f"notify{ext}"
+        for old in SOUND_EXTS:
+            p = CONF_DIR / f"notify{old}"
+            if p != dst and p.exists():
+                p.unlink()
+        shutil.copy2(src, dst)
+        print(f"goblin voice installed → {dst}")
+        path = dst
+    else:
+        path = find_sound()
+    if not path:
+        eprint("goblin has no voice yet — drop one at ~/.config/goblin/notify.mp3")
+        eprint("or install a clip:  goblin sound --set /path/to/goblin.mp3")
+        return 2
+    if play_sound(path):
+        return 0
+    eprint(f"could not play {path}")
+    return 1
+
+
+def goblin_squeak(n: int = 1) -> None:
+    """Play the goblin voice when new mail arrives."""
+    if not find_sound():
+        eprint("(new mail! goblin wants to squeak — drop a sound at ~/.config/goblin/notify.mp3)")
+        return
+    play_sound(find_sound())
+
+
+# ── sync ──────────────────────────────────────────────────────
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    acc = parse_aerc_account(args.account)
+    mode = "all recent" if args.all else "unread (UNSEEN)"
+    if not args.quiet:
+        eprint(f"syncing {mode} from {acc['user']} @ {acc['host']} …")
+    M = connect(acc)
+    try:
+        folder = args.folder or acc["folder"]
+        typ, _ = M.select(folder, readonly=True)
+        if typ != "OK":
+            eprint(f"cannot select {folder}")
+            return 1
+        if args.all:
+            typ, data = M.search(None, "ALL")
+        else:
+            typ, data = M.search(None, "UNSEEN")
+        if typ != "OK":
+            eprint("search failed")
+            return 1
+        ids = data[0].split()
+        if args.all and args.limit and len(ids) > args.limit:
+            ids = ids[-args.limit:]
+        if not args.quiet:
+            eprint(f"found {len(ids)} candidate(s)")
+        already = known_uids() if not args.force else set()
+        written = []
+        skipped = 0
+        for num in ids:
+            typ, msg_data = M.fetch(num, "(UID BODY.PEEK[])")
+            if typ != "OK" or not msg_data or not msg_data[0]:
+                continue
+            uid = num.decode() if isinstance(num, bytes) else str(num)
+            raw = None
+            for part in msg_data:
+                if isinstance(part, tuple) and len(part) >= 2:
+                    header = part[0].decode(errors="replace") if isinstance(part[0], bytes) else str(part[0])
+                    m = re.search(r"UID\s+(\d+)", header)
+                    if m:
+                        uid = m.group(1)
+                    raw = part[1]
+            if not raw:
+                continue
+            if uid in already and not args.force:
+                skipped += 1
+                continue
+            msg = email.message_from_bytes(raw, policy=email.policy.default)
+            meta = {
+                "uid": uid,
+                "account": acc["name"],
+                "folder": folder,
+                "from": decode_mime(msg.get("From")),
+                "to": decode_mime(msg.get("To")),
+                "date": decode_mime(msg.get("Date")),
+                "subject": decode_mime(msg.get("Subject")) or "(no subject)",
+                "message_id": msg.get("Message-ID") or "",
+            }
+            body = body_to_text(msg)
+            path = write_mail_file(UNREAD, meta, body)
+            written.append(path)
+            already.add(uid)
+            if not args.quiet:
+                eprint(f"  saved {path.name}")
+        if not args.quiet:
+            print(f"synced {len(written)} message(s) → {UNREAD}" + (f" (skipped {skipped} already stored)" if skipped else ""))
+            for p in written:
+                print(f"  {p.name}")
+            if not written and not args.all:
+                local_n = len(list(UNREAD.glob("*.txt")))
+                if local_n:
+                    print(f"(server has no new UNSEEN; {local_n} still in local unread/)")
+                else:
+                    print("(no UNSEEN on server and local unread/ is empty — try: goblin sync --all)")
+        state = load_state()
+        state["last_sync"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        state["last_uids"] = sorted(known_uids())
+        state["last_new"] = len(written)
+        save_state(state)
+        if written and not args.no_notify:
+            goblin_squeak(len(written))
+        return 0
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+# ── list / show / bundle / move ───────────────────────────────
+
+def list_rows(mails: list[dict], width: int) -> list[str]:
+    rows = []
+    for i, m in enumerate(mails, 1):
+        frm = m.get("from", "")
+        if "<" in frm:
+            frm = frm.split("<", 1)[0].strip().strip('"') or frm
+        subj = m.get("subject", "") or "(no subject)"
+        date = short_date(m.get("date", ""))
+        num = f"[{i:>2}]"
+        fw = min(22, max(8, width // 3))
+        from_part = frm[:fw].ljust(fw)
+        rest = width - len(num) - 1 - fw - 3
+        subj_part = subj[: rest - 14] if rest > 14 else subj[: max(4, rest - 2)]
+        rows.append(f"{num} {art.paint(from_part, P.BLUSH)} │ {art.paint(subj_part, P.SILVER)}  {art.paint(date, P.MUTED)}")
+    return rows
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    mails = load_mails(args.box)
+    if not mails:
+        print(f"(no messages in {args.box})")
+        return 0
+    if args.plain:
+        for m in mails:
+            print(
+                f"{m['name']}\tuid={m.get('uid','?')}\t"
+                f"from={m.get('from','')[:40]}\t"
+                f"subject={m.get('subject','')[:50]}"
+            )
+        return 0
+    state = load_state()
+    acc = parse_aerc_account(None)
+    tag = f"{acc['name']} · {len(mails)} in {args.box} · last sync {state.get('last_sync','never')}"
+    print(art.banner("Goblin ✦", tagline=tag))
+    rows = list_rows(mails, art.term_width() - 4)
+    print(art.box(rows, width=art.term_width(), body_style=(P.SILVER,)))
+    return 0
+
+def resolve_mail(args_file: str) -> Optional[Path]:
+    path = Path(args_file)
+    if path.is_file():
+        return path
+    cand = UNREAD / args_file
+    if cand.is_file():
+        return cand
+    if args_file.isdigit():
+        mails = load_mails("unread")
+        n = int(args_file)
+        if 1 <= n <= len(mails):
+            return Path(mails[n - 1]["path"])
+    return None
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    path = resolve_mail(args.file)
+    if not path:
+        eprint(f"not found: {args.file}")
+        return 1
+    m = parse_mail_file(path)
+    if args.plain:
+        print(path.read_text(encoding="utf-8", errors="replace"))
+        return 0
+    w = art.term_width()
+    body_lines = art.wrap_plain(m.get("body", "") or "(empty body)", max(8, w - 4))
+    rows = [
+        (f"  From:    {m.get('from','')}", (P.BLUSH,)),
+        (f"  Date:    {m.get('date','')}", (P.MUTED,)),
+        (f"  Subject: {m.get('subject','')}", (P.SILVER,)),
+        ("", (P.MUTED,)),
+    ] + [(f"  {ln} ", (P.SILVER,)) for ln in body_lines]
+    print(tui_frame(rows, title="Goblin ✦", width=w))
+    return 0
+
+
+def cmd_unread_bundle(args: argparse.Namespace) -> int:
+    """Print all unread messages as a compact digest (for Pixie summaries)."""
+    ensure_dirs()
+    files = sorted(UNREAD.glob("*.txt"))
+    if not files:
+        print("(no unread messages on disk — run sync first)")
+        return 0
+    snippet_n = max(80, min(int(args.snippet or 280), 1200))
+    max_msgs = max(1, min(int(args.limit or 20), 50))
+    files = files[:max_msgs]
+    parts = [f"UNREAD DIGEST — {len(files)} message(s) (use filename for mail_move)\n"]
+    for i, p in enumerate(files, 1):
+        m = parse_mail_file(p)
+        body = re.sub(r"\s+", " ", (m.get("body") or "")).strip()
+        if len(body) > snippet_n:
+            body = body[:snippet_n] + "…"
+        parts.append(
+            f"{i}. file={p.name}\n"
+            f"   From: {m.get('from', '')}\n"
+            f"   Date: {m.get('date', '')}\n"
+            f"   Subject: {m.get('subject', '')}\n"
+            f"   Snippet: {body}\n"
+        )
+    print("\n".join(parts))
+    return 0
+
+
+def imap_mark_and_move(acc: dict, uid: str, action: str) -> str:
+    """action: read | trash"""
+    M = connect(acc)
+    try:
+        folder = acc["folder"]
+        M.select(folder)
+        M.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+        if action == "read":
+            return f"uid {uid} marked Seen on server"
+        if action == "trash":
+            for trash in ("Trash", "INBOX.Trash", "Deleted", "INBOX.Deleted Messages"):
+                try:
+                    typ, _ = M.uid("COPY", uid, trash)
+                    if typ == "OK":
+                        M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+                        M.expunge()
+                        return f"uid {uid} moved to {trash}"
+                except Exception:
+                    continue
+            M.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            M.expunge()
+            return f"uid {uid} deleted (no Trash folder found)"
+        return f"unknown action {action}"
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+def move_local(m: dict, dest: str, local_only: bool = False) -> str:
+    acc = None
+    server_msg = ""
+    uid = m.get("uid", "")
+    if uid and not local_only:
+        try:
+            acc = parse_aerc_account(None)
+            server_msg = imap_mark_and_move(acc, uid, dest)
+        except Exception as e:
+            server_msg = f"server error: {e}"
+    dest_dir = READ if dest == "read" else TRASH
+    src = Path(m["path"])
+    new_path = dest_dir / src.name
+    src.replace(new_path)
+    return server_msg
+
+
+def cmd_move(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    dest = args.dest
+    targets = args.files
+    if args.all:
+        targets = [p.name for p in UNREAD.glob("*.txt")]
+    if not targets:
+        print("nothing to move")
+        return 0
+    moved = 0
+    for name in targets:
+        path = Path(name)
+        if not path.is_file():
+            path = UNREAD / name
+        if not path.is_file():
+            eprint(f"skip missing {name}")
+            continue
+        m = parse_mail_file(path)
+        server_msg = move_local(m, dest, local_only=args.local_only)
+        print(f"moved {path.name} → {dest}/  ({server_msg})")
+        moved += 1
+    return 0
+
+
+# ── TUI ───────────────────────────────────────────────────────
+
+def cmd_idle(args: argparse.Namespace) -> int:
+    """Long-running IMAP IDLE watcher — instant new-mail push (systemd goblin-idle.service)."""
+    ensure_dirs()
+    acc = parse_aerc_account(None)
+    if not acc.get("ssl"):
+        eprint("idle watcher requires an imaps:// account")
+        return 1
+    host, port = acc["host"], int(acc["port"])
+    user, pwd = acc["user"], acc["password"]
+    backoff = 5
+    while True:
+        M = None
+        try:
+            M = imaplib.IMAP4_SSL(host, port)
+            M.login(user, pwd)
+            typ, _ = M.select("INBOX")
+            if typ != "OK":
+                raise ConnectionError("SELECT INBOX failed")
+            print(f"idle: watching INBOX on {host} — instant push on new mail", flush=True)
+            backoff = 5
+            while True:
+                woke = False
+                with M.idle(duration=15 * 60) as idler:
+                    for typ, data in idler:
+                        print(f"idle: {typ} {' '.join(str(d) for d in data)[:120]}", flush=True)
+                        woke = True
+                        break
+                if woke:
+                    time.sleep(1)
+                    try:
+                        cmd_sync(
+                            argparse.Namespace(
+                                account=None, folder=None, all=False,
+                                limit=30, force=False, quiet=False, no_notify=False,
+                            )
+                        )
+                    except SystemExit:
+                        pass
+        except Exception as e:
+            print(f"idle: {e} — reconnecting in {backoff}s", flush=True)
+            time.sleep(backoff)
+            backoff = min(60, backoff * 2)
+        finally:
+            if M is not None:
+                try:
+                    M.logout()
+                except Exception:
+                    pass
+
+
+
+def tui_frame(rows: list[tuple[str, tuple, ...]], *, title: str, subtitle: str = "", width: int | None = None) -> str:
+    """Hand-drawn pink frame — allows per-row styling (art.box cannot)."""
+    unicode_mode = art.strip_ansi(os.environ.get("PIXIE_UNICODE", "")).lower() in ("1", "on", "true", "yes", "unicode")
+    tl, tr, bl, br, hz, vt = ("╭", "╮", "╰", "╯", "─", "│") if unicode_mode else ("+", "+", "+", "+", "-", "|")
+    mark = "✦" if unicode_mode else "*"
+    w = width or art.term_width()
+    outer = max(36, min(w, 96))
+    inner = outer - 2
+    body_w = inner - 2
+    out = []
+    if title:
+        tplain = art.strip_ansi(title)
+        label = f" {mark} {tplain} "
+        fill = max(0, inner - art.vis_len(label) - 1)
+        out.append(art.paint(tl + hz, P.PINK_DIM) + art.paint(label, P.BOLD, P.PINK) + art.paint(hz * fill + tr, P.PINK_DIM))
+    else:
+        out.append(art.paint(tl + hz * inner + tr, P.PINK_DIM))
+    if subtitle:
+        for ln in art.wrap_plain(art.strip_ansi(subtitle), body_w):
+            out.append(art.paint(vt + " " + art.pad_vis(ln, body_w) + " " + vt, P.MUTED))
+        out.append(art.paint(vt + " " + ("·" if unicode_mode else "-") * body_w + " " + vt, P.PINK_DIM))
+    for text, style in rows:
+        plain = art.pad_vis(art.strip_ansi(text), body_w)
+        out.append(art.paint(vt, P.PINK_DIM) + " " + art.paint(plain, *style) + " " + art.paint(vt, P.PINK_DIM))
+    out.append(art.paint(bl + hz * inner + br, P.PINK_DIM))
+    return "\n".join(out)
+
+
+def tui_run() -> int:
+    fallback = lambda: cmd_list(argparse.Namespace(box="unread", plain=False))
+    fd = art.tui_open_tty()
+    if fd is None:
+        return fallback()
+    art.tui_begin(fd, "goblin")
+    ensure_dirs()
+    try:
+        acc_name = parse_aerc_account(None)["name"]
+    except SystemExit:
+        acc_name = "aerc"
+    box = "unread"
+    sel = 0
+    offset = 0
+    status = "welcome, master — the goblin guards your mail"
+    try:
+        os.write(fd, b"\033[?25l")
+        while True:
+            mails = load_mails(box)
+            if sel >= len(mails):
+                sel = max(0, len(mails) - 1)
+            state = load_state()
+            unread_n = len(load_mails("unread"))
+            width = art.term_width()
+            height = art.term_height()
+            bw = max(32, min(width, 96) - 4)
+            rows: list[tuple[str, tuple, ...]] = []
+            max_rows = max(4, height - 7)
+            for i, m in enumerate(mails):
+                num, frm, subj, date = _row_parts(i + 1, m, bw - 4)
+                line = f"  {num} {frm} │ {subj}{date} "
+                if i == sel:
+                    rows.append((line, (P.BOLD, P.BLUSH)))
+                else:
+                    rows.append((line, (P.SILVER,)))
+            if offset > len(rows) - max_rows:
+                offset = max(0, len(rows) - max_rows)
+            visible = rows[offset : offset + max_rows]
+            if not visible:
+                visible = [("  (no messages in this box — press s to sync) ", (P.MUTED,))]
+            title = "Goblin"
+            subtitle = (
+                f"{acc_name} · box: {box} · unread: {unread_n} · last sync: {state.get('last_sync', 'never')}"
+                + (f" · {status}" if status else "")
+            )
+            frame = tui_frame(visible, title="Goblin ✦", subtitle=subtitle, width=width)
+            footer = art.paint(
+                f"runes: ↑↓/j/k move · enter open · s sync · m read · t trash · 1/2/3 box · q quit",
+                P.PINK_DIM,
+            )
+            out = "\n".join([frame, footer])
+            os.write(fd, b"\033[H\033[J")
+            os.write(fd, (out + "\n").encode("utf-8", "replace"))
+            os.write(fd, b"\033[0m")
+            key = art.tui_read_key(fd)
+            if key in ("q", "esc", "ctrl-c"):
+                break
+            if key in ("j", "down"):
+                if sel < len(mails) - 1:
+                    sel += 1
+                    if sel >= offset + max_rows:
+                        offset += 1
+            elif key in ("k", "up"):
+                if sel > 0:
+                    sel -= 1
+                    if sel < offset:
+                        offset -= 1
+            elif key == "pgdn" or key == "space":
+                sel = min(len(mails) - 1, sel + max_rows)
+            elif key == "pgup":
+                sel = max(0, sel - max_rows)
+            elif key == "home":
+                sel = 0
+                offset = 0
+            elif key == "end":
+                sel = len(mails) - 1
+            elif key in ("enter", "o"):
+                if mails:
+                    status = tui_reader(fd, mails[sel], acc_name, width, box)
+            elif key == "s":
+                status = tui_sync()
+            elif key == "m":
+                if mails:
+                    m = mails[sel]
+                    try:
+                        msg = move_local(m, "read")
+                        status = f"read → {m['name']} ({msg})"
+                    except Exception as e:
+                        status = f"read failed: {e}"
+                    sel = min(sel, max(0, len(mails) - 2))
+            elif key == "t":
+                if mails:
+                    m = mails[sel]
+                    try:
+                        msg = move_local(m, "trash")
+                        status = f"trash → {m['name']} ({msg})"
+                    except Exception as e:
+                        status = f"trash failed: {e}"
+                    sel = min(sel, max(0, len(mails) - 2))
+            elif key in ("1", "u"):
+                box = "unread"
+                sel = 0
+                offset = 0
+            elif key in ("2", "r"):
+                box = "read"
+                sel = 0
+                offset = 0
+            elif key in ("3", "b"):
+                box = "trash"
+                sel = 0
+                offset = 0
+    finally:
+        art.tui_cleanup()
+    return 0
+
+
+def tui_sync() -> str:
+    args = argparse.Namespace(account=None, folder=None, all=False, limit=30, force=False, quiet=True, no_notify=False)
+    try:
+        cmd_sync(args)
+        state = load_state()
+        n = state.get("last_new", 0)
+        if n:
+            return f"synced — {n} new mail(s) squeaked in"
+        return "synced — nothing new"
+    except SystemExit as e:
+        return f"sync failed: {e}"
+    except Exception as e:
+        return f"sync failed: {e}"
+
+
+def tui_reader(fd: int, m: dict, acc_name: str, width: int, box: str) -> str:
+    height = art.term_height()
+    body = m.get("body", "") or "(empty body)"
+    body_lines = art.wrap_plain(body, max(8, width - 4))
+    max_rows = max(5, height - 7)
+    header_rows = [
+        (f"  From:    {m.get('from','')}", (P.BLUSH,)),
+        (f"  Date:    {m.get('date','')}", (P.MUTED,)),
+        (f"  Subject: {m.get('subject','')}", (P.SILVER,)),
+    ]
+    head_n = len(header_rows) + 1  # header + blank separator row
+    pos = 0
+    while True:
+        sub = f"{acc_name} · box {box} · {m.get('uid','')} · {m['name']}"
+        bottom = max(1, max_rows - head_n)
+        seg = body_lines[pos : pos + bottom]
+        rows = header_rows + [("", (P.MUTED,))] + [(f"  {ln} ", (P.SILVER,)) for ln in seg]
+        frame = tui_frame(rows, title="Goblin ✦", subtitle=sub, width=width)
+        pos_hint = ""
+        if len(body_lines) > bottom:
+            pos_hint = f" · {pos + 1}-{min(len(body_lines), pos + bottom)}/{len(body_lines)}"
+        footer = art.paint(
+            f"runes: j/k scroll · t trash · m read · q back" + pos_hint,
+            P.PINK_DIM,
+        )
+        os.write(fd, b"\033[H\033[J")
+        os.write(fd, ("\n".join([frame, footer]) + "\n").encode("utf-8", "replace"))
+        os.write(fd, b"\033[0m")
+        key = art.tui_read_key(fd)
+        if key in ("q", "esc", "ctrl-c", "left"):
+            if box == "unread" and Path(m["path"]).parent == UNREAD:
+                try:
+                    msg = move_local(m, "read")
+                    return f"read → {m['name']} (opened · {msg})"
+                except Exception as e:
+                    return f"read failed (opened): {e}"
+            return "back to the horde"
+        if key in ("j", "down", "space"):
+            if pos + bottom < len(body_lines):
+                pos += 1
+        elif key in ("k", "up"):
+            if pos > 0:
+                pos -= 1
+        elif key == "pgdn":
+            pos = min(len(body_lines) - 1, pos + bottom)
+        elif key == "pgup":
+            pos = max(0, pos - bottom)
+        elif key == "home":
+            pos = 0
+        elif key == "end":
+            pos = max(0, len(body_lines) - bottom)
+        elif key == "t":
+            try:
+                msg = move_local(m, "trash")
+                return f"trash → {m['name']} ({msg})"
+            except Exception as e:
+                return f"trash failed: {e}"
+        elif key == "m":
+            try:
+                msg = move_local(m, "read")
+                return f"read → {m['name']} ({msg})"
+            except Exception as e:
+                return f"read failed: {e}"
+
+
+# ── main ──────────────────────────────────────────────────────
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="goblin — the fae mail spirit")
+    ap.add_argument("--account", default=None, help="aerc account section name")
+    sub = ap.add_subparsers(dest="cmd")
+
+    p = sub.add_parser("sync", help="download UNSEEN mail to unread/*.txt")
+    p.add_argument("--folder", default=None)
+    p.add_argument("--all", action="store_true", help="fetch recent messages even if already Seen")
+    p.add_argument("--limit", type=int, default=30, help="with --all, max newest messages (default 30)")
+    p.add_argument("--force", action="store_true", help="re-download even if UID already stored")
+    p.add_argument("--quiet", action="store_true", help="no output (for the background service)")
+    p.add_argument("--no-notify", action="store_true", help="do not play the goblin voice on new mail")
+    p.set_defaults(func=cmd_sync)
+
+    p = sub.add_parser("list", help="list mail (unread|read|trash)")
+    p.add_argument("box", nargs="?", default="unread", choices=["unread", "read", "trash"])
+    p.add_argument("--plain", action="store_true", help="tab-separated view for Pixie tools")
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("show", help="print one mail file")
+    p.add_argument("file", help="file name, path, or unread index (#)")
+    p.add_argument("--plain", action="store_true", help="raw file view for Pixie tools")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("bundle", help="compact unread digest for summarization")
+    p.add_argument("--snippet", type=int, default=280, help="body snippet chars (default 280)")
+    p.add_argument("--limit", type=int, default=20, help="max messages in digest (default 20)")
+    p.set_defaults(func=cmd_unread_bundle)
+
+    p = sub.add_parser("move", help="move local files + update IMAP")
+    p.add_argument("dest", choices=["read", "trash"])
+    p.add_argument("files", nargs="*")
+    p.add_argument("--all", action="store_true", help="all unread")
+    p.add_argument("--local-only", action="store_true")
+    p.set_defaults(func=cmd_move)
+
+    p = sub.add_parser("sound", help="play / install the goblin voice")
+    p.add_argument("--set", default=None, metavar="FILE", help="install a sound as the goblin voice")
+    p.set_defaults(func=cmd_sound)
+
+    p = sub.add_parser("idle", help="IMAP IDLE watcher — instant new-mail push (systemd service)")
+    p.set_defaults(func=cmd_idle)
+
+    args = ap.parse_args()
+    if args.cmd is None:
+        return tui_run()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

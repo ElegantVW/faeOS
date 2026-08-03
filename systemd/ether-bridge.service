@@ -1,0 +1,13 @@
+[Unit]
+Description=Ether bridge — tether to the phone hotspot when no real link is up
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/evenweaker/bin/ether bridge --quiet
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Unread-mail chip for the status box — ✉ N (or silent when empty)."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+UNREAD = Path.home() / ".cache" / "goblin" / "mail" / "unread"
+
+PINK = "\033[38;5;175m"
+BOLD = "\033[1m"
+SILVER_DIM = "\033[38;5;245m"
+RESET = "\033[0m"
+
+
+def main() -> int:
+    n = 0
+    if UNREAD.is_dir():
+        n = len(list(UNREAD.glob("*.txt")))
+    if n <= 0:
+        sys.stdout.write(f"{SILVER_DIM}✉ 0{RESET}")
+        return 0
+    sys.stdout.write(f"{BOLD}{PINK}✉ {n}{RESET}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

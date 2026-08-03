@@ -1,0 +1,7 @@
+[Unit]
+Description=Goblin mail sync — fetch new mail, squeak on arrival
+After=network.target pipewire.service pulseaudio.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/evenweaker/bin/goblin sync --quiet

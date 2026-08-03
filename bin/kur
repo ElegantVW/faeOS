@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+import sys
+import json
+import os
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ.setdefault("PIXIE_UNICODE", "1")
+import pixie_termart as art
+
+if len(sys.argv) < 2:
+    print("Usage: kur \"[your prompt/observation]\"")
+    sys.exit(1)
+
+prompt_text = sys.argv[1]
+url = "http://127.0.0.1:8081/generate"
+data = json.dumps({"prompt": prompt_text}).encode("utf-8")
+
+req = urllib.request.Request(
+    url, 
+    data=data, 
+    headers={'Content-Type': 'application/json'},
+    method='POST'
+)
+
+try:
+    busy_file = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"kur-busy.{os.getpid()}"
+    try:
+        busy_file.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
+    with urllib.request.urlopen(req, timeout=30) as response:
+        res = json.loads(response.read().decode('utf-8'))
+        reply_text = res['text'].strip()
+        lines = reply_text.splitlines()
+        max_len = max((len(l) for l in lines), default=20)
+        box_width = max(30, min(max_len + 6, art.term_width()))
+        print()
+        print(art.box(reply_text, title=" Kur ✦", width=box_width))
+        print()
+except Exception:
+    print("Kur server down on 8081.\n\nKur must be loaded with his main command.")
+    sys.exit(1)
+finally:
+    try:
+        busy_file.unlink()
+    except Exception:
+        pass

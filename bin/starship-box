@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Cute pink-framed status box for the prompt + cursor two lines below.
+"""Cute pink-framed status box + single-line cursor.
 
-Collects username, idle mood, music, time, RAM/CPU/HDD (and git when present)
-into a Unicode box. Borders are pink_dim; body keeps each segment's colors.
+Modes (argv[1]):
+  --status   box only (printed by zsh precmd / tick — NOT part of PS1)
+  --cursor   single-line summon + >  (starship PS1 only — no multi-line)
+  --full     legacy: box + cursor in one stream (avoid; causes kmscon ghosting)
+
+Putting the multi-line box in PS1 makes zsh mis-track the cursor on kmscon
+(ghost/duplicate characters while typing). Status is printed outside PS1.
 """
 from __future__ import annotations
 
@@ -11,13 +16,19 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import time
+import unicodedata
 from pathlib import Path
+import os
 
 HOME = Path.home()
 BIN = HOME / "bin"
 CACHE = HOME / ".cache" / "pixie"
 SUMMON_FILE = CACHE / "summon.msg"
+
+# Force Unicode box drawing for smooth round corners
+os.environ["PIXIE_UNICODE"] = "1"
 
 # Palette (256 + truecolor where music already uses it)
 PINK = "\033[38;5;175m"
@@ -31,7 +42,7 @@ RESET = "\033[0m"
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
-# Imperative, magical summons — same line as ❯ (no trailing dots; message leads into cursor)
+# Imperative, magical summons — same line as > (ASCII; no trailing dots)
 SUMMONS = (
     "Casting cursor",
     "Calling cursor from the ether",
@@ -70,9 +81,30 @@ def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s)
 
 
+def _char_width(ch: str) -> int:
+    """Column width for monospace terminals (kmscon-safe):
+
+    Box-drawing and dingbats (✦ ♪) are width 1 here — treating them as 2
+    misaligns right borders on most European fonts.
+    """
+    if not ch:
+        return 0
+    o = ord(ch)
+    if o < 32 or 0x7F <= o < 0xA0:
+        return 0
+    if unicodedata.combining(ch):
+        return 0
+    eaw = unicodedata.east_asian_width(ch)
+    if eaw in ("F", "W"):
+        return 2
+    # Emoji & symbols that are double-width on most terminals
+    if 0x1F300 <= o <= 0x1FAFF:
+        return 2
+    return 1
+
+
 def vis_len(s: str) -> int:
-    # rough: treat all non-ANSI as width 1 (good enough for our ASCII/emoji mix)
-    return len(strip_ansi(s))
+    return sum(_char_width(c) for c in strip_ansi(s))
 
 
 def run_bin(name: str, timeout: float = 1.2) -> str:
@@ -160,13 +192,15 @@ def pad_line(inner: str, width: int) -> str:
     return inner
 
 
-def pick_summon() -> str:
-    """Fresh imperative summon line each prompt; avoid immediate repeat."""
+def pick_summon(*, reuse: bool = False) -> str:
+    """Imperative summon line. reuse=True reads cache only (stable PS1 length)."""
     prev = ""
     try:
         prev = SUMMON_FILE.read_text(encoding="utf-8").rstrip("\n")
     except OSError:
         pass
+    if reuse and prev:
+        return prev
     msg = prev
     for _ in range(10):
         cand = random.choice(SUMMONS)
@@ -182,17 +216,65 @@ def pick_summon() -> str:
     return msg
 
 
+def kur_busy() -> bool:
+    d = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    try:
+        for p in d.glob("kur-busy.*"):
+            if not p.is_file():
+                continue
+            try:
+                pid = int(p.name.rsplit(".", 1)[-1])
+            except ValueError:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+                continue
+            try:
+                os.kill(pid, 0)
+                return True
+            except OSError:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return False
+
+
+def cpu_temp() -> str:
+    try:
+        temps = []
+        for p in Path("/sys/class/thermal").glob("thermal_zone*/temp"):
+            try:
+                val = int(p.read_text(encoding="utf-8").strip())
+                c = val / 1000.0
+                if 10 < c < 110:
+                    temps.append(c)
+            except Exception:
+                continue
+        if temps:
+            avg = int(round(sum(temps) / len(temps)))
+            return f"{BOLD}{PINK_DIM}{avg}°C{RESET}"
+    except Exception:
+        pass
+    return ""
+
+
 def box_lines(rows: list[str]) -> list[str]:
-    """Plain artistic frame — no title (Pixie is the assistant, not the chrome)."""
+    """Plain artistic frame with username title in top border."""
     term = shutil.get_terminal_size((80, 24)).columns
-    # leave a little margin; min cute width
     max_inner = max(40, min(term - 4, 76))
     content_w = max((vis_len(r) for r in rows), default=20)
     inner = min(max_inner, max(content_w, 36))
-
-    # Side lines are: "│ " + body(inner) + " │" → span between corners = inner + 2
     span = inner + 2
-    top = f"{PINK_DIM}╭{'─' * span}╮{RESET}"
+
+    user_name = os.environ.get("USER") or "evenweaker"
+    title_segment = f" ✦ {user_name} ✦ "
+    dash_len = max(0, span - len(title_segment) - 1)
+    top = f"{PINK_DIM}╭─{DARK_PINK}{title_segment}{PINK_DIM}{'─' * dash_len}╮{RESET}"
+
     mid = []
     for r in rows:
         body = pad_line(r, inner)
@@ -201,43 +283,74 @@ def box_lines(rows: list[str]) -> list[str]:
     return [top, *mid, bot]
 
 
-def main() -> None:
-    idle = run_bin("starship-pixie-idle") or f"{BOLD}{PINK}Pixie is waiting…{RESET}"
+def build_rows() -> list[str]:
+    if kur_busy():
+        idle = f"{BOLD}{DARK_PINK}The Dragon thinks…{RESET}"
+    else:
+        idle = run_bin("starship-pixie-idle") or f"{BOLD}{PINK}Pixie is waiting…{RESET}"
+
     music = run_bin("starship-music") or f"{SILVER_DIM}Not playing{RESET}"
+    goblin = run_bin("starship-goblin") or ""
     cpu = run_bin("starship-cpu") or "CPU ?"
     disk = run_bin("starship-disk") or "HDD ?"
-    # colorize cpu/disk if scripts didn't (they print plain + we wrap)
+    temp = cpu_temp()
+
     if "\033" not in cpu:
         cpu = f"{BOLD}{PINK}{cpu}{RESET}"
     if "\033" not in disk:
         disk = f"{BOLD}{DARK_PINK}{disk}{RESET}"
 
     git = git_snippet()
-    user = username()
-    # Line 1: user · idle · git
     sep = f" {PINK_DIM}·{RESET} "
-    row1_parts = [user, idle]
+    
+    row1_parts = [idle]
     if git:
         row1_parts.append(git)
     row1 = sep.join(row1_parts)
+    row2 = sep.join([x for x in (music, goblin) if x])
+    
+    stats = [clock(), ram(), cpu, disk]
+    if temp:
+        stats.append(temp)
+    row3 = sep.join(stats)
+    return [row1, row2, row3]
 
-    # Line 2: music alone (often long)
-    row2 = music
 
-    # Line 3: time · RAM · CPU · HDD
-    row3 = sep.join([clock(), ram(), cpu, disk])
+def cursor_line(*, reuse: bool = True) -> str:
+    # ASCII ">" only — fancy glyphs break width math on some fonts
+    # Pad summon to fixed width so PS1 column count never changes mid-session
+    summon = pick_summon(reuse=reuse).rstrip(".…? ")
+    if len(summon) > 34:
+        summon = summon[:33] + "…"
+    summon = f"{summon:<34}"
+    return f"{PINK_DIM}{summon}{RESET} {BOLD}{PINK}>{RESET} "
 
-    rows = [row1, row2, row3]
-    framed = box_lines(rows)
 
-    # Summon + cursor on one line. Use ASCII ">" — fancy ❯ becomes "?" on many fonts.
-    summon = pick_summon().rstrip(".…? ")
-    line = (
-        f"{PINK_DIM}{summon}{RESET} "
-        f"{BOLD}{PINK}>{RESET} "
-    )
-    out = "\n".join(framed) + "\n\n" + line
-    print(out, end="")
+def main(argv: list[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    mode = "cursor"
+    if args:
+        a = args[0]
+        if a in ("--status", "--cursor", "--full", "status", "cursor", "full"):
+            mode = a.lstrip("-")
+        elif a in ("-h", "--help"):
+            print("usage: starship-box [--status|--cursor|--full]", file=sys.stderr)
+            sys.exit(0)
+
+    if mode == "cursor":
+        # Never re-roll here — length must stay stable for ZLE
+        print(cursor_line(reuse=True), end="")
+        return
+
+    framed = box_lines(build_rows())
+    if mode == "status":
+        # Print box without summon line below
+        print("\n".join(framed), end="\n\n")
+        return
+
+    # legacy full stream (multi-line PS1 — ghosting risk on kmscon)
+    pick_summon(reuse=False)
+    print("\n".join(framed) + "\n\n" + cursor_line(reuse=True), end="")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""scry — peer into command & output history (Shift-Tab / `scry`).
+
+One event at a time, narrative form. Owns the TTY until you quit:
+
+  ↑/↓ or n/p   next / prev vision
+  ←/→          same
+  Enter / j    next
+  k / b        prev
+  /            fzf jump list
+  r            re-run spell onto prompt
+  q / Esc      leave
+
+Tick is frozen via pixie-screen hold "scry" for the whole session.
+Uses the alternate screen buffer so leaving restores the prior view.
+"""
+from __future__ import annotations
+
+import calendar
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# Shared masterpiece frames
+import sys as _sys
+
+_sys.path.insert(0, str(Path.home() / "bin"))
+import pixie_termart as art  # noqa: E402
+from pixie_termart import BIN
+
+# Force Unicode box drawing for smooth round corners
+os.environ["PIXIE_UNICODE"] = "1"
+
+P = art.P
+
+SCRY_LOG = BIN / "scry-log"
+RESET = P.RESET
+
+DAY_WORDS = {
+    1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth",
+    6: "sixth", 7: "seventh", 8: "eighth", 9: "ninth", 10: "tenth",
+    11: "eleventh", 12: "twelfth", 13: "thirteenth", 14: "fourteenth",
+    15: "fifteenth", 16: "sixteenth", 17: "seventeenth", 18: "eighteenth",
+    19: "nineteenth", 20: "twentieth", 21: "twenty-first", 22: "twenty-second",
+    23: "twenty-third", 24: "twenty-fourth", 25: "twenty-fifth",
+    26: "twenty-sixth", 27: "twenty-seventh", 28: "twenty-eighth",
+    29: "twenty-ninth", 30: "thirtieth", 31: "thirty-first",
+}
+
+
+def color_ok() -> bool:
+    return art.color_ok()
+
+
+def c(text: str, *codes: str) -> str:
+    return art.paint(text, *codes)
+
+
+def strip_ansi(s: str) -> str:
+    return art.strip_ansi(s)
+
+
+def short_time(ts: str) -> str:
+    """Compact clock for fzf rows."""
+    dt = parse_ts(ts)
+    if not dt:
+        return (ts or "?")[:16]
+    return dt.strftime("%m-%d %H:%M")
+
+
+def load_entries(n: int = 800) -> list[dict]:
+    try:
+        p = subprocess.run(
+            [str(SCRY_LOG), "list", "-n", str(n)],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    rows = []
+    for ln in (p.stdout or "").splitlines():
+        try:
+            rows.append(json.loads(ln))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def load_output(eid: str) -> str:
+    p = Path.home() / ".cache" / "pixie" / "scry" / "out" / f"{eid}.txt"
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def parse_ts(ts: str) -> datetime | None:
+    if not ts:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(ts.strip()[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def wizard_name() -> str:
+    return (
+        os.environ.get("USER")
+        or os.environ.get("LOGNAME")
+        or Path.home().name
+        or "wanderer"
+    )
+
+
+def hermes_when(ts: str) -> str:
+    dt = parse_ts(ts)
+    if not dt:
+        return f"at an unremembered hour of Hermes ({ts or '?'})"
+    day = DAY_WORDS.get(dt.day, f"{dt.day}th")
+    month = calendar.month_name[dt.month]
+    year = dt.year
+    clock = dt.strftime("%H:%M")
+    return f"at the {day} of {month}, in the year {year} of Hermes ({clock})"
+
+
+def _fit_output(body: str, max_lines: int) -> list[str]:
+    """Trim long outputs so the vision fits the screen."""
+    lines = body.rstrip("\n").splitlines() or [""]
+    if len(lines) <= max_lines:
+        return lines
+    head = max_lines // 2
+    tail = max_lines - head - 1
+    return [
+        *lines[:head],
+        f"... ({len(lines) - head - tail} lines veiled) ...",
+        *lines[-tail:],
+    ]
+
+
+def aether_title(body: str, ex: object, kind: str, out_lines: list[str]) -> str:
+    """The Aether's reply varies with the spell's fate."""
+    if kind == "pixie":
+        return "Pixie whispered"
+    if ex not in (None, 0, "0"):
+        return f"the Aether thundered — exit {ex}"
+    if not body.strip():
+        return "the Aether stayed silent"
+    n = len(out_lines)
+    if n >= 60:
+        return "the Aether proclaimed"
+    if n <= 3:
+        return "the Aether whispered"
+    return "the Aether answered"
+
+
+def render_event(e: dict, index: int, total: int) -> str:
+    kind = e.get("kind") or "cmd"
+    user = wizard_name()
+    cmd = (e.get("cmd") or "(unknown spell)").strip()
+    cmd_time = str(e.get("cmd_time") or "")
+    end_time = str(e.get("end_time") or cmd_time)
+    ex = e.get("exit")
+    cwd = e.get("cwd") or "~"
+    eid = str(e.get("id") or "")
+    body = strip_ansi(load_output(eid))
+    if not body.strip():
+        body = "(the fey left no ink — no output was captured)"
+
+    when = hermes_when(cmd_time)
+    when_end = hermes_when(end_time)
+    tw = art.term_width()
+    # leave room for header + footer + padding
+    max_out = max(8, art.term_height() - 16)
+
+    # --- cast panel ---
+    cast_rows: list[str] = []
+    if kind == "pixie":
+        cast_rows.append(f"The Wizard {user} summoned Pixie")
+        if cmd and cmd not in ("pixie", "ask"):
+            cast_rows.append(f"wish - {cmd}")
+    else:
+        cast_rows.append(f"The Wizard {user} cast a spell")
+        cast_rows.append(f"$ {cmd}")
+    cast_rows.append("")
+    cast_rows.append(when)
+
+    cast_box = art.box(
+        cast_rows,
+        title="the casting",
+        width=tw,
+        body_style=(P.SILVER,),
+    )
+
+    # --- reaction panel ---
+    out_lines = _fit_output(body, max_out)
+    react_title = aether_title(body, ex, kind, out_lines)
+    react_rows = [f"-> {ln}" if ln else "->" for ln in out_lines]
+    react_box = art.box(
+        react_rows,
+        title=react_title,
+        width=tw,
+        body_style=(P.SILVER,),
+    )
+
+    # --- colophon ---
+    short_id = eid[:8] if eid else "?"
+    meta_rows = [
+        f"finished  {when_end}",
+        f"path      {cwd}",
+        f"vision    {index} of {total}  -  id {short_id}",
+    ]
+    meta_box = art.box(
+        meta_rows,
+        title="colophon",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+
+    return "\n".join([cast_box, "", react_box, "", meta_box])
+
+
+def format_header(index: int, total: int) -> str:
+    tw = art.term_width()
+    return art.box(
+        [
+            "one vision at a time - peer into what was cast",
+            f"showing {index} / {total}",
+        ],
+        title="Scry ✦",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+
+
+def format_footer(status: str = "") -> str:
+    tw = art.term_width()
+    rows = [
+        "up/dn / n p  next | prev vision",
+        "/            jump (fzf)",
+        "r            re-run spell onto prompt",
+        "q / Esc      close the crystal",
+    ]
+    if status:
+        rows.append("")
+        rows.append(status)
+    return art.box(rows, title="runes", width=tw, body_style=(P.MUTED,))
+
+
+def build_frame(e: dict, index: int, total: int, status: str = "") -> str:
+    """One complete vision frame as a single string (for atomic TTY redraw)."""
+    return "\n".join(
+        [
+            format_header(index, total),
+            "",
+            render_event(e, index, total),
+            "",
+            format_footer(status),
+        ]
+    )
+
+
+
+def fzf_pick(entries: list[dict], fd: int) -> int | None:
+    if not shutil.which("fzf"):
+        return None
+    # restore cooked mode for fzf
+    art.tui_suspend()
+    lines = []
+    for i, e in enumerate(entries):
+        kind = e.get("kind") or "cmd"
+        mark = "*" if kind == "pixie" else "$"
+        cmd = (e.get("cmd") or "")[:50]
+        t0 = short_time(str(e.get("cmd_time") or ""))
+        lines.append(f"{i}\t{mark} {t0}  {cmd}")
+    env = {
+        **os.environ,
+        "FZF_DEFAULT_OPTS": (
+            "--height=80% --layout=reverse --border=rounded --ansi --cycle "
+            "--color=fg:#c0c0c8,bg:#1a0a12,hl:#e879a0,fg+:#ffebf2,bg+:#2a1520,hl+:#ff2d55,"
+            "prompt:#e879a0,pointer:#ffb020,header:#c44d7a"
+        ),
+    }
+    try:
+        proc = subprocess.run(
+            [
+                "fzf",
+                "--prompt=scry jump › ",
+                "--delimiter=\t",
+                "--with-nth=2",
+                "--header=↑↓ move · Enter open · Esc cancel",
+            ],
+            input="\n".join(lines) + "\n",
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+    except OSError:
+        return None
+    finally:
+        art.tui_resume()
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        return None
+    try:
+        return int(proc.stdout.strip().split("\t", 1)[0])
+    except ValueError:
+        return None
+
+
+def ui_loop(entries: list[dict], rerun_file: str) -> int:
+    if not entries:
+        print(c("(no scry log yet — run a few commands, then scry again)", P.MUTED))
+        try:
+            input("  [Enter] ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        return 1
+
+    fd = art.tui_open_tty()
+    if fd is None:
+        print(c("scry needs a real TTY (not a pipe).", P.ERR), file=sys.stderr)
+        return 2
+    art.tui_begin(fd, "scry")
+    i = 0
+    total = len(entries)
+    status = ""
+
+    while True:
+        e = entries[i]
+        foot = status
+        status = ""
+        frame = build_frame(e, i + 1, total, foot)
+        try:
+            art.paint_frame(fd, frame)
+        except OSError:
+            # last-ditch: stdout (capture / weird redirect)
+            sys.stdout.write(art.clear_screen() + frame + "\n")
+            sys.stdout.flush()
+
+        key = art.tui_read_key(fd)
+        if key in ("q", "esc", "ctrl-c", "Q"):
+            return 1
+        if key in ("down", "right", "n", "j", "enter", " ", "+"):
+            if i + 1 < total:
+                i += 1
+            else:
+                status = "(already the newest vision)"
+            continue
+        if key in ("up", "left", "p", "k", "b", "-"):
+            if i > 0:
+                i -= 1
+            else:
+                status = "(already the oldest loaded vision)"
+            continue
+        if key in ("/", "f"):
+            j = fzf_pick(entries, fd)
+            if j is not None and 0 <= j < total:
+                i = j
+            continue
+        if key in ("r", "R"):
+            cmd = (e.get("cmd") or "").strip()
+            if not cmd or cmd == "pixie":
+                status = "(this vision has no shell spell to re-cast)"
+                continue
+            if rerun_file:
+                Path(rerun_file).write_text(cmd + "\n", encoding="utf-8")
+            else:
+                print(cmd)
+            return 0
+        if key.isdigit():
+            # multi-digit jump: collect briefly
+            digits = key
+            while True:
+                nxt = art.tui_read_key(fd, timeout=0.45)
+                if nxt.isdigit():
+                    digits += nxt
+                else:
+                    if nxt in ("enter",):
+                        pass
+                    elif nxt:
+                        # push back by handling below if needed — ignore extra
+                        pass
+                    break
+            try:
+                n = int(digits)
+                if 1 <= n <= total:
+                    i = n - 1
+                else:
+                    status = f"(choose 1–{total})"
+            except ValueError:
+                pass
+            continue
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("--art", "--art-only"):
+        demo = "\n".join(
+            [
+                format_header(1, 1),
+                "",
+                art.box(
+                    [
+                        "The Wizard evenweaker cast a spell",
+                        "$ echo hello",
+                        "",
+                        "at the first of August, in the year 2026 of Hermes",
+                    ],
+                    title="the casting",
+                ),
+                "",
+                art.box(["-> hello"], title="the Aether answered"),
+                "",
+                format_footer(),
+            ]
+        )
+        print(demo)
+        return 0
+
+    rerun_file = ""
+    if "--rerun-file" in argv:
+        ix = argv.index("--rerun-file")
+        if ix + 1 < len(argv):
+            rerun_file = argv[ix + 1]
+
+    entries = load_entries(800)
+    try:
+        return ui_loop(entries, rerun_file)
+    finally:
+        art.tui_cleanup()
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        art.tui_cleanup()
+        print()
+        raise SystemExit(130)

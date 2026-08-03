@@ -1,12 +1,16 @@
 # ~/.config/starship.toml
-# Whole status lives in a cute pink box; input is two lines below.
+# Single-line PS1 only. The pink status box is printed by zsh precmd/tick
+# via `starship-box --status` so the line editor never tracks multi-line
+# prompt width (which caused ghost/duplicate characters on kmscon).
+#
+# Custom modules MUST use ${custom.name} braces — bare $custom.name is
+# parsed as $custom + literal ".name".
 
-format = """
-${custom.pixie_box}"""
+format = "${custom.pixie_cursor}"
 
 right_format = ""
 palette = "pink_system"
-add_newline = true
+add_newline = false
 
 [palettes.pink_system]
 pink = "#e879a0"
@@ -19,16 +23,16 @@ danger = "#ff2d55"
 warn = "#ffb020"
 ok = "#3dd68c"
 
-# Single module draws the framed status + cursor gap
-[custom.pixie_box]
-command = "starship-box"
+# Cursor line only (must stay single-line)
+[custom.pixie_cursor]
+command = "starship-box --cursor"
 when = "true"
 format = "$output"
 shell = ["bash", "--noprofile", "--norc"]
 ignore_timeout = true
-description = "Pink status box + input two lines below"
+description = "Single-line summon + > cursor"
 
-# Built-ins unused — rendered inside starship-box
+# Built-ins unused — rendered inside starship-box --status
 [username]
 disabled = true
 
@@ -54,4 +58,7 @@ disabled = true
 disabled = true
 
 [character]
+disabled = true
+
+[line_break]
 disabled = true

@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SOCK = os.environ.get("XDG_RUNTIME_DIR", "/tmp") + "/mpv-music.sock"
+SOCK = "/tmp/siren-mpv.sock"
 # Palette truecolor (256 blush washed out to near-white on many terminals)
 # dark_pink #c44d7a — distinct from idle pink #e879a0
 MUSIC = "\033[38;2;196;77;122m"
@@ -27,7 +27,7 @@ def mpv(cmd: list) -> object | None:
         return None
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.25)
+        s.settimeout(0.8)
         s.connect(SOCK)
         s.sendall((json.dumps({"command": cmd}) + "\n").encode())
         data = b""
@@ -59,15 +59,42 @@ def play_label(base: str) -> tuple[str, str]:
 
 
 def volume_pct() -> str:
+    """Best-effort volume % — PipeWire, Pulse, macOS, Windows."""
+    # Linux PipeWire
     try:
         out = subprocess.check_output(
             ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
             text=True,
             timeout=0.4,
+            stderr=subprocess.DEVNULL,
         )
         m = re.search(r"([0-9.]+)", out)
         if m:
             return str(int(round(float(m.group(1)) * 100)))
+    except Exception:
+        pass
+    # PulseAudio
+    try:
+        out = subprocess.check_output(
+            ["pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+            text=True,
+            timeout=0.4,
+            stderr=subprocess.DEVNULL,
+        )
+        m = re.search(r"(\d+)%", out)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    # macOS
+    try:
+        out = subprocess.check_output(
+            ["osascript", "-e", "output volume of (get volume settings)"],
+            text=True,
+            timeout=0.5,
+            stderr=subprocess.DEVNULL,
+        )
+        return str(int(out.strip()))
     except Exception:
         pass
     return "?"
@@ -93,6 +120,9 @@ def main() -> int:
         sys.stdout.write(f"{SILVER_DIM}{note} Not playing{RESET}")
         return 0
     path = str(path)
+    paused = mpv(["get_property", "pause"])
+    is_paused = bool(paused) if paused is not None else False
+
     artist = mpv(["get_property", "metadata/by-key/artist"])
     title = mpv(["get_property", "metadata/by-key/title"])
     if isinstance(artist, str) and isinstance(title, str) and artist and title:
@@ -103,8 +133,12 @@ def main() -> int:
         a = a[:21] + "…"
     if len(t) > 26:
         t = t[:25] + "…"
-    vol = volume_pct()
-    sys.stdout.write(f"{BOLD}{MUSIC}{note} Playing: {a} - {t} at {vol}%{RESET}")
+    
+    if is_paused:
+        sys.stdout.write(f"{SILVER_DIM}{note} Paused: {a} - {t}{RESET}")
+    else:
+        vol = volume_pct()
+        sys.stdout.write(f"{BOLD}{MUSIC}{note} Playing: {a} - {t} at {vol}%{RESET}")
     return 0
 
 

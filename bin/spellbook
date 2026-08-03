@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+"""Spellbook — Fae-themed terminal file manager.
+
+A magical file explorer with consistent pink-themed styling.
+
+Usage:
+  spellbook                    # Open file manager in current directory
+  spellbook /path/to/dir      # Open file manager in specific directory
+
+Controls:
+  j / ↓        Move down
+  k / ↑        Move up
+  l / →        Open file/directory
+  h / ←        Go to parent directory
+  q           Quit
+  ?           Help
+
+Theme: Uses pixie_termart for consistent colors and box drawing.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import time
+import subprocess
+from pathlib import Path
+
+# Import pixie_termart for shared styling
+sys.path.insert(0, str(Path.home() / "bin"))
+import pixie_termart as art
+from pixie_termart import Palette as P
+
+# Force Unicode box drawing for smooth round corners
+os.environ["PIXIE_UNICODE"] = "1"
+
+
+
+# Symbol configuration - use text symbols by default, emoji with SPELLBOOK_EMOJI=1
+USE_EMOJI = os.environ.get('SPELLBOOK_EMOJI', '0').lower() in ('1', 'true', 'yes', 'on')
+
+# Define symbols based on emoji support
+if USE_EMOJI:
+    SYM_DIR = "📁 "
+    SYM_FILE = "📄 "
+    SYM_LINK = "🔗 "
+    SYM_LOCK = "🔒 "
+else:
+    SYM_DIR = "[D] "
+    SYM_FILE = "[F] "
+    SYM_LINK = "[L] "
+    SYM_LOCK = "[X] "
+
+
+def tui_frame(rows: list[tuple[str, tuple, ...]], *, title: str, subtitle: str = "", width: int | None = None) -> str:
+    """Hand-drawn pink frame — allows per-row styling (art.box cannot)."""
+    unicode_mode = art.strip_ansi(os.environ.get("PIXIE_UNICODE", "")).lower() in ("1", "on", "true", "yes", "unicode")
+    tl, tr, bl, br, hz, vt = ("╭", "╮", "╰", "╯", "─", "│") if unicode_mode else ("+", "+", "+", "+", "-", "|")
+    mark = "✦" if unicode_mode else "*"
+    w = width or art.term_width()
+    outer = max(36, min(w, 96))
+    inner = outer - 2
+    body_w = inner - 2
+    out = []
+    if title:
+        tplain = art.strip_ansi(title)
+        label = f" {mark} {tplain} "
+        fill = max(0, inner - art.vis_len(label) - 1)
+        out.append(art.paint(tl + hz, P.PINK_DIM) + art.paint(label, P.BOLD, P.PINK) + art.paint(hz * fill + tr, P.PINK_DIM))
+    else:
+        out.append(art.paint(tl + hz * inner + tr, P.PINK_DIM))
+    if subtitle:
+        for ln in art.wrap_plain(art.strip_ansi(subtitle), body_w):
+            out.append(art.paint(vt + " " + art.pad_vis(ln, body_w) + " " + vt, P.MUTED))
+        out.append(art.paint(vt + " " + ("·" if unicode_mode else "-") * body_w + " " + vt, P.PINK_DIM))
+    for text, style in rows:
+        plain = art.pad_vis(art.strip_ansi(text), body_w)
+        out.append(art.paint(vt, P.PINK_DIM) + " " + art.paint(plain, *style) + " " + art.paint(vt, P.PINK_DIM))
+    out.append(art.paint(bl + hz * inner + br, P.PINK_DIM))
+    return "\n".join(out)
+
+
+def narrate(cast: str, answered: str, *, ok: bool = True) -> str:
+    """The rule: 'The Wizard cast <command> and the Aether answered.'"""
+    verb = "answered" if ok else "thundered"
+    return f"The Wizard cast {cast} and the Aether {verb}: {answered}"
+
+
+class FileManager:
+    """Terminal file manager with fae theme."""
+
+    def __init__(self, start_path: str | None = None):
+        """Initialize the file manager."""
+        self.current_path = Path(start_path or os.getcwd())
+        self.selected_index = 0
+        self.offset = 0
+        self.status = ""
+        self.sort_by = "name"  # name, date, size, type
+        self.show_hidden = False
+
+    def get_files(self) -> list[Path]:
+        """Get list of files in current directory."""
+        try:
+            all_files = list(self.current_path.iterdir())
+            # Filter out . and ..
+            files = [f for f in all_files if f.name not in ('.', '..')]
+            
+            # Filter hidden files
+            if not self.show_hidden:
+                files = [f for f in files if not f.name.startswith('.')]
+            
+            # Sort files
+            if self.sort_by == "name":
+                files.sort(key=lambda f: f.name.lower())
+            elif self.sort_by == "date":
+                files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            elif self.sort_by == "size":
+                files.sort(key=lambda f: f.stat().st_size, reverse=True)
+            elif self.sort_by == "type":
+                files.sort(key=lambda f: (not f.is_dir(), f.name.lower()))
+            
+            return files
+        except PermissionError:
+            return []
+
+    def format_file_info(self, file: Path) -> tuple[str, str]:
+        """Format file information for display."""
+        try:
+            if file.is_dir():
+                name = f"{SYM_DIR} {file.name}/"
+                info = ""
+            elif file.is_symlink():
+                name = f"{SYM_LINK} {file.name}"
+                info = f"→ {file.readlink()}"
+            else:
+                size = file.stat().st_size
+                size_str = self._format_size(size)
+                name = f"{SYM_FILE} {file.name}"
+                info = size_str
+            
+            return name, info
+        except (OSError, PermissionError):
+            return f"{SYM_LOCK} {file.name}", ""
+
+    def _format_size(self, size: int) -> str:
+        """Format file size in human-readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} PB"
+
+    def _max_rows(self) -> int:
+        return max(4, art.term_height() - 11)
+
+    def _file_row(self, i: int, file: Path, width: int) -> tuple[str, tuple]:
+        """One styled list row — selected rows wear the pink crown."""
+        selected = i == self.selected_index
+        name, info = self.format_file_info(file)
+        mark = "▶ " if selected else "  "
+        if file.is_dir():
+            style = (P.BOLD, P.BLUSH) if selected else (P.PINK,)
+        elif file.is_symlink():
+            style = (P.BOLD, P.WARN) if selected else (P.WARN,)
+        else:
+            style = (P.BOLD, P.BLUSH) if selected else (P.SILVER,)
+        pad = max(1, width - art.vis_len(mark) - art.vis_len(name) - art.vis_len(info) - 2)
+        return f"{mark}{name}{' ' * pad}{info}", style
+
+    def draw_header(self) -> str:
+        """The Spell Book — header frame with path and the Aether's word."""
+        files = self.get_files()
+        dirs = sum(1 for f in files if f.is_dir())
+        tome_w = "tome" if dirs == 1 else "tomes"
+        sub = f"{self.current_path} · {len(files)} scrolls · {dirs} {tome_w}"
+        if self.status:
+            sub += f" · {self.status}"
+        return tui_frame([], title="Spell Book ✦", subtitle=sub, width=art.term_width())
+
+    def draw_file_list(self, files: list[Path]) -> str:
+        """Windowed scroll shelf — styled rows inside one frame."""
+        tw = art.term_width()
+        n = len(files)
+        if not files:
+            return tui_frame(
+                [("  (the shelf is empty — cast n to bind a new scroll)", (P.MUTED,))],
+                title="the scrolls",
+                width=tw,
+            )
+        max_rows = self._max_rows()
+        if self.selected_index >= n:
+            self.selected_index = n - 1
+        if self.offset > n - max_rows:
+            self.offset = max(0, n - max_rows)
+        top = self.offset
+        visible = files[top : top + max_rows]
+        rows = [self._file_row(top + i, f, tw - 8) for i, f in enumerate(visible)]
+        sub = ""
+        if n > max_rows:
+            sub = f"vision {top + 1}-{min(n, top + max_rows)} of {n} scrolls"
+        return tui_frame(rows, title="the scrolls", subtitle=sub, width=tw)
+
+    def draw_ui(self) -> str:
+        """Draw the complete UI."""
+        header = self.draw_header()
+        files = self.get_files()
+        file_list = self.draw_file_list(files)
+        footer = tui_frame(
+            [
+                (
+                    "j/k move · l/o open · h parent · ? help · s sort · . hidden · "
+                    "n new · d delete · r rename · e edit · q quit",
+                    (P.PINK_DIM,),
+                )
+            ],
+            title="runes",
+            width=art.term_width(),
+        )
+        return "\n".join([header, "", file_list, "", footer])
+
+    def draw_help(self) -> str:
+        """Draw the help screen."""
+        help_text = f"""
+{P.BOLD}{P.PINK}Spellbook File Manager{P.RESET}
+
+{P.DIM}Navigation:{P.RESET}
+  {P.SILVER}j{P.RESET} / {P.SILVER}↓{P.RESET}  Move down
+  {P.SILVER}k{P.RESET} / {P.SILVER}↑{P.RESET}  Move up
+  {P.SILVER}l{P.RESET} / {P.SILVER}→{P.RESET}  Open file/directory
+  {P.SILVER}h{P.RESET} / {P.SILVER}←{P.RESET}  Parent directory
+  {P.SILVER}gg{P.RESET}    First file
+  {P.SILVER}G{P.RESET}    Last file
+
+{P.DIM}Actions:{P.RESET}
+  {P.SILVER}o{P.RESET}     Open with default app
+  {P.SILVER}e{P.RESET}     Edit file
+  {P.SILVER}d{P.RESET}     Delete file
+  {P.SILVER}r{P.RESET}     Rename file
+  {P.SILVER}n{P.RESET}     New file/directory
+
+{P.DIM}Options:{P.RESET}
+  {P.SILVER}s{P.RESET}     Sort menu
+  {P.SILVER}.{P.RESET}     Toggle hidden files
+  {P.SILVER}?{P.RESET}     This help
+  {P.SILVER}q{P.RESET}     Quit
+
+{P.DIM}Info:{P.RESET}
+  {P.SILVER}{len(self.get_files())}{P.RESET} files, {P.SILVER}{self._format_size(sum(f.stat().st_size for f in self.get_files() if f.is_file()))}{P.RESET} total
+"""
+        return art.box(help_text.strip(), title="the tome", accent=P.PINK_DIM)
+
+    def draw_sort_menu(self) -> str:
+        """Draw the sort menu."""
+        current = self.sort_by
+        options = ["name", "date", "size", "type"]
+        
+        lines = []
+        for opt in options:
+            if opt == current:
+                marker = f"{P.BOLD}{P.PINK}✓{P.RESET}"
+            else:
+                marker = " "
+            lines.append(f"  {marker} {opt}")
+        
+        return art.box(
+            "\n".join(lines),
+            title="the sorting",
+            accent=P.PINK_DIM,
+            body_style=(P.SILVER,)
+        )
+
+    def draw_ui(self) -> str:
+        """Draw the complete UI."""
+        header = self.draw_header()
+        files = self.get_files()
+        file_list = self.draw_file_list(files)
+        
+        # Combine header and file list
+        ui_parts = [header, file_list]
+        return "\n".join(ui_parts)
+
+    def open_file(self, file: Path):
+        """Open a file or directory."""
+        if file.is_dir():
+            self.current_path = file
+            self.selected_index = 0
+            self.offset = 0
+            self.status = narrate(f"cd {file.name}/", "a new path unfolds")
+        else:
+            # Open with default application
+            try:
+                if sys.platform == "darwin":
+                    subprocess.run(["open", str(file)])
+                else:
+                    subprocess.run(["xdg-open", str(file)])
+                self.status = narrate(f"open {file.name}", "the scroll was unsealed")
+            except Exception as e:
+                self.status = narrate(f"open {file.name}", str(e), ok=False)
+
+    def run(self):
+        """Main loop."""
+        fd = art.tui_open_tty()
+        if fd is None:
+            print("Error: spellbook requires an interactive terminal")
+            return
+        art.tui_begin(fd, "spellbook")
+        
+        try:
+            while True:
+                try:
+                    frame = self.draw_ui()
+                    os.write(fd, b"\033[H\033[J")
+                    os.write(fd, (frame + "\n").encode("utf-8", "replace"))
+                    os.write(fd, b"\033[0m")
+                    sys.stdout.flush()
+
+                    # Read key using the robust read_key function
+                    key = art.tui_read_key(fd, timeout=0.1)
+
+                    if key in ('q', 'ctrl-c', 'esc'):
+                        break
+                    if key:  # Only handle non-empty keys
+                        self.handle_key(key)
+                except KeyboardInterrupt:
+                    # Clean exit on Ctrl+C
+                    break
+
+                # Small delay to prevent CPU overuse
+                time.sleep(0.01)
+                        
+        except Exception as e:
+            art.tui_cleanup()
+            raise e
+        finally:
+            art.tui_cleanup()
+
+    def clear_screen(self):
+        """Clear the terminal screen."""
+        print("\033[2J\033[H", end="")
+        sys.stdout.flush()
+
+    def handle_key(self, key: str):
+        """Handle a key press."""
+        files = self.get_files()
+
+        if key in ('down', 'j'):  # Down arrow or j
+            if files and self.selected_index < len(files) - 1:
+                self.selected_index += 1
+                if self.selected_index >= self.offset + self._max_rows():
+                    self.offset += 1
+        elif key in ('up', 'k'):  # Up arrow or k
+            if self.selected_index > 0:
+                self.selected_index -= 1
+                if self.selected_index < self.offset:
+                    self.offset -= 1
+        elif key in ('right', 'l', 'o'):  # Right arrow, l, or 'o'
+            if files and self.selected_index < len(files):
+                self.open_file(files[self.selected_index])
+        elif key in ('left', 'h'):  # Left arrow or h
+            if self.current_path.parent != self.current_path:
+                parent = self.current_path.parent
+                self.current_path = parent
+                self.selected_index = 0
+                self.offset = 0
+                self.status = narrate(f"cd {parent}/", "a new path unfolds")
+        elif key == 'gg':  # First file
+            self.selected_index = 0
+            self.offset = 0
+        elif key == 'G':  # Last file
+            self.selected_index = max(0, len(files) - 1)
+            self.offset = max(0, self.selected_index - self._max_rows() + 1)
+        elif key == '?':  # Help
+            self.clear_screen()
+            print(self.draw_help())
+            try:
+                art.tui_suspend()
+                input(f"\n{P.DIM}Press any key to continue...{P.RESET}")
+                art.tui_resume()
+            except KeyboardInterrupt:
+                art.tui_resume()
+                pass
+        elif key == 's':  # Sort menu
+            self.clear_screen()
+            print(self.draw_sort_menu())
+            print()
+            try:
+                art.tui_suspend()
+                choice = input(f"{P.PINK}Select sort (1-4): {P.RESET}").strip()
+                if choice in ('1', '2', '3', '4'):
+                    self.sort_by = ["name", "date", "size", "type"][int(choice) - 1]
+                    self.status = narrate(f"sort {self.sort_by}", "the scrolls reorder themselves")
+                art.tui_resume()
+            except KeyboardInterrupt:
+                art.tui_resume()
+                pass
+        elif key == '.':  # Toggle hidden files
+            self.show_hidden = not self.show_hidden
+            if self.show_hidden:
+                self.status = narrate("reveal", "the veiled are unveiled")
+            else:
+                self.status = narrate("veil", "the veiled are hidden once more")
+        elif key == 'n':  # New file/directory
+            self.new_file_dialog()
+        elif key == 'd':  # Delete file
+            self.delete_file_dialog()
+        elif key == 'r':  # Rename file
+            self.rename_file_dialog()
+        elif key == 'e':  # Edit file
+            self.edit_file()
+
+    def new_file_dialog(self):
+        """Create new file or directory."""
+        try:
+            art.tui_suspend()
+            name = input(f"{P.PINK}Enter name: {P.RESET}").strip()
+            if not name:
+                art.tui_resume()
+                return
+            
+            file_type = input(f"{P.PINK}Type [file/dir]: {P.RESET}").strip().lower()
+            new_path = self.current_path / name
+            
+            if file_type in ('dir', 'directory', ''):
+                new_path.mkdir(exist_ok=False)
+            else:
+                new_path.touch()
+            self.status = narrate(f"new {name}", "a blank scroll was bound")
+            art.tui_resume()
+        except Exception as e:
+            art.tui_resume()
+            print(f"{P.ERR}Error: {e}{P.RESET}")
+            try:
+                art.tui_suspend()
+                input(f"{P.DIM}Press Enter to continue...{P.RESET}")
+                art.tui_resume()
+            except KeyboardInterrupt:
+                art.tui_resume()
+                pass
+
+    def delete_file_dialog(self):
+        """Delete selected file."""
+        files = self.get_files()
+        if not files or self.selected_index >= len(files):
+            return
+        
+        file = files[self.selected_index]
+        try:
+            art.tui_suspend()
+            confirm = input(f"{P.WARN}Delete {file.name}? [y/N]: {P.RESET}").strip().lower()
+            
+            if confirm == 'y':
+                if file.is_dir():
+                    import shutil
+                    shutil.rmtree(file)
+                else:
+                    file.unlink()
+                self.status = narrate(f"delete {file.name}", f"{file.name} was unmade")
+            art.tui_resume()
+        except Exception as e:
+            art.tui_resume()
+            print(f"{P.ERR}Error: {e}{P.RESET}")
+            try:
+                art.tui_suspend()
+                input(f"{P.DIM}Press Enter to continue...{P.RESET}")
+                art.tui_resume()
+            except KeyboardInterrupt:
+                art.tui_resume()
+                pass
+
+    def rename_file_dialog(self):
+        """Rename selected file."""
+        files = self.get_files()
+        if not files or self.selected_index >= len(files):
+            return
+        
+        file = files[self.selected_index]
+        try:
+            art.tui_suspend()
+            new_name = input(f"{P.PINK}Rename {file.name} to: {P.RESET}").strip()
+            
+            if not new_name:
+                art.tui_resume()
+                return
+            
+            new_path = file.parent / new_name
+            file.rename(new_path)
+            self.status = narrate(f"rename {file.name} {new_name}", f"{file.name} is now {new_name}")
+            art.tui_resume()
+        except Exception as e:
+            art.tui_resume()
+            print(f"{P.ERR}Error: {e}{P.RESET}")
+            try:
+                art.tui_suspend()
+                input(f"{P.DIM}Press Enter to continue...{P.RESET}")
+                art.tui_resume()
+            except KeyboardInterrupt:
+                art.tui_resume()
+                pass
+
+    def edit_file(self):
+        """Edit selected file."""
+        files = self.get_files()
+        if not files or self.selected_index >= len(files):
+            return
+        
+        file = files[self.selected_index]
+        if file.is_dir():
+            return
+        
+        try:
+            # Use $EDITOR or default to nano
+            editor = os.environ.get('EDITOR', 'nano')
+            subprocess.run([editor, str(file)])
+            self.status = narrate(f"edit {file.name}", "the quill was dipped")
+        except Exception as e:
+            print(f"{P.ERR}Error: {e}{P.RESET}")
+            try:
+                input(f"{P.DIM}Press Enter to continue...{P.RESET}")
+            except KeyboardInterrupt:
+                pass
+
+
+def main():
+    """Main entry point."""
+    import argparse
+    import subprocess
+    
+    parser = argparse.ArgumentParser(
+        description=f"{P.BOLD}{P.PINK}Spellbook{P.RESET} — Fae-themed terminal file manager"
+    )
+    parser.add_argument(
+        'path',
+        nargs='?',
+        default=None,
+        help='Starting directory'
+    )
+    parser.add_argument(
+        '--version',
+        action='version',
+        version='Spellbook 1.0.0'
+    )
+    
+    args = parser.parse_args()
+    
+    # Initialize file manager
+    fm = FileManager(start_path=args.path)
+    
+    # Run the file manager
+    fm.run()
+
+
+if __name__ == "__main__":
+    main()

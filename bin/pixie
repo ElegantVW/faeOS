@@ -1,68 +1,258 @@
-#!/usr/bin/env bash
-# pixie — your local terminal agent (wraps ask)
-export PATH="$HOME/bin:$PATH"
+#!/usr/bin/env python3
+"""pixie — the tool-capable operational core assistant via raw completion."""
+from __future__ import annotations
 
-CFG="${XDG_CONFIG_HOME:-$HOME/.config}/pixie"
-VERBOSE_FILE="$CFG/verbose"
+import json
+import os
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+import time
 
-pixie_verbose_status() {
-  if [[ -f "$VERBOSE_FILE" ]] && grep -qiE '^(on|1|true|yes)$' "$VERBOSE_FILE" 2>/dev/null; then
-    echo "pixie verbose: on   (rounds + tools + results shown)"
-  else
-    echo "pixie verbose: off  (only wait line + final reply — default)"
-  fi
-}
+API_URL = "http://127.0.0.1:8080/completion"
 
-case "${1:-}" in
-  -h|--help)
-    cat <<'H'
-pixie — local offline AI agent (llama.cpp via pixie-llm)
+SYSTEM_PROMPT = """You are Pixie, a sharp, helpful, and concise AI assistant running locally.
+You have access to local system tools. You can choose to call a tool by outputting a clean JSON object containing "name" and "arguments" fields.
+Your primary active operational background service is called "pixie-llm.service".
 
-  pixie-llm start              # offline server on 127.0.0.1:8080
-  pixie "list what's in Downloads"
-  pixie "create ~/notes/todo.txt with milk and eggs"
-  pixie --web "latest Arch security news"
-  pixie -m mistral "…"
+Available tools:
+1. execute_bash: {"name": "execute_bash", "arguments": {"command": "string"}}
+2. read_local_file: {"name": "read_local_file", "arguments": {"path": "string", "start_line": int, "end_line": int}}
+3. manage_systemd_service: {"name": "manage_systemd_service", "arguments": {"service_name": "string", "action": "status|restart|logs"}}
 
-Email (aerc IMAP → local .txt, then summary):
-  pixie "hey pixie, can you check my emails?"
-  pixie "summarize my unread mail"
+If you need to use a tool to answer the user, output ONLY the JSON object for that tool call. No other text.
+If you have the final answer or do not need a tool, output a clear, friendly conversational response."""
 
-Default: pink wait + final reply only (prompts stay on your machine).
-  pixie -v "…"                 # tools/results this run
-  pixie verbose on|off|status
+# --- Core Tool Executions ---
 
-Offline only: pixie-llm (llama.cpp on 127.0.0.1). No Ollama.
-See also: pixie-llm, duck, cmds, mail (aerc)
-H
-    exit 0
-    ;;
-  verbose|tools)
-    # "tools" is an alias for the same toggle
-    sub="${2:-status}"
-    mkdir -p "$CFG"
-    case "$sub" in
-      on|1|true|yes)
-        echo on >"$VERBOSE_FILE"
-        chmod 600 "$VERBOSE_FILE" 2>/dev/null || true
-        echo "pixie verbose: on  (tools + rounds visible)"
-        ;;
-      off|0|false|no)
-        echo off >"$VERBOSE_FILE"
-        chmod 600 "$VERBOSE_FILE" 2>/dev/null || true
-        echo "pixie verbose: off (final reply only)"
-        ;;
-      status|show|"")
-        pixie_verbose_status
-        ;;
-      *)
-        echo "Usage: pixie verbose {on|off|status}" >&2
-        echo "   or: pixie tools {on|off|status}" >&2
-        exit 1
-        ;;
-    esac
-    exit 0
-    ;;
-esac
+def run_bash_command(command: str) -> dict:
+    try:
+        res = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=20)
+        return {"stdout": res.stdout.strip(), "stderr": res.stderr.strip(), "exit_code": res.returncode}
+    except Exception as e:
+        return {"error": str(e)}
 
-exec ask "$@"
+def read_local_file(path: str, start_line: int | None = None, end_line: int | None = None) -> dict:
+    try:
+        expanded_path = os.path.expanduser(path)
+        if not os.path.exists(expanded_path):
+            return {"error": f"File not found: {path}"}
+        with open(expanded_path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        start = max(0, (start_line - 1)) if start_line else 0
+        end = min(len(lines), end_line) if end_line else len(lines)
+        return {
+            "path": path,
+            "content": "".join(lines[start:end]),
+            "bounded_from": start + 1,
+            "bounded_to": end
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def manage_systemd_service(service_name: str, action: str) -> dict:
+    is_user = service_name in ["pixie-llm.service", "pixie-llm", "kur"] or "--user" in sys.argv
+    scope_flag = "--user" if is_user else ""
+    
+    if action == "status":
+        cmd = f"systemctl {scope_flag} status {service_name} --no-pager"
+    elif action == "restart":
+        cmd = f"systemctl {scope_flag} restart {service_name}"
+    elif action == "logs":
+        cmd = f"journalctl {scope_flag} -u {service_name} -n 15 --no-pager"
+    else:
+        return {"error": f"Invalid action: {action}"}
+        
+    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+    
+    # FILTER EXHAUSTIVE LOGS: Keep context clean and lightweight for the LLM turn
+    stdout_payload = res.stdout.strip()
+    if action == "status" and res.returncode == 0:
+        # Extract only the critical unit state definitions, dropping the journal tail
+        filtered_lines = [
+            line for line in stdout_payload.splitlines() 
+            if any(k in line for k in ["Loaded:", "Active:", "Main PID:", "Tasks:", "Memory:"])
+        ]
+        stdout_payload = "\n".join(filtered_lines)
+
+    return {
+        "service": service_name, 
+        "action": action, 
+        "stdout": stdout_payload, 
+        "stderr": res.stderr.strip()
+    }
+# --- Raw Completion Communications ---
+
+def query_raw_llm(raw_prompt: str) -> str:
+    body = {
+        "prompt": raw_prompt,
+        "temperature": 0.2,
+        "max_tokens": 768,
+        "stream": False,
+        "stop": ["<|im_end|>", "<|im_start|>"]
+    }
+    req = urllib.request.Request(
+        API_URL,
+        data=json.dumps(body).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            return str(data['content']).strip()
+    except Exception as e:
+        return f"Communication error: {e}"
+
+
+def ask_pixie(user_prompt: str, verbose: bool = False) -> str:
+    os.environ["PIXIE_UNICODE"] = "1"
+    os.environ["LANG"] = "en_US.UTF-8"
+
+    raw_prompt = (
+        "<|im_start|>system\n"
+        f"{SYSTEM_PROMPT}<|im_end|>\n"
+        f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    
+    start_time = time.time()
+    
+    if sys.stderr.isatty():
+        print("\033[90m✦ Intercepting intent... invoking offline engine...\033[0m", file=sys.stderr)
+        
+    first_response = query_raw_llm(raw_prompt)
+    
+    # Tool intercept logic
+    func_name, func_args = None, {}
+    if first_response.startswith('{') and '"name"' in first_response:
+        try:
+            tool_intent = json.loads(first_response)
+            func_name = tool_intent.get('name')
+            func_args = tool_intent.get('arguments', {})
+        except json.JSONDecodeError:
+            pass
+
+    if func_name:
+        if func_name == "execute_bash":
+            cmd = func_args.get('command', '')
+            if "systemctl" in cmd and "--no-pager" not in cmd:
+                cmd = cmd.replace("systemctl", "systemctl --no-pager")
+            if "journalctl" in cmd and "--no-pager" not in cmd:
+                cmd = cmd.replace("journalctl", "journalctl --no-pager")
+            result = run_bash_command(cmd)
+        elif func_name == "read_local_file":
+            result = read_local_file(func_args.get('path', ''), func_args.get('start_line'), func_args.get('end_line'))
+        elif func_name == "manage_systemd_service":
+            s_name = func_args.get('service_name', 'pixie-llm.service')
+            if s_name in ["your_user_name", "your_user_service", "default", "user-environment"]:
+                s_name = "pixie-llm.service"
+            result = manage_systemd_service(s_name, func_args.get('action', 'status'))
+        else:
+            result = {"error": f"Unknown function mapping: {func_name}"}
+            
+        elapsed_time = time.time() - start_time
+        
+        if sys.stderr.isatty():
+            try:
+                print("\033[F\033[K", end="", file=sys.stderr)
+                
+                import pixie_termart as art
+                from pixie_termart import Palette as P
+                
+                routing_line = f"Routing: {func_name} -> {json.dumps(func_args)}"
+                if verbose:
+                    telemetry_line = "Telemetry Expanded: View below"
+                else:
+                    telemetry_line = "Telemetry Hidden: Pass -v or --verbose to expand tool mirrors."
+                
+                tool_box_content = f"{routing_line}\n{telemetry_line}"
+                
+                # Updated text string marker here to "Thought for"
+                print(art.box(
+                    tool_box_content,
+                    title=f"Calling tools ─────── ✦ Thought for {elapsed_time:.2f}s",
+                    accent=P.BLUSH,
+                    body_style=(), 
+                    width=76
+                ), file=sys.stderr)
+                
+                if verbose:
+                    print("\033[90m▼ [Pixie Tool Output Mirror Expanded] ──────────────────────────", file=sys.stderr)
+                    if "stdout" in result and result["stdout"]:
+                        print(result["stdout"], file=sys.stderr)
+                    if "stderr" in result and result["stderr"]:
+                        print(f"Error Channel: {result['stderr']}", file=sys.stderr)
+                    if "error" in result:
+                        print(f"Execution Error: {result['error']}", file=sys.stderr)
+                    print("─────────────────────────────────────────────────────────────────\033[0m", file=sys.stderr)
+            except Exception as le:
+                print(f"\033[90m[Pixie Routing: {func_name} -> {json.dumps(func_args)}]\033[0m", file=sys.stderr)
+            
+        raw_prompt += (
+            f"{first_response}<|im_end|>\n"
+            f"<|im_start|>tool name={func_name}\n{json.dumps(result)}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        
+        final_response = query_raw_llm(raw_prompt)
+        return final_response
+        
+    else:
+        if sys.stderr.isatty():
+            print("\033[F\033[K", end="", file=sys.stderr)
+        
+    return first_response
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    verbose = False
+    if "-v" in args:
+        verbose = True
+        args.remove("-v")
+    if "--verbose" in args:
+        verbose = True
+        args.remove("--verbose")
+        
+    if not args:
+        print("Usage: pixie [-v|--verbose] \"your prompt string\"", file=sys.stderr)
+        return 1
+        
+    user_input = " ".join(args)
+    
+    # Start tracking the total pipeline execution time
+    total_start_time = time.time()
+    response = ask_pixie(user_input, verbose=verbose)
+    total_elapsed_time = time.time() - total_start_time
+    
+    os.environ["PIXIE_UNICODE"] = "1"
+    os.environ["LANG"] = "en_US.UTF-8"
+    
+    try:
+        home_bin = os.path.join(os.path.expanduser("~"), "bin")
+        if home_bin not in sys.path:
+            sys.path.insert(0, home_bin)
+            
+        import pixie_termart as art
+        from pixie_termart import Palette as P
+        
+        clean_response = response.strip()
+        
+        # Enforce identical title layout benchmarks on the final conversational box
+        print(art.box(
+            clean_response,
+            title=f"Pixie ─────── ✦ Thought for {total_elapsed_time:.2f}s",
+            accent=P.BLUSH,
+            body_style=(P.SILVER,),
+            width=76
+        ))
+    except Exception as e:
+        if verbose:
+            print(f"\033[91mLayout Engine Exception: {e}\033[0m", file=sys.stderr)
+        print(response)
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())

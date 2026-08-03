@@ -25,7 +25,53 @@ SPIN_FILE = CACHE / "spin.frame"  # still advanced for music ♪♫♬
 MSG_FILE = CACHE / "idle.msg"
 MSG_TS_FILE = CACHE / "idle.msg.ts"
 
-# Pure mood / thoughts / tips — no directory
+KUR_IDLE = (
+    "Kur gazes into the mists…",
+    "Kur is composing a quiet haiku…",
+    "The Dragon rests on the mountain peak…",
+    "Kur listens to the wind through the pines…",
+    "Kur ponders the ancient peaks…",
+    "The Dragon dreams of starlit skies…",
+)
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def kur_busy() -> bool:
+    d = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    try:
+        for p in d.glob("kur-busy.*"):
+            if not p.is_file():
+                continue
+            try:
+                pid = int(p.name.rsplit(".", 1)[-1])
+            except ValueError:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+                continue
+            if _pid_alive(pid):
+                return True
+            else:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return False
 IDLE_FREE = (
     "Pixie is waiting for you…",
     "Pixie taps her foot patiently…",
@@ -56,9 +102,9 @@ IDLE_FREE = (
     "Soft moonlight on the terminal…",
     "Sparkles idle in the air…",
     # system tips
-    "Tip: type cmds for your tool list",
+    "Tip: type scroll for your tool list",
     "Tip: pixie \"…\" talks to your agent",
-    "Tip: duck <words> for private search",
+    "Tip: magpie <words> for private search",
     "Tip: up re-shows the last Pixie reply",
     "Tip: tick off if you want a still screen",
     "Tip: mail opens aerc; pixie checks unread",
@@ -208,11 +254,13 @@ def pick_message(path_s: str) -> str:
 
     msg = prev
     for _ in range(8):
-        # ~45% place-aware, ~55% free (mood / tip / thought)
-        if random.random() < 0.45:
+        r = random.random()
+        if r < 0.40:
             cand = random.choice(IDLE_AT).format(path=path_s)
-        else:
+        elif r < 0.75:
             cand = random.choice(IDLE_FREE)
+        else:
+            cand = random.choice(KUR_IDLE)
         if cand != prev:
             msg = cand
             break
@@ -237,17 +285,23 @@ def paint(msg: str) -> str:
 
 def main() -> None:
     bump_spin()
-    if pixie_busy():
-        msg = "Pixie is thinking…"
-        if _use_color():
-            print(f"{BOLD}{DARK_PINK}{msg}{RESET}", end="")
-        else:
-            print(msg, end="")
-        return
+    p_busy = pixie_busy()
+    k_busy = kur_busy()
 
-    path_s = pretty_path(shell_cwd())
-    msg = pick_message(path_s)
-    print(paint(msg), end="")
+    if p_busy and k_busy:
+        msg = "Pixie and the Dragon are thinking…"
+    elif p_busy:
+        msg = "Pixie is thinking…"
+    elif k_busy:
+        msg = "The Dragon is thinking…"
+    else:
+        path_s = pretty_path(shell_cwd())
+        msg = pick_message(path_s)
+
+    if _use_color():
+        print(f"{BOLD}{DARK_PINK}{msg}{RESET}", end="")
+    else:
+        print(msg, end="")
 
 
 if __name__ == "__main__":

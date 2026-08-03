@@ -1,5 +1,5 @@
-# pixie.zsh — shell integration for pixie-kit
-# Source from ~/.zshrc:  source ~/pixie-kit/shell/pixie.zsh
+# pixie.zsh — shell integration for FaeOS
+# Source from ~/.zshrc:  source ~/faeos/shell/pixie.zsh
 # Or after install:      source ~/.config/pixie/pixie.zsh
 #
 # Does NOT include personal plugins (autosuggestions), grok paths, or secrets.
@@ -19,7 +19,7 @@ export FZF_DEFAULT_OPTS="${FZF_DEFAULT_OPTS:---color=fg:#c0c0c8,bg:#1a0a12,hl:#e
 alias ll="${aliases[ll]:-ls -lah --color=auto}"
 alias ls="${aliases[ls]:-ls --color=auto}"
 alias grep="${aliases[grep]:-grep --color=auto}"
-alias myhelp='cmds'
+# open scroll → command directory (help page) · open spellbook → file manager
 # optional: alias mail='aerc'  # if you use aerc
 
 # ── Starship (prompt box) ─────────────────────────────────────
@@ -27,101 +27,25 @@ if command -v starship >/dev/null 2>&1; then
   eval "$(starship init zsh)"
 fi
 
-# ── Music (mpv IPC) ───────────────────────────────────────────
-_MPV_SOCK="${XDG_RUNTIME_DIR:-/tmp}/mpv-music.sock"
-_play_label() {
-  local base="$1" artist song
-  if [[ "$base" =~ '([0-9]{2})[[:space:]]+(.+)[[:space:]]+-[[:space:]]+(.+)$' ]]; then
-    artist="${match[2]}"
-    song="${match[3]}"
-  elif [[ "$base" == *" - "* ]]; then
-    artist="${base%-*}"
-    song="${base##*- }"
-    artist="${artist%"${artist##*[![:space:]]}"}"
+# ── Status box ────────────────────────────────────────────────
+_pixie_print_box() {
+  [[ -n ${PIXIE_NO_BOX:-} ]] && return 0
+  if [[ -n ${_SCRY_FD_READY:-} ]]; then
+    "$HOME/bin/starship-box" --status >&3 2>/dev/null || "$HOME/bin/starship-box" --status
   else
-    artist="Unknown"
-    song="$base"
-  fi
-  print -r -- "Now playing ${artist} - ${song}"
-}
-_mpv_cmd() {
-  [[ -S $_MPV_SOCK ]] || { echo "Nothing playing. Run: play"; return 1; }
-  MPV_SOCK="$_MPV_SOCK" MPV_JSON="$1" python3 - <<'PY'
-import json, os, socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-try:
-    s.settimeout(2)
-    s.connect(os.environ["MPV_SOCK"])
-    s.sendall((os.environ["MPV_JSON"].strip() + "\n").encode())
-    data = b""
-    while True:
-        chunk = s.recv(4096)
-        if not chunk:
-            break
-        data += chunk
-        if b"\n" in data:
-            break
-    sys.stdout.write(data.decode(errors="replace"))
-except Exception as e:
-    print(f"mpv IPC failed: {e}", file=sys.stderr)
-    sys.exit(1)
-finally:
-    s.close()
-PY
-}
-_now_playing() {
-  local raw path base meta_a meta_t
-  raw=$(_mpv_cmd '{ "command": ["get_property", "filename/no-ext"] }') || return 1
-  base=$(print -r -- "$raw" | python3 -c 'import sys,json
-try:
- d=json.load(sys.stdin); print(d.get("data") or "")
-except Exception: print("")')
-  meta_a=$(_mpv_cmd '{ "command": ["get_property", "metadata/by-key/artist"] }' 2>/dev/null | python3 -c 'import sys,json
-try:
- d=json.load(sys.stdin); v=d.get("data"); print(v if isinstance(v,str) else "")
-except Exception: print("")')
-  meta_t=$(_mpv_cmd '{ "command": ["get_property", "metadata/by-key/title"] }' 2>/dev/null | python3 -c 'import sys,json
-try:
- d=json.load(sys.stdin); v=d.get("data"); print(v if isinstance(v,str) else "")
-except Exception: print("")')
-  if [[ -n $meta_a && -n $meta_t ]]; then
-    print -r -- "Now playing ${meta_a} - ${meta_t}"
-  else
-    _play_label "$base"
+    "$HOME/bin/starship-box" --status
   fi
 }
-play() {
-  local files=("$HOME"/Music/*.(wav|mp3|flac|ogg|m4a)(N))
-  (( ${#files} )) || { echo "No audio files in ~/Music"; return 1; }
-  [[ -S $_MPV_SOCK ]] && _mpv_cmd '{ "command": ["quit"] }' >/dev/null 2>&1
-  pkill -x mpv 2>/dev/null
-  rm -f "$_MPV_SOCK"
-  mpv --no-video --shuffle \
-    --really-quiet \
-    --audio-display=no \
-    --cover-art-auto=no \
-    --input-ipc-server="$_MPV_SOCK" \
-    -- "${files[@]}" >/dev/null 2>&1 &!
+
+_precmd_prompt() {
+  print
+  _pixie_print_box
 }
-next() {
-  _mpv_cmd '{ "command": ["playlist-next"] }' >/dev/null 2>&1 || return 1
-  sleep 0.15
-  _TICK_LAST_SONG=$(_tick_song_id 2>/dev/null)
-  _TICK_LAST_TS=$EPOCHSECONDS
-  clear
-}
-prev() {
-  _mpv_cmd '{ "command": ["playlist-prev"] }' >/dev/null 2>&1 || return 1
-  sleep 0.15
-  _TICK_LAST_SONG=$(_tick_song_id 2>/dev/null)
-  _TICK_LAST_TS=$EPOCHSECONDS
-  clear
-}
-now() { _now_playing; }
-alias stop='pkill -x mpv; rm -f "${XDG_RUNTIME_DIR:-/tmp}/mpv-music.sock" 2>/dev/null'
-alias play-next=next
-alias play-prev=prev
-alias play-now=now
+
+# ── Music (Siren) ─────────────────────────────────────────────
+# All playback is handled by the `siren` command (mpv over IPC).
+#   siren play | next | prev | stop | pause | now
+_MPV_SOCK="${SIREN_SOCK:-/tmp/siren-mpv.sock}"
 
 volume() {
   if ! command -v wpctl >/dev/null 2>&1; then
@@ -223,20 +147,31 @@ _pixie_accept_line() {
 zle -N accept-line _pixie_accept_line
 
 _tick_refresh() {
+  # Idle tick only: wipe screen and redraw prompt
   clear
+  _pixie_print_box
   if zle; then
     zle reset-prompt
     zle -R
   fi
   _TICK_LAST_TS=$EPOCHSECONDS
 }
-_precmd_clear() {
+
+# Clear BEFORE commands (preexec), never AFTER (precmd). Idle tick still clears.
+_preexec_clear() {
+  [[ -n "${1//[$' \t']/}" ]] || return 0
   _pixie_busy && return 0
-  _pixie_in_grace && return 0
   clear
 }
-typeset -ga precmd_functions
-precmd_functions=(_precmd_clear ${precmd_functions:#_precmd_clear})
+_precmd_tick_arm() {
+  # Full idle interval to read output before tick wipe
+  _TICK_LAST_TS=$EPOCHSECONDS
+}
+typeset -ga precmd_functions preexec_functions
+precmd_functions=(${precmd_functions:#_precmd_clear})
+precmd_functions=(_precmd_tick_arm ${precmd_functions:#_precmd_tick_arm})
+precmd_functions=(_precmd_prompt ${precmd_functions:#_precmd_prompt})
+preexec_functions=(_preexec_clear ${preexec_functions:#_preexec_clear})
 
 tick() {
   local sub="${1:-status}" n="${2:-}"
@@ -247,7 +182,8 @@ tick() {
       (( sec >= 2 && sec <= 120 )) || sec=10
       print -r -- "on $sec" >"$_TICK_CFG"
       PERIOD=$_TICK_POLL
-      print "tick: on (every ${sec}s + song change; idle only)"
+      print "tick: on (every ${sec}s + song change while idle)"
+      print "  clear: before commands + idle tick (not after output)"
       ;;
     off)
       print -r -- "off" >"$_TICK_CFG"
@@ -256,7 +192,8 @@ tick() {
       ;;
     status)
       if _tick_enabled; then
-        print "tick: on — every $(_tick_seconds)s + song change"
+        print "tick: on — every $(_tick_seconds)s + song change (idle)"
+        print "  clear: preexec + idle timer; no post-cmd wipe"
         if _pixie_in_grace; then
           print "  read-grace: $("$HOME/bin/pixie-session" grace-left)s left (up to re-read)"
         fi
@@ -270,11 +207,82 @@ tick() {
       ;;
   esac
 }
-up() {
-  local arg="${1:-message}"
+_pixie_fzf_opts() {
+  print -r -- "--height=80% --layout=reverse --border=rounded --cycle --info=inline --ansi --color=fg:#c0c0c8,bg:#1a0a12,hl:#e879a0,fg+:#ffebf2,bg+:#2a1520,hl+:#ff2d55,info:#9d5c75,prompt:#e879a0,pointer:#ffb020,marker:#3dd68c,spinner:#c44d7a,header:#c44d7a"
+}
+
+# SCRY — Shift-Tab history sight (tick paused). Real TTY only (no pipe).
+scry() {
+  export HISTFILE="${HISTFILE:-$HOME/.histfile}"
+  "$HOME/bin/pixie-session" grace 600 >/dev/null 2>&1 || true
   _TICK_LAST_TS=$EPOCHSECONDS
-  "$HOME/bin/pixie-session" up "$arg"
-  "$HOME/bin/pixie-session" grace >/dev/null 2>&1 || true
+  local rf ec=0
+  rf=$(mktemp "${TMPDIR:-/tmp}/scry-rerun.XXXXXX" 2>/dev/null) || rf=""
+  if [[ -n $rf ]]; then
+    "$HOME/bin/scry" --rerun-file "$rf" || ec=$?
+  else
+    "$HOME/bin/scry" || ec=$?
+  fi
+  if [[ -n $rf && -s $rf ]]; then
+    print -z -- "$(<"$rf")"
+  fi
+  [[ -n $rf ]] && rm -f -- "$rf" 2>/dev/null
+  if (( ec != 0 )); then
+    "$HOME/bin/pixie-session" grace 15 >/dev/null 2>&1 || true
+    return "$ec"
+  fi
+  "$HOME/bin/pixie-session" grace 20 >/dev/null 2>&1 || true
+  return 0
+}
+_scry-widget() {
+  zle -I
+  scry
+  zle reset-prompt
+  zle -R
+}
+zle -N _scry-widget
+bindkey '^[[Z' _scry-widget
+bindkey '\e[Z' _scry-widget
+bindkey '\e[27;2;9~' _scry-widget
+
+# open scroll → command directory (help page) · open spellbook → file manager
+up() {
+  local arg="${1:-}"
+  export HISTFILE="${HISTFILE:-$HOME/.histfile}"
+  _TICK_LAST_TS=$EPOCHSECONDS
+  case "$arg" in
+    message|msg|last|pixie|reply|events|event|log)
+      "$HOME/bin/pixie-session" up "$arg"
+      "$HOME/bin/pixie-session" grace >/dev/null 2>&1 || true
+      return $?
+      ;;
+    list|box|plain|history)
+      "$HOME/bin/pixie-session" up history
+      "$HOME/bin/pixie-session" grace >/dev/null 2>&1 || true
+      return $?
+      ;;
+  esac
+  if [[ "$arg" == <-> ]]; then
+    "$HOME/bin/pixie-session" up "$arg"
+    "$HOME/bin/pixie-session" grace >/dev/null 2>&1 || true
+    return $?
+  fi
+  if ! command -v fzf >/dev/null 2>&1; then
+    "$HOME/bin/pixie-session" up history
+    "$HOME/bin/pixie-session" grace >/dev/null 2>&1 || true
+    return $?
+  fi
+  local selected
+  selected=$(
+    fc -rl 1 2>/dev/null \
+      | FZF_DEFAULT_OPTS="$(_pixie_fzf_opts)" fzf \
+          --header='history  ·  ↑↓ move  ·  type to filter  ·  Enter = put on prompt  ·  Esc = quit' \
+          --prompt='up › ' \
+          --tiebreak=index \
+      | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//'
+  ) || return $?
+  [[ -z "$selected" ]] && return 1
+  print -z -- "$selected"
 }
 periodic() {
   _tick_enabled || return 0

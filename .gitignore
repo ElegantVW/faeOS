@@ -12,6 +12,8 @@ accounts.conf
 __pycache__/
 *.pid
 *.log
+*.egg-info/
+.venv/
 
 # huge model weights
 *.gguf
@@ -25,3 +27,9 @@ vendor/lib-pixie/llama-server
 # OS junk
 .DS_Store
 *~
+
+# local wifi / machine secrets
+**/netherweave.env
+**/*netherweave*
+auth.json
+**/accounts.conf

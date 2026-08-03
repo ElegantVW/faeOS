@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — install pixie-kit onto this machine
+# install.sh — install faeos onto this machine
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-echo "==> pixie-kit install from $ROOT"
+echo "==> faeos install from $ROOT"
 
 mkdir -p "$BIN_DST" "$PIXIE_CFG" "$CFG" \
   "$HOME/.local/share/pixie/models" \
@@ -78,7 +78,7 @@ if (( WITH_LIBS )); then
   fi
 fi
 
-MARKER="# >>> pixie-kit >>>"
+MARKER="# >>> faeos >>>"
 if (( ! NO_ZSH )); then
   ZSHRC="$HOME/.zshrc"
   touch "$ZSHRC"
@@ -87,12 +87,12 @@ if (( ! NO_ZSH )); then
     cat >> "$ZSHRC" <<EOF
 
 $MARKER
-# Pixie kit (prompt, tick, play, PATH) — managed by pixie-kit/install.sh
+# Pixie kit (prompt, tick, play, PATH) — managed by faeos/install.sh
 [[ -r "\$HOME/.config/pixie/pixie.zsh" ]] && source "\$HOME/.config/pixie/pixie.zsh"
-# <<< pixie-kit <<<
+# <<< faeos <<<
 EOF
   else
-    echo "==> ~/.zshrc already sources pixie-kit"
+    echo "==> ~/.zshrc already sources faeos"
   fi
 fi
 
