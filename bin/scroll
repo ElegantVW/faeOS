@@ -84,7 +84,6 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ('ask "', "Same engine as pixie"),
             ('ask-web "', "Agent biased to web"),
             ('pixie-llm chat "', "Raw offline chat"),
-            ("kur", "Haiku bard (local LLM + voice)"),
         ],
     ),
     (

@@ -639,3 +639,14 @@ def list_playlists_json() -> list[str]:
 
 def delete_playlist(name: str) -> bool:
     return _global_player.delete_playlist(name)
+
+
+def find_playlist(name: str) -> str | None:
+    """Match a playlist by exact (case-insensitive) name, else by unique prefix."""
+    names = _global_player.get_available_playlists_json()
+    low = name.lower()
+    exact = next((n for n in names if n.lower() == low), None)
+    if exact:
+        return exact
+    matches = [n for n in names if n.lower().startswith(low)]
+    return matches[0] if len(matches) == 1 else None

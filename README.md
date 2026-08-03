@@ -2,7 +2,7 @@
 
 A pink, **offline-first** terminal ecosystem: framed status prompt, local **Pixie** agent (llama.cpp), **Siren** media player, **Kur** haiku bard, **Scry** history, **Ether** network weaves, **Magpie** privacy search — all wrapped in a cute fae-colored status box.
 
-Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — not a full distro yet; see [docs/ROADMAP.md](docs/ROADMAP.md) for the path to a plug-and-play, privacy-first Arch spin.
+Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — not a full distro yet. Single main plan: [faeOSplan.md](faeOSplan.md) (goal, app registry, roadmap, log); per-app plans in [docs/plans/](docs/plans/).
 
 ## Commands
 

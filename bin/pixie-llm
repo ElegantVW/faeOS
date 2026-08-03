@@ -26,6 +26,10 @@ HOST="${PIXIE_LLM_HOST:-127.0.0.1}"
 _NPROC="$(nproc 2>/dev/null || echo 4)"
 THREADS_DEFAULT="${PIXIE_LLM_THREADS:-$(( _NPROC > 1 ? _NPROC - 1 : 1 ))}"
 NGL="${PIXIE_LLM_NGL:-0}"
+# unload the model from RAM after this many idle seconds (0 = keep resident);
+# the server stays up and reloads it on the next request
+SLEEP_IDLE="${PIXIE_LLM_SLEEP_IDLE:-300}"
+if [[ "$SLEEP_IDLE" -le 0 ]]; then SLEEP_IDLE=-1; fi
 
 mkdir -p "$CFG_DIR" "$CACHE_DIR" "$MODEL_DIR"
 
@@ -120,6 +124,13 @@ health() {
     || curl -fsS --max-time 2 "${URL}/v1/models" >/dev/null 2>&1
 }
 
+is_asleep() {
+  # llama-server returns 503 on /health while the model is unloaded (sleeping)
+  local code
+  code=$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' "${URL}/health" 2>/dev/null || true)
+  [[ "$code" == "503" ]]
+}
+
 cmd_status() {
   local srv
   srv=$(find_server 2>/dev/null || echo "(llama-server not found)")
@@ -130,8 +141,14 @@ cmd_status() {
   echo "listen:   ${HOST}:${PORT}  (localhost only)"
   echo "url:      $URL"
   echo "ctx/thr:  $CTX / $THREADS"
+  echo "sleep:    ${SLEEP_IDLE}s idle → unloads model from RAM (-1 = keep loaded)"
   if is_running && health; then
     echo "status:   running"
+    [[ -f "$PID_FILE" ]] && echo "pid:      $(cat "$PID_FILE")"
+    return 0
+  elif is_running && is_asleep; then
+    echo "status:   running but asleep (model unloaded, RAM freed)"
+    echo "          next request reloads it (~20s) — server never needs a manual start"
     [[ -f "$PID_FILE" ]] && echo "pid:      $(cat "$PID_FILE")"
     return 0
   elif is_running; then
@@ -188,6 +205,7 @@ cmd_start() {
     -t "$THREADS" \
     -ngl "$NGL" \
     --alias "$ALIAS" \
+    --sleep-idle-seconds "$SLEEP_IDLE" \
     --jinja \
     --chat-template gemma2 \
     >"$LOG_FILE" 2>&1 &
@@ -330,6 +348,8 @@ pixie-llm — offline llama.cpp profiles
   pixie-llm models
 
 Ports:  qwen/mistral → 8080    kur → 8081
+Idle RAM: models unload after PIXIE_LLM_SLEEP_IDLE seconds of inactivity
+          (default 300; set 0 to keep the model loaded, like before)
 H
     ;;
   *)

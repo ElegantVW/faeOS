@@ -174,7 +174,7 @@ except Exception as e:
 - mpv integration
 - Track management
 
-### 3. Development Plan (`SIREN_DEVELOPMENT_PLAN.md`)
+### 3. Development Plan (`docs/plans/siren.md`)
 - Full roadmap
 - Technical specifications
 - Implementation guidance
@@ -229,7 +229,7 @@ git push
 ```
 
 ### 4. Document Everything
-- Update `SIREN_DEVELOPMENT_PLAN.md`
+- Update `docs/plans/siren.md`
 - Add comments in code
 - Write usage examples
 
@@ -269,7 +269,7 @@ python3 -c "import curses; print('curses OK')"
 
 ### Resources
 1. **This file** - Quick start guide
-2. **SIREN_DEVELOPMENT_PLAN.md** - Full roadmap
+2. **docs/plans/siren.md** - Full roadmap
 3. **Existing code** - Learn from current implementation
 4. **Python docs** - For language questions
 5. **mpv docs** - For playback questions

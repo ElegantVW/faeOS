@@ -315,19 +315,19 @@ def build_footer(width: int, focus_mode: int = 0) -> str:
     if focus_mode == 0:
         rows = [
             _rune_row(("↑↓/jk", "browse"), ("o/enter/p/space", "open·play"), ("backspace", "up")),
-            _rune_row(("a", "add"), ("/", "filter"), ("S", "save"), ("L", "load&play")),
+            _rune_row(("a", "add"), ("/", "filter"), ("S", "save"), ("L", "load&play"), ("R", "rm playlist")),
             _rune_row(("g", "go to path"), ("Tab", "→ queue"), ("q", "quit")),
         ]
     elif focus_mode == 1:
         rows = [
             _rune_row(("↑↓/jk", "move"), ("enter/space", "play from here")),
-            _rune_row(("a", "add 10"), ("d", "remove"), ("c", "clear"), ("S", "save")),
+            _rune_row(("a", "add 10"), ("d", "remove"), ("c", "clear"), ("S", "save"), ("R", "rm playlist")),
             _rune_row(("g", "go to path"), ("Tab", "→ EQ"), ("q", "quit")),
         ]
     else:
         rows = [
             _rune_row(("p/space", "play·pause"), ("n/b", "next/prev"), ("s", "shuffle"), ("r", "repeat")),
-            _rune_row(("+/-", "vol"), ("a", "add 10"), ("S", "save"), ("L", "load&play")),
+            _rune_row(("+/-", "vol"), ("a", "add 10"), ("S", "save"), ("L", "load&play"), ("R", "rm playlist")),
             _rune_row(("g", "go to path"), ("Tab", "→ browser"), ("q", "quit")),
         ]
     return art.box(rows, title="runes", width=width, body_style=(P.MUTED,))
@@ -504,6 +504,13 @@ def ui_loop() -> int:
                         else:
                             notification = art.box([f"Not a directory: {dir_input}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
                         notification_time = time.time()
+                    elif action == "rmplaylist":
+                        name = buf
+                        if player.delete_playlist(name):
+                            notification = art.box([f"Removed playlist: {name}"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                        else:
+                            notification = art.box([f"No playlist: {name}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                        notification_time = time.time()
                     # action == "filter": filter stays applied, just exit input
                 elif key == "ctrl-c":
                     return 0
@@ -536,6 +543,14 @@ def ui_loop() -> int:
                 input_active = True
                 input_action = "load"
                 input_prompt = f"load & play ({hint}):"
+                input_buf = ""
+                continue
+            elif key == "R":
+                names = player.list_playlists_json()
+                hint = ", ".join(names) if names else "(none)"
+                input_active = True
+                input_action = "rmplaylist"
+                input_prompt = f"remove playlist ({hint}):"
                 input_buf = ""
                 continue
             elif key == "g":
@@ -822,6 +837,11 @@ def main():
             print()
             return 0
 
+        if len(rest) == 1:
+            hit = player.find_playlist(rest[0])
+            if hit:
+                return cmd_playlist_load(hit)
+
         files = player.resolve_play_args(rest)
         return player.start_playlist(files, shuffle=False)
     elif cmd in ("pause", "toggle"):
@@ -936,9 +956,9 @@ def main():
             "Siren — the Aether's music vessel.",
             "Commands: play, pause, stop, next, prev, random, cove",
             "Queue:    siren queue add|list|clear|play|next|remove|move",
-            "Playlist: siren playlist save|load|list|remove",
+            "Playlist: siren playlist save|load|list|remove · siren play <album>",
             "Free media:  siren trove  (the Archive keep)",
-            "TUI: / filter · o open · a add · S/L save·load · r repeat · g go to path · Tab focus · q quit",
+            "TUI: / filter · o open · a add · S/L save·load · R rm playlist · r repeat · g go to path · Tab focus · q quit",
         ]
         print()
         print(art.box(lines, title=" Siren ✦", width=_compact_width(lines)))
