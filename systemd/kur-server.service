@@ -1,0 +1,11 @@
+[Unit]
+Description=Kur Voice & LLM Companion Server
+After=network.target pipewire.service pulseaudio.service
+
+[Service]
+ExecStart=/usr/bin/python3 /home/evenweaker/bin/kur-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

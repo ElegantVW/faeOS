@@ -10,7 +10,7 @@
 
 ## Next
 - [ ] Haiku quality pass (prompt/temperature tuning)
-- [ ] More voices; speak on boot greeting?
+- [ ] **Better TTS** — current piper voice "sucks"; candidates: kokoro (local, better quality, ~350MB) or higher-quality piper voice models. Until then piper libs stay local in `~/bin` (not shipped by install.sh)
 - [ ] Keep hidden: no scroll entry, no README table row (only plan docs)
 
 ## Notes

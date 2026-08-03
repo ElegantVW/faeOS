@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# pixie-term — fancy terminal with NO startx / NO X11
+#
+# Boot path (after reboot): systemd kmsconvt@tty* (root) → autologin.
+# Manual path: start a kmscon VT via systemd (needs sudo for /dev/input + VT).
+#
+#   pixie-term status
+#   pixie-term fancy [N]   # start kmscon on ttyN (default: free 8), switch to it
+#   pixie-term dress [SZ]  # pink Terminus on raw kernel VT only
+#   pixie-term reset
+#   pixie-term stop [N]    # stop kmsconvt@ttyN
+
+set -euo pipefail
+
+PIXIE_CFG_SYS="/etc/kmscon"
+PIXIE_CON="${HOME}/.local/share/pixie/console"
+FONT_DIR="${PIXIE_CON}/fonts"
+VTRGB="${PIXIE_CON}/vtrgb-pink"
+
+KMSCON="$(command -v kmscon 2>/dev/null || true)"
+
+have_drm() {
+  [[ -e /dev/dri/card0 || -e /dev/dri/card1 || -e /dev/dri/renderD128 ]]
+}
+
+on_vt() {
+  local t
+  t=$(tty 2>/dev/null || true)
+  [[ "$t" == /dev/tty[0-9]* ]]
+}
+
+in_kmscon() {
+  case ${TERM:-} in
+    kmscon|xterm-256color|xterm-color) return 0 ;;
+  esac
+  # parent process name
+  local p
+  p=$(ps -o comm= -p "${PPID:-0}" 2>/dev/null || true)
+  [[ "$p" == *kmscon* ]] && return 0
+  return 1
+}
+
+session_has_input_group() {
+  id -nG 2>/dev/null | tr ' ' '\n' | grep -qx input
+}
+
+cmd_status() {
+  echo "pixie-term — fancy console (no startx)"
+  echo "  tty:     $(tty 2>/dev/null || echo '?')"
+  echo "  TERM:    ${TERM:-?}"
+  echo "  kmscon:  ${KMSCON:-missing}"
+  echo "  DRM:     $(have_drm && echo yes || echo no)"
+  echo "  groups:  $(id -nG 2>/dev/null)"
+  if session_has_input_group; then
+    echo "  input:   group active in this session"
+  else
+    echo "  input:   NOT in this session (need re-login/reboot for /dev/input)"
+  fi
+  echo "  boot:    autovt -> $(readlink /etc/systemd/system/autovt@.service 2>/dev/null || echo '?')"
+  echo "  tty1:    $(systemctl is-enabled kmsconvt@tty1.service 2>/dev/null || echo '?')"
+  echo "  linger:  $(loginctl show-user "${USER:-evenweaker}" -p Linger --value 2>/dev/null || echo '?')"
+  echo "  llm:     $(systemctl --user is-active pixie-llm.service 2>/dev/null || echo '?')"
+  if in_kmscon; then
+    echo "  mode:    already in kmscon"
+  elif on_vt; then
+    echo "  mode:    raw kernel VT"
+  else
+    echo "  mode:    pts/other"
+  fi
+  echo
+  echo "  fancy needs root for keyboards:  pixie-term fancy"
+  echo "  after reboot, tty1 is kmscon + autologin (no command needed)"
+}
+
+pick_font() {
+  local size="${1:-20}" f
+  f="${FONT_DIR}/ter-v${size}n.psf.gz"
+  [[ -f $f ]] && { echo "$f"; return 0; }
+  for s in 20 18 22 24 16 28 32 14 12; do
+    f="${FONT_DIR}/ter-v${s}n.psf.gz"
+    [[ -f $f ]] && { echo "$f"; return 0; }
+  done
+  return 1
+}
+
+cmd_dress() {
+  local size="${1:-20}" font
+  if in_kmscon; then
+    echo "already in kmscon — use Ctrl+plus / Ctrl+minus to zoom"
+    return 0
+  fi
+  if ! on_vt; then
+    echo "dress needs a real VT (tty1–6), not pts." >&2
+    return 1
+  fi
+  if font=$(pick_font "$size"); then
+    setfont "$font" 2>/dev/null || setfont -C "$(tty)" "$font" 2>/dev/null || true
+    echo "font: $font"
+  fi
+  if [[ -f $VTRGB ]] && command -v setvtrgb >/dev/null 2>&1; then
+    setvtrgb "$VTRGB" 2>/dev/null || true
+    echo "palette: pixie pink"
+  fi
+}
+
+cmd_reset() {
+  on_vt || { echo "not on VT" >&2; return 1; }
+  setfont 2>/dev/null || true
+  echo "font reset (best-effort)"
+}
+
+# Find a free VT number (prefer 8, then 7–12)
+pick_vt() {
+  local n want="${1:-}"
+  if [[ -n $want ]]; then
+    echo "$want"
+    return 0
+  fi
+  for n in 8 7 9 10 11 12 6; do
+    # skip if our own tty
+    if [[ $(tty 2>/dev/null) == /dev/tty$n ]]; then
+      continue
+    fi
+    # prefer not active
+    if [[ -e /sys/class/tty/tty$n ]]; then
+      echo "$n"
+      return 0
+    fi
+  done
+  echo 8
+}
+
+cmd_fancy() {
+  if in_kmscon; then
+    echo "already in kmscon"
+    return 0
+  fi
+  if [[ -z ${KMSCON:-} ]]; then
+    echo "kmscon not installed" >&2
+    return 1
+  fi
+  if ! have_drm; then
+    echo "no DRM device — falling back to dress" >&2
+    cmd_dress 20
+    return
+  fi
+
+  # Running kmscon as a normal user cannot open /dev/input/* → blank, no typing.
+  # Boot units run as root. Manual path: start kmsconvt@ttyN via systemd (root).
+  local n
+  n=$(pick_vt "${1:-}")
+  local unit="kmsconvt@tty${n}.service"
+
+  echo "starting $unit (root/systemd — needs keyboard access)…"
+  if ! sudo -n systemctl start "$unit" 2>/dev/null; then
+    if ! sudo systemctl start "$unit"; then
+      echo "failed to start $unit" >&2
+      echo "  try: sudo systemctl status $unit -l" >&2
+      return 1
+    fi
+  fi
+
+  # Give it a moment, then switch
+  sleep 0.4
+  if systemctl is-active --quiet "$unit"; then
+    echo "active on tty${n}. switching (Ctrl+Alt+F${n} also works)…"
+    if sudo -n chvt "$n" 2>/dev/null || sudo chvt "$n" 2>/dev/null; then
+      :
+    else
+      echo "could not chvt — press Ctrl+Alt+F${n} yourself"
+    fi
+    echo "stop later:  pixie-term stop ${n}"
+  else
+    echo "unit did not stay active:" >&2
+    systemctl --no-pager -l status "$unit" 2>&1 | tail -25 >&2
+    return 1
+  fi
+}
+
+cmd_stop() {
+  local n="${1:-8}"
+  sudo systemctl stop "kmsconvt@tty${n}.service" 2>/dev/null || true
+  echo "stopped kmsconvt@tty${n} (if it was running)"
+}
+
+main() {
+  local sub="${1:-status}"
+  shift || true
+  case "$sub" in
+    -h|--help|help|status) cmd_status ;;
+    dress|console|pretty) cmd_dress "${1:-20}" ;;
+    reset) cmd_reset ;;
+    fancy|kmscon|go) cmd_fancy "${1:-}" ;;
+    stop) cmd_stop "${1:-8}" ;;
+    auto)
+      if in_kmscon; then cmd_status
+      else cmd_fancy "${1:-}"
+      fi
+      ;;
+    *)
+      echo "usage: pixie-term {status|fancy [N]|dress|stop [N]|reset}" >&2
+      return 1
+      ;;
+  esac
+}
+
+main "$@"

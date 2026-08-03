@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""open — Fae-themed command dispatcher.
+
+Usage:
+  open scroll    # Command directory (help page)
+  open spellbook # File manager
+"""
+import sys
+import os
+from pathlib import Path
+
+def main():
+    # Check if we were called as 'spellbook' directly (via symlink)
+    program_name = os.path.basename(sys.argv[0])
+    
+
+    
+    # Normal 'open' command usage
+    if len(sys.argv) < 2:
+        print("Usage: open {scroll|spellbook}")
+        print("  open scroll    - Command directory")
+        print("  open spellbook - File manager")
+        sys.exit(1)
+    
+    command = sys.argv[1]
+    
+    if command == "scroll":
+        # Call the command directory (help page)
+        scroll_path = Path.home() / "bin" / "scroll"
+        if scroll_path.exists():
+            os.execv(str(scroll_path), ["scroll"] + sys.argv[2:])
+        else:
+            print("Error: scroll not found")
+            sys.exit(1)
+    elif command == "spellbook":
+        # Call the file manager
+        spellbook_path = Path.home() / "bin" / "spellbook"
+        if spellbook_path.exists():
+            os.execv(str(spellbook_path), ["spellbook"] + sys.argv[2:])
+        else:
+            print("Error: spellbook file manager not found")
+            print("Hint: Create spellbook at ~/bin/spellbook")
+            sys.exit(1)
+    else:
+        print(f"Error: Unknown command '{command}'")
+        print("Usage: open {scroll|spellbook}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

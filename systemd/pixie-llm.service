@@ -9,6 +9,8 @@ Restart=on-failure
 RestartSec=5
 Environment=PIXIE_LLM_HOST=127.0.0.1
 Environment=PIXIE_LLM_PORT=8080
+# qwen coder default profile: 4096 ctx is plenty for agent chats
+Environment=PIXIE_LLM_CTX=4096
 
 [Install]
 WantedBy=default.target
