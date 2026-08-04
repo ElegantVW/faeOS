@@ -445,6 +445,19 @@ def _restart_imp() -> bool:
         return False
 
 
+def _stop_imp() -> None:
+    """Unload imp's model from RAM when the TUI quits (frees ~2GB)."""
+    binpath = pixie_llm_bin()
+    if not binpath:
+        return
+    try:
+        subprocess.run(
+            [binpath, "stop", "imp"], capture_output=True, text=True, timeout=30
+        )
+    except Exception:
+        pass
+
+
 def _build_user_prompt(prompt: str, style: str, width: int, height: int, previous: str | None, anim: str | None) -> str:
     if previous is not None:
         return (
@@ -1598,6 +1611,7 @@ def main(argv: list[str] | None = None) -> int:
         ImpApp(fd).run()
     finally:
         art.tui_cleanup()
+        _stop_imp()
     return 0
 
 

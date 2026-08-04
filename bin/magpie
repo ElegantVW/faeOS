@@ -611,15 +611,33 @@ def llm_up() -> bool:
     for path in ("/health", "/v1/models"):
         try:
             with urllib.request.urlopen(f"{LLAMA}{path}", timeout=1.5) as r:
-                if r.status == 200:
+                if r.status in (200, 503):
                     return True
         except Exception:
             continue
     return False
 
 
+def ensure_llm_up() -> bool:
+    """Start menagerie.service (qwen on 8080) and wait for it to answer."""
+    import subprocess
+    import time
+    try:
+        subprocess.run(["systemctl", "--user", "start", "menagerie.service"],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass
+    for _ in range(90):
+        if llm_up():
+            return True
+        time.sleep(1)
+    return llm_up()
+
+
 def llm_generate(prompt: str, *, max_tokens: int | None = None) -> str:
     """One-shot generation via offline llama.cpp (localhost only)."""
+    if not llm_up():
+        ensure_llm_up()
     if not llm_up():
         raise RuntimeError("menagerie not running")
     mt = max_tokens if max_tokens is not None else _max_tokens()

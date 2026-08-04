@@ -5,8 +5,9 @@
 **Status:** stable
 
 ## Current
-- `kur` — haiku generation (local LLM + voice), `kur-server` (systemd, port 8081, `/generate`), `kur_voice.py`
-- Model: `smollm2-360m-instruct-q4_k_m.gguf` (~350MB) on port 8081; loaded on demand via `menagerie start kur`
+- `kur` — haiku generation (local LLM + voice), `kur-server` (systemd, port 8083, `/generate`), `kur_voice.py`
+- Model: `smollm2-360m-instruct-q4_k_m.gguf` (~350MB) on port 8081 (menagerie `kur` profile); loaded on demand via `menagerie start kur`; unloaded via `ExecStopPost` on daemon stop
+- AI apps are independent: kur talks to menagerie's kur profile, not imp's server
 
 ## Next
 - [ ] Haiku quality pass (prompt/temperature tuning)

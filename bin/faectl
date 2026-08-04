@@ -24,30 +24,28 @@ _sys.path.insert(0, str(Path.home() / "bin"))
 import fae_termart as art
 from fae_termart import Palette as P
 
-def check_llm() -> tuple[bool, str]:
+def menagerie_status(profile: str) -> tuple[bool, str]:
+    """Ask the AI control center (menagerie) for a profile's status."""
     try:
-        with urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=1.0) as r:
-            if r.status == 200:
-                return True, "Running (Port 8080)"
+        out = subprocess.run(
+            [str(Path.home() / "bin" / "menagerie"), "status", profile],
+            capture_output=True, text=True, timeout=20,
+        )
+        for line in (out.stdout or "").splitlines():
+            line = line.strip()
+            if line.startswith("status:"):
+                return out.returncode == 0, line.split(":", 1)[1].strip()
+        return False, "unknown"
     except Exception:
-        pass
-    return False, "Stopped / Offline"
+        return False, "unknown"
+
+def check_llm() -> tuple[bool, str]:
+    ok, status = menagerie_status("qwen")
+    return ok, f"{status} (menagerie qwen · 8080)"
 
 def check_kur() -> tuple[bool, str]:
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:8081/", timeout=0.8) as r:
-            pass
-    except urllib.error.HTTPError:
-        return True, "Running (Port 8081)"
-    except Exception:
-        pass
-    try:
-        out = subprocess.check_output(["pgrep", "-f", "kur-server"], text=True, timeout=0.5)
-        if out.strip():
-            return True, "Running (Port 8081)"
-    except Exception:
-        pass
-    return False, "Stopped / Offline"
+    ok, status = menagerie_status("kur")
+    return ok, f"{status} (menagerie kur · 8081)"
 
 def check_siren() -> tuple[bool, str]:
     sock = "/tmp/siren-mpv.sock"
@@ -96,9 +94,11 @@ def main() -> int:
         return 0
 
     elif args.action == "restart-llm":
-        print("Restarting local LLM (menagerie)...")
-        subprocess.run(["pkill", "-f", "llama-server"], stderr=subprocess.DEVNULL)
-        subprocess.Popen([str(Path.home() / "bin" / "menagerie")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        print("Restarting local LLM (menagerie.service)…")
+        subprocess.run(
+            ["systemctl", "--user", "restart", "menagerie.service"],
+            capture_output=True, timeout=30,
+        )
         print("Done.")
         return 0
 

@@ -687,8 +687,10 @@ def tui_read_key(fd: int, timeout: float | None = None) -> str:
         return "ctrl-d"
     if ch in (b"\x7f", b"\x08"):
         return "backspace"
-    if ch == b"\x15":  # Ctrl-U
+    if ch in (b"\x15",):  # Ctrl-U
         return "ctrl-u"
+    if ch == b"\x12":  # Ctrl-R
+        return "ctrl-r"
     try:
         return ch.decode("utf-8")
     except UnicodeDecodeError:

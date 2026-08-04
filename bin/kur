@@ -14,7 +14,7 @@ if len(sys.argv) < 2:
     sys.exit(1)
 
 prompt_text = sys.argv[1]
-url = "http://127.0.0.1:8081/generate"
+url = "http://127.0.0.1:8083/generate"
 data = json.dumps({"prompt": prompt_text}).encode("utf-8")
 
 req = urllib.request.Request(
@@ -41,7 +41,7 @@ try:
         print(art.box(reply_text, title="Kur", width=box_width))
         print()
 except Exception:
-    print("Kur server down on 8081.\n\nKur must be loaded with his main command.")
+    print("Kur server down on 8083.\n\nKur must be loaded with his main command.")
     sys.exit(1)
 finally:
     try:

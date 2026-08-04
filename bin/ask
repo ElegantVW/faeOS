@@ -338,15 +338,35 @@ def _http_json(url: str, body: dict | None = None, timeout: float = 600) -> dict
 
 
 def llm_up() -> bool:
-    """True if llama-server (menagerie) answers on localhost."""
+    """True if llama-server (menagerie) answers on localhost.
+
+    200 = loaded; 503 = server up, model asleep (sleep-idle) — either is
+    usable, the first request wakes the model.
+    """
     for path in ("/health", "/v1/models"):
         try:
             with urllib.request.urlopen(f"{LLAMA}{path}", timeout=2) as r:
-                if r.status == 200:
+                if r.status in (200, 503):
                     return True
         except Exception:
             continue
     return False
+
+
+def ensure_llm_up() -> bool:
+    """Start menagerie.service (qwen on 8080) and wait for it to answer."""
+    import subprocess
+    import time
+    try:
+        subprocess.run(["systemctl", "--user", "start", "menagerie.service"],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass
+    for _ in range(90):
+        if llm_up():
+            return True
+        time.sleep(1)
+    return llm_up()
 
 
 def normalize_chat_messages(messages: list[dict]) -> list[dict]:
@@ -1615,7 +1635,10 @@ def main() -> int:
         return 0
 
     if not llm_up():
-        eprint("No local LLM is running.")
+        eprint("No local LLM is running — starting the menagerie service (qwen) …")
+        ensure_llm_up()
+    if not llm_up():
+        eprint("Could not start the local LLM.")
         eprint("  Start offline server:  menagerie start")
         eprint(f"  Expected URL:          {LLAMA}")
         return 1

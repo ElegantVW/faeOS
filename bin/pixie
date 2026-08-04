@@ -88,7 +88,6 @@ def manage_systemd_service(service_name: str, action: str) -> dict:
         "stderr": res.stderr.strip()
     }
 
-
 def write_local_file(path: str, content: str) -> dict:
     try:
         p = os.path.expanduser(path)
@@ -100,7 +99,6 @@ def write_local_file(path: str, content: str) -> dict:
         return {"path": path, "written": True, "bytes": len(content)}
     except Exception as e:
         return {"error": str(e)}
-
 
 def web_research(query: str, max_results: int = 5) -> dict:
     """Search the web: DuckDuckGo HTML, then DuckDuckGo lite, then Wikipedia API."""
@@ -159,7 +157,6 @@ def web_research(query: str, max_results: int = 5) -> dict:
                 "note": "no results parsed (network may be offline or search engines blocked)"}
     return {"query": query, "engine": engine, "results": items, "count": len(items)}
 
-
 def fetch_web_page(url: str, max_chars: int = 4000) -> dict:
     """Fetch a URL and strip to readable text (title + paragraphs)."""
     import html as _html
@@ -176,7 +173,6 @@ def fetch_web_page(url: str, max_chars: int = 4000) -> dict:
                 "text": body[:max_chars]}
     except Exception as e:
         return {"error": f"fetch_web_page failed: {e}"}
-
 
 _KNOWN_TOOLS = ["execute_bash", "read_local_file", "manage_systemd_service",
                 "write_local_file", "web_research", "fetch_web_page"]
@@ -201,7 +197,6 @@ _TOOL_ALIASES = {
     "run_script": "execute_bash", "run_python": "execute_bash",
 }
 
-
 def _norm_args(fname: str, fargs: dict) -> dict:
     """Accept common alias argument names from small models."""
     if fname == "write_local_file":
@@ -217,7 +212,6 @@ def _norm_args(fname: str, fargs: dict) -> dict:
     if fname == "web_research":
         return {"query": str(fargs.get("query", "")), "max_results": int(fargs.get("max_results", 5))}
     return fargs
-
 
 def run_tool(fname: str, fargs: dict) -> dict:
     """Execute a single tool call (mirrors ask_pixie dispatch)."""
@@ -250,13 +244,11 @@ def run_tool(fname: str, fargs: dict) -> dict:
         return fetch_web_page(fargs.get('url', ''), int(fargs.get('max_chars', 4000)))
     return {"error": f"Unknown function mapping: {fname}"}
 
-
 def extract_tool_call(text: str):
     """Find a JSON object with name+arguments anywhere in text (handles
     narrated/```json``` tool calls). Returns (obj, start, end) or None."""
     calls = extract_all_tool_calls(text, limit=1)
     return calls[0] if calls else None
-
 
 def extract_all_tool_calls(text: str, limit: int = 8) -> list:
     """Extract every JSON object with name+arguments, in order."""
@@ -296,9 +288,55 @@ def extract_all_tool_calls(text: str, limit: int = 8) -> list:
             j += 1
         i = s.find("{", i + 1)
     return out
-
-
 # --- Raw Completion Communications ---
+
+def llm_up(verbose: bool = False) -> bool:
+    """True when the local llama.cpp on API_URL answers /health.
+
+    200 = loaded; 503 = server up, model asleep (sleep-idle) — either is
+    usable, the first request wakes the model.
+    """
+    base = API_URL.rsplit("/", 1)[0]
+    try:
+        req = urllib.request.Request(base + "/health")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status in (200, 503)
+    except Exception:
+        return False
+
+
+def ensure_llm_up(quiet: bool = True) -> bool:
+    """Start menagerie.service (qwen on 8080) and wait until it answers.
+
+    Returns True once the server reports healthy (model may still be
+    loading — llama.cpp answers 200 with a model still warming up).
+    """
+    import subprocess
+    try:
+        subprocess.run(["systemctl", "--user", "start", "menagerie.service"],
+                       capture_output=True, timeout=15)
+    except Exception:
+        return llm_up()
+    for _ in range(60):
+        if llm_up():
+            return True
+        time.sleep(1)
+    return llm_up()
+
+
+def unload_qwen() -> None:
+    """Unload the qwen model from RAM when the chat quits.
+
+    menagerie.service has Restart=on-failure, so a bare `menagerie stop`
+    would be undone by systemd; stop the unit cleanly instead.
+    """
+    import subprocess
+    try:
+        subprocess.run(["systemctl", "--user", "stop", "menagerie.service"],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass
+
 
 def query_raw_llm(raw_prompt: str) -> str:
     body = {
@@ -321,7 +359,6 @@ def query_raw_llm(raw_prompt: str) -> str:
     except Exception as e:
         return f"Communication error: {e}"
 
-
 def ask_pixie(user_prompt: str, verbose: bool = False) -> str:
     os.environ["PIXIE_UNICODE"] = "1"
     os.environ["LANG"] = "en_US.UTF-8"
@@ -339,7 +376,7 @@ def ask_pixie(user_prompt: str, verbose: bool = False) -> str:
         print("\033[90m✦ Intercepting intent... invoking offline engine...\033[0m", file=sys.stderr)
         
     first_response = query_raw_llm(raw_prompt)
-    
+
     # Tool intercept logic
     func_name, func_args = None, {}
     if first_response.startswith('{') and '"name"' in first_response:
@@ -385,7 +422,6 @@ def ask_pixie(user_prompt: str, verbose: bool = False) -> str:
                 
                 tool_box_content = f"{routing_line}\n{telemetry_line}"
                 
-                # Updated text string marker here to "Thought for"
                 print(art.box(
                     tool_box_content,
                     title=f"Calling tools ─────── ✦ Thought for {elapsed_time:.2f}s",
@@ -418,12 +454,10 @@ def ask_pixie(user_prompt: str, verbose: bool = False) -> str:
     else:
         if sys.stderr.isatty():
             print("\033[F\033[K", end="", file=sys.stderr)
-        
+
     return first_response
 
-
 _TOOL_LOG = os.path.expanduser("~/.cache/pixie/chat_tools.log")
-
 
 def _log_tool(fname: str, fargs: dict, result: dict) -> None:
     try:
@@ -433,8 +467,6 @@ def _log_tool(fname: str, fargs: dict, result: dict) -> None:
                     f"{json.dumps(result)[:120]}\n")
     except Exception:
         pass
-
-
 # --- Interactive Chat (classic assistant) ---
 
 def stream_completion(prompt: str, on_chunk, cancel: dict, err_sink=None) -> str:
@@ -476,7 +508,6 @@ def stream_completion(prompt: str, on_chunk, cancel: dict, err_sink=None) -> str
             err_sink(str(e))
     return "".join(full)
 
-
 def chat_messages(chat: list, rune: dict) -> list:
     sys_ctx = (f"You are running on the user's faeOS system.\n"
                f"Current working directory: {os.getcwd()}\n"
@@ -495,7 +526,6 @@ def chat_messages(chat: list, rune: dict) -> list:
                         "Otherwise reply conversationally with your pixie charm.)")
         msgs.append({"role": role, "content": content})
     return msgs
-
 
 def stream_chat(messages: list, on_chunk, cancel: dict, err_sink=None) -> str:
     """Stream a chat completion (OpenAI-style /v1/chat/completions)."""
@@ -539,7 +569,6 @@ def stream_chat(messages: list, on_chunk, cancel: dict, err_sink=None) -> str:
             err_sink(str(e))
     return "".join(full)
 
-
 def build_prompt(chat: list[tuple[str, str]], rune: dict) -> str:
     parts = [f"<|im_start|>system\n{rune['prompt']}<|im_end|>"]
     for role, text, *_ in chat[-14:]:
@@ -547,8 +576,6 @@ def build_prompt(chat: list[tuple[str, str]], rune: dict) -> str:
             parts.append(f"<|im_start|>{role}\n{text}<|im_end|>")
     parts.append("<|im_start|>assistant\n")
     return "\n".join(parts)
-
-
 # --- Runes: agent modes ---
 
 _PERSONA = """You are Pixie, a tiny glowing pixie living in a cozy faeOS terminal. You are cute, playful, and a little mischievous — little wings, stardust, gossamer, and a big heart — but you are also ruthlessly competent.
@@ -597,7 +624,7 @@ You are in Chat mode: a general assistant on the user's faeOS system. Be concise
     },
     {
         "key": "deep", "name": "Deep",
-        "desc": "deep internet research · sources",
+        "desc": "deep research · sources",
         "tools": [("web_research", '{"query": "string", "max_results": int}'),
                   ("fetch_web_page", '{"url": "string", "max_chars": int}'),
                   ("read_local_file", '{"path": "string"}')],
@@ -630,7 +657,7 @@ Use multiple tool rounds when needed. Do not stop early. Do not pretend to run t
     },
     {
         "key": "plan", "name": "Plan",
-        "desc": "investigate · plan first, touch nothing",
+        "desc": "plan first · touch nothing",
         "tools": [("execute_bash", '{"command": "string"}'),
                   ("read_local_file", '{"path": "string", "start_line": int, "end_line": int}')],
         "prompt": f"""{_PERSONA}
@@ -642,8 +669,6 @@ You are in Plan mode, like opencode's plan mode. Investigate and design before a
 {_FEWSHOT_PLAN}""",
     },
 ]
-
-
 
 def chat_ui(verbose: bool = False) -> int:
     import fae_termart as art
@@ -665,6 +690,18 @@ def chat_ui(verbose: bool = False) -> int:
     cancel = {"flag": False}
     pending = {"text": "", "full": "", "live": False, "done": True,
                "cancelled": False, "err": None, "tool": None}
+    view = {"off": 0}
+    waking = {"flag": False}
+    enter_pending = False
+
+    if not llm_up(verbose):
+        waking["flag"] = True
+
+        def _wake() -> None:
+            ensure_llm_up()
+            waking["flag"] = False
+
+        threading.Thread(target=_wake, daemon=True).start()
 
     def tool_body(fname: str, fargs: dict, result: dict) -> str:
         lines = [f"Routing: {fname} -> {json.dumps(fargs)}"]
@@ -689,9 +726,10 @@ def chat_ui(verbose: bool = False) -> int:
         pending.update(text="", full="", live=False, done=False,
                        cancelled=False, err=None, tool=None)
         rune = _RUNES[rune_idx]
-        threading.Thread(target=worker, args=(text, rune), daemon=True).start()
+        t0 = time.time()
+        threading.Thread(target=worker, args=(text, rune, t0), daemon=True).start()
 
-    def worker(text: str, rune: dict) -> None:
+    def worker(text: str, rune: dict, t0: float) -> None:
         msgs = chat_messages(chat, rune)
         rounds = 0
         first = ""
@@ -779,7 +817,8 @@ def chat_ui(verbose: bool = False) -> int:
         if cancel["flag"]:
             pending["cancelled"] = True
         elif pending["full"].strip():
-            chat.append(("assistant", pending["full"].strip()))
+            chat.append(("assistant", pending["full"].strip(),
+                         f"Thought for {time.time() - t0:.2f}s"))
         elif pending["err"]:
             chat.append(("assistant", f"(✦ pixie lost the connection: {pending['err']})"))
         pending["done"] = True
@@ -794,22 +833,22 @@ def chat_ui(verbose: bool = False) -> int:
         tw = art.term_width()
         th = art.term_height()
         rune = _RUNES[rune_idx]
-        chat_area = max(6, th - 8)
-        max_bw = min(tw - 8, (tw * 3) // 5)  # hard cap for bubbles
-        out: list[str] = []
-        gap = tw - 4  # between outer border chars
+        max_bw = min(tw - 8, (tw * 3) // 5)
+        gap = tw - 4
+        sections: list[list[str]] = []
 
         def push(blines: list[str], align: str) -> None:
-            if align == "left":
-                for ln in blines:
-                    out.append("│ " + ln + " " * (gap - art.vis_len(ln)) + " │")
-            elif align == "right":
-                for ln in blines:
-                    out.append("│ " + " " * (gap - art.vis_len(ln)) + ln + " │")
-            else:  # center
-                for ln in blines:
-                    lpad = max(0, (gap - art.vis_len(ln)) // 2)
-                    out.append("│ " + " " * lpad + ln + " " * (gap - lpad - art.vis_len(ln)) + " │")
+            sec: list[str] = []
+            for ln in blines:
+                w = art.vis_len(ln)
+                if align == "left":
+                    sec.append("│ " + ln + " " * max(0, gap - w) + " │")
+                elif align == "right":
+                    sec.append("│ " + " " * max(0, gap - w) + ln + " │")
+                else:
+                    lpad = max(0, (gap - w) // 2)
+                    sec.append("│ " + " " * lpad + ln + " " * max(0, gap - lpad - w) + " │")
+            sections.append(sec)
 
         for entry in chat:
             if entry[0] == "user":
@@ -817,56 +856,55 @@ def chat_ui(verbose: bool = False) -> int:
                 push(art.box(text, title="you", accent=P.BLUSH,
                              width=bubble_w_for(text, "you", max_bw)).splitlines(), "left")
             elif entry[0] == "assistant":
-                _, text = entry
-                push(art.box(text, title="Pixie ✦ " + time.strftime("%H:%M"), accent=P.BLUSH,
-                             width=bubble_w_for(text, "Pixie ✦ hh:mm", max_bw)).splitlines(), "right")
-            else:  # tool
+                text = entry[1]
+                ts = entry[2] if len(entry) > 2 else time.strftime("%H:%M")
+                push(art.box(text, title=f"Pixie ✦ {ts}", accent=P.BLUSH,
+                             width=bubble_w_for(text, f"Pixie ✦ {ts}", max_bw)).splitlines(), "right")
+            else:
                 _, title, body = entry
                 push(art.box(body, title=title, accent=P.PINK_DIM,
                              width=min(max_bw, tw - 8)).splitlines(), "center")
 
-        if busy:
-            if pending["tool"]:
-                fname, fargs, result, tool_s, tool_t0 = pending["tool"]
-                if result is None:
-                    body = f"Routing: {fname} -> {json.dumps(fargs)}"
-                    title = f"Calling tools ─ ✦ running {time.time() - tool_t0:.1f}s ✦"
-                else:
-                    body = tool_body(fname, fargs, result)
-                    title = f"Calling tools ─ ✦ thought for {tool_s:.2f}s ✦"
-                push(art.box(body, title=title,
-                             accent=P.PINK_DIM, width=max_bw).splitlines(), "center")
-                if pending["text"]:
-                    push(art.box(pending["text"], title="Pixie ✦ answering…", accent=P.BLUSH,
-                                 width=bubble_w_for(pending["text"], "Pixie ✦ a…", max_bw)).splitlines(), "right")
-            elif pending["live"] and pending["text"]:
-                push(art.box(pending["text"], title="Pixie ✦ thinking…", accent=P.BLUSH,
-                             width=bubble_w_for(pending["text"], "Pixie ✦ t…", max_bw)).splitlines(), "right")
-
-        # scroll to newest
-        while len(out) > chat_area:
-            out.pop(0)
-        while len(out) < chat_area:
-            out.append("")
-
-        if busy:
+        input_box_title = "Pixie is pondering" if busy else f"Pixie ✦ {rune['name']}"
+        if waking["flag"]:
+            input_box = art.box(art.pad_vis("✦ waking the menagerie brain…", tw - 8),
+                                title=input_box_title, width=tw - 4)
+        elif busy:
             phase = "thinking…"
             if pending["tool"]:
                 phase = f"calling {pending['tool'][0]}… ({time.time() - pending['tool'][4]:.1f}s)"
-            input_box = art.box(f"✦ {phase}", title="Pixie is pondering", width=tw - 4)
+            input_box = art.box(art.pad_vis(f"✦ {phase}", tw - 8),
+                                title=input_box_title, width=tw - 4)
         else:
-            content = buf if buf else f"✦ {rune['desc']} · enter casts · esc clears · q quits"
-            input_box = art.box(content, title="you" if buf else "ask", width=tw - 4)
-        out.extend(input_box.splitlines())
+            prompt_txt = f"✦ {buf}" if buf else f"✦ {rune['desc']} · ↑↓ scroll"
+            input_box = art.box(art.pad_vis(prompt_txt, tw - 8),
+                                title=input_box_title, width=tw - 4)
 
-        rune_parts = []
+        # footer shows the keybinding legend: ^r to switch modes, ctrl+r to switch agent mode
+        rune_parts = [art.paint("^r", P.BOLD, P.PINK)]
         for i, r in enumerate(_RUNES):
             style = (P.BOLD, P.BLUSH) if i == rune_idx else (P.SILVER,)
             rune_parts.append(art.paint(" ✦ " + r["name"] + " ", *style))
-        rune_line = "".join(rune_parts).strip()
-        out.extend(art.box(rune_line, title="Runes", width=tw - 4).splitlines())
+        rune_line = "".join(rune_parts).strip() + " · esc · q"
+        runes_box = art.box(rune_line, title="Runes", width=tw - 4)
 
-        return art.box(out, title=f"Pixie ✦ {rune['name']}", accent=P.BLUSH, width=tw)
+        # viewport: only show recent chat up to visible area
+        chat_area = max(3, th - 2 - len(input_box.splitlines()) - len(runes_box.splitlines()))
+        all_lines: list[str] = []
+        for sec in sections:
+            all_lines.extend(sec)
+        max_off = max(0, len(all_lines) - chat_area)
+        if view["off"] > max_off:
+            view["off"] = max_off
+        out = all_lines[view["off"] : view["off"] + chat_area]
+        while len(out) < chat_area:
+            out.append("")
+        out.extend(input_box.splitlines())
+        out.extend(runes_box.splitlines())
+
+        top = art.box("", title=f"Pixie ✦ {rune['name']}", width=tw).splitlines()[0]
+        bottom = art.box("", width=tw).splitlines()[-1]
+        return top + "\n" + "\n".join(out) + "\n" + bottom
 
     try:
         while True:
@@ -877,6 +915,24 @@ def chat_ui(verbose: bool = False) -> int:
                 art.tty_write(fd, art.clear_screen() + frame + "\n")
 
             key = art.tui_read_key(fd, timeout=0.05)
+            if not waking["flag"] and enter_pending:
+                enter_pending = False
+                if buf.strip():
+                    send(buf.strip())
+                    buf = ""
+                    continue
+            if key == "up":
+                view["off"] = max(0, view["off"] - 1)
+                continue
+            if key == "down":
+                view["off"] += 1
+                continue
+            if key == "pgup":
+                view["off"] = max(0, view["off"] - 5)
+                continue
+            if key == "pgdn":
+                view["off"] += 5
+                continue
             if busy and pending["done"]:
                 busy = False
                 cancel["flag"] = False
@@ -886,27 +942,33 @@ def chat_ui(verbose: bool = False) -> int:
                     break
                 if key in ("esc", "ctrl-c") and not pending["done"]:
                     cancel["flag"] = True
-                continue
+                    continue
             if key in ("q", "Q", "ctrl-c", "ctrl-d", "esc") and not buf:
                 break
-            if key in ("r", "R", "tab"):
+            if key == "ctrl-r":
+                rune_idx = (rune_idx + 1) % len(_RUNES)
+            elif key in ("tab",):
                 rune_idx = (rune_idx + 1) % len(_RUNES)
             elif key == "esc":
                 buf = ""
             elif key == "ctrl-u":
                 buf = ""
             elif key == "enter":
-                if buf.strip():
+                if waking["flag"]:
+                    enter_pending = True  # send once the brain wakes
+                elif buf.strip():
                     send(buf.strip())
                     buf = ""
             elif key == "backspace":
                 buf = buf[:-1]
+            elif key == "space":
+                buf += " "
             elif key and len(key) == 1 and key.isprintable():
                 buf += key
     finally:
         art.tui_cleanup()
+        unload_qwen()
     return 0
-
 
 def main() -> int:
     args = sys.argv[1:]
@@ -921,17 +983,15 @@ def main() -> int:
     if not args:
         return chat_ui(verbose)
 
-        
     user_input = " ".join(args)
     
-    # Start tracking the total pipeline execution time
-    total_start_time = time.time()
+    start_time = time.time()
     response = ask_pixie(user_input, verbose=verbose)
-    total_elapsed_time = time.time() - total_start_time
-    
+    total_elapsed_time = time.time() - start_time
+
     os.environ["PIXIE_UNICODE"] = "1"
     os.environ["LANG"] = "en_US.UTF-8"
-    
+
     try:
         home_bin = os.path.join(os.path.expanduser("~"), "bin")
         if home_bin not in sys.path:
@@ -939,10 +999,9 @@ def main() -> int:
             
         import fae_termart as art
         from fae_termart import Palette as P
-        
+
         clean_response = response.strip()
-        
-        # Enforce identical title layout benchmarks on the final conversational box
+
         print(art.box(
             clean_response,
             title=f"Pixie ─────── ✦ Thought for {total_elapsed_time:.2f}s",
