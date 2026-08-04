@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""ask — local offline agent (llama.cpp / pixie-llm) + tools (home-dir only).
+"""ask — local offline agent (llama.cpp / menagerie) + tools (home-dir only).
 
 Usage:
   ask "create ~/notes/todo.txt with a shopping list"
-  ask -m mistral "what is in my Downloads folder?"
+  ask -m qwen "what is in my Downloads folder?"
   ask --web "latest Arch security news"
   ask --search-only "query"          # snippets only, no model
 
-Requires: pixie-llm start   (llama.cpp on 127.0.0.1:8080)
+Requires: menagerie start   (llama.cpp on 127.0.0.1:8080)
 Env: PIXIE_LLM_URL=http://127.0.0.1:8080
 """
 from __future__ import annotations
@@ -30,22 +30,22 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-# Import pixie_termart for shared color palette
+# Import fae_termart for shared color palette
 import sys as _sys
 _sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art  # noqa: E402
+import fae_termart as art  # noqa: E402
 
-from pixie_termart import Palette as P, PIXIE_WAIT, PIXIE_SCREEN
+from fae_termart import Palette as P, PIXIE_WAIT, PIXIE_SCREEN
 
 # Force Unicode box drawing for smooth round corners
 os.environ["PIXIE_UNICODE"] = "1"
 
 HOME = Path.home().resolve()
-# Offline llama.cpp only (pixie-llm)
+# Offline llama.cpp only (menagerie)
 LLAMA = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
 DEFAULT_MODEL = os.environ.get(
     "ASK_MODEL",
-    os.environ.get("ASK_WEB_MODEL", os.environ.get("PIXIE_LLM_ALIAS", "mistral")),
+    os.environ.get("ASK_WEB_MODEL", os.environ.get("PIXIE_LLM_ALIAS", "qwen")),
 )
 MAX_ROUNDS = 12
 MAX_READ = 200_000
@@ -230,7 +230,7 @@ class PixieWaitDisplay:
         extra = self.extra or ""
         try:
             sys.path.insert(0, str(Path.home() / "bin"))
-            import pixie_termart as art  # type: ignore
+            import fae_termart as art  # type: ignore
 
             body = f"{f}  {label}{extra}"
             framed = art.box(
@@ -338,7 +338,7 @@ def _http_json(url: str, body: dict | None = None, timeout: float = 600) -> dict
 
 
 def llm_up() -> bool:
-    """True if llama-server (pixie-llm) answers on localhost."""
+    """True if llama-server (menagerie) answers on localhost."""
     for path in ("/health", "/v1/models"):
         try:
             with urllib.request.urlopen(f"{LLAMA}{path}", timeout=2) as r:
@@ -403,11 +403,11 @@ def llm_chat(model: str, messages: list[dict], temperature: float = 0.2) -> str:
     """Chat via offline llama.cpp (OpenAI-compatible, localhost only)."""
     if not llm_up():
         raise RuntimeError(
-            f"no local LLM: start offline server with `pixie-llm start` ({LLAMA})"
+            f"no local LLM: start offline server with `menagerie start` ({LLAMA})"
         )
     normalized = normalize_chat_messages(messages)
     body = {
-        "model": model or "mistral",
+        "model": model or "qwen",
         "messages": normalized,
         "temperature": temperature,
         "max_tokens": _pixie_max_tokens(),
@@ -1513,7 +1513,7 @@ def agent(
 def _term_width(default: int = 72) -> int:
     try:
         sys.path.insert(0, str(Path.home() / "bin"))
-        import pixie_termart as art  # type: ignore
+        import fae_termart as art  # type: ignore
 
         return art.term_width(default)
     except Exception:
@@ -1526,7 +1526,7 @@ def _term_width(default: int = 72) -> int:
 
 
 def _box(title: str, body: str, *, accent: str = P.PINK) -> str:
-    """Unicode masterpiece box (shared pixie_termart)."""
+    """Unicode masterpiece box (shared fae_termart)."""
     try:
         # Map ask accents → termart still uses pink family for chrome
         return art.box(
@@ -1616,7 +1616,7 @@ def main() -> int:
 
     if not llm_up():
         eprint("No local LLM is running.")
-        eprint("  Start offline server:  pixie-llm start")
+        eprint("  Start offline server:  menagerie start")
         eprint(f"  Expected URL:          {LLAMA}")
         return 1
 

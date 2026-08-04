@@ -1,6 +1,6 @@
 # FaeOS Plan
 
-**Last updated:** 2026-08-03
+**Last updated:** 2026-08-04
 **Status:** Active build toward v1.0 (Arch distro)
 **Location:** This file is the *single* main plan. Each app has its own short plan in `docs/plans/`; this file stays concise.
 
@@ -17,7 +17,7 @@
 - Offline by default; online features degrade gracefully (trove, mail, search).
 - No telemetry, no analytics, no phone-home. Cloud sync / mobile / GUI-first are **anti-goals**.
 - Secrets never committed (`netherweave.env`, mail URLs with passwords, `auth.json`, Wi-Fi keys).
-- One shared TUI layer (`pixie_termart` `tui_*`), one screen policy (`pixie-screen`), one key map.
+- One shared TUI layer (`fae_termart` `tui_*`), one screen policy (`pixie-screen`), one key map.
 - Each app: own plan + own section in `scroll` (except easter eggs — see Kur).
 
 ## App Registry
@@ -36,9 +36,50 @@
 | **Magpie** | Browser/search (privacy, DDG) | search stable; browse in progress | [docs/plans/magpie.md](docs/plans/magpie.md) |
 | **Scry** | Command/output history (Shift-Tab visions) | stable | [docs/plans/scry.md](docs/plans/scry.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
+| **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
 
-**Infrastructure (not apps, shared):** `pixie_termart.py` (shared TUI layer), `pixie-screen` (clear policy, see [docs/screen-policy.md](docs/screen-policy.md)), `pixie-llm` (+`pixie-llm-run`, llama.cpp profiles, sleep-idle), `ia.py` (Internet Archive engine for siren trove), `starship-*` prompt widgets, `install.sh`, systemd user units.
+**Infrastructure (not apps, shared):** `fae_termart.py` (shared TUI layer), `pixie-screen` (clear policy, see [docs/screen-policy.md](docs/screen-policy.md)), `menagerie` (+`menagerie-run`, llama.cpp profiles, sleep-idle), `spellbook` (shared file picker: `--pick --output` for other apps), `ia.py` (Internet Archive engine for siren trove), `starship-*` prompt widgets, `install.sh`, systemd user units.
+
+## Missing OS essentials (to conjure)
+
+A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals — rename freely.
+
+**Tier 1 — everyday essentials:**
+| App | fae name | Role |
+|-----|----------|------|
+| Quick launcher | Summon | dmenu-style: type a command → run |
+| Notes | Grimoire | markdown notes, pages, tags |
+| Package frontend | Alchemy | pacman menu: brew (install) / sip (update) / distill (clean) |
+| Task manager | The Eye | htop-like: CPU/RAM/disk/processes/kill |
+| To-dos | Quests | todo.txt-style questlog, due dates |
+| Clipboard history | Imbue | copy memory, re-paste |
+| Screenshots | Reflection | region/window/full → gallery |
+| Calculator | Abacus | REPL calc, `abacus "2+2"` from prompt |
+| Disk usage | Vault | ncdu-like treasure map |
+| Timer/pomodoro | Hourglass | countdowns, alarms, break (links to Zen) |
+| Password manager | Crypt | pass-based, gpg vault |
+
+**Tier 2 — strong QOL:**
+| App | fae name | Role |
+|-----|----------|------|
+| RSS | Raven | news reader |
+| Dictionary | Lexicon | offline words |
+| Weather | Weatherglass | 5-day forecast |
+| Calendar | Almanac | agenda + reminders |
+| Image viewer | Prism | terminal images (chafa/kitty) |
+| Archive manager | Coffer | zip/tar/7z with preview |
+| Log viewer | Chronicle | journalctl, plain words |
+| Backups | Phylactery | snapshots + restore |
+| Firewall | Bulwark | rules menu |
+| Bookmarks | Lore | front-end for Magpie |
+| eBook reader | Tome ✅ (docs now; epub next) | reads markdown/text, epub planned |
+| QR codes | Sigil | wifi creds etc. in seconds |
+| File search | Seek | instant home-wide search |
+
+**Tier 3 — flavor + niche:** Mantle (theme switcher), Tales (podcasts, or into Siren), Tongues (offline translate), Gale (speed test), Lunacy (moon), Proverbs (login motd), Hearth (IRC), Immolation (secure wipe), Puppeteer (systemd unit manager), Scriptorium (screen record).
+
+**Infra gaps (not apps):** clipboard daemon, tmux defaults, autologin + silent boot, LUKS setup, pipewire tuning — the installer layer (Phase 2).
 
 ## Roadmap
 
@@ -63,7 +104,17 @@
 
 ## Log
 
-- **2026-08-03** — Single main plan created (`faeOSplan.md`), per-app plans under `docs/plans/`; ROADMAP.md folded in. App registry completed (scry/zen/tick/Wizard's Tower added to the list). Kur hidden from scroll (easter egg). LLM profiles decided: Pixie = qwen coder (2.1GB, being downloaded), Kur = smollm2-360m on 8081. LLM sleep-idle (300s) shipped in `pixie-llm`/`pixie-llm-run` + systemd unit (ctx 4096). All six TUIs migrated to shared layer (ether/scroll/siren/scry/goblin/spellbook). SIREN plan marked v1.1 (queue, playlists, repeat, progress done).
+- **2026-08-04 (qwen3)** — **Pixie's model upgraded to qwen3-4b** (unsloth 2507 Q4_K_M, 2.5GB, `qwen3-4b-instruct-q4_k_m.gguf`). Root-caused the stalled downloads: my `pkill -f` patterns were killing their own shells, and hf's xet transfer hangs here — `HF_HUB_DISABLE_XET=1` restores the 8-stream HTTP download (~5.8MB/s, done in 6 min). `menagerie-run` + `menagerie` now prefer qwen3-4b, fall back to qwen2.5-3b/coder; pixie's `API_URL` follows `PIXIE_LLM_PORT`. Verified: Build-mode TUI created a real file (`write_local_file` first try, byte-exact), self-corrected an unknown `uname` call into `read_local_file /proc/version` (real path, grounded answer), one-shot still fine. Tool armor now only catches rare slips instead of every turn.
+- **2026-08-04 (runes)** — **Pixie chat grows Runes** (agent modes, `r`/`tab` to switch): Chat / Deep (internet research w/ sources) / Build (coding agent) / Plan (investigate-only). Dynamic content-sized bubbles, `╭─ ✦ Runes ✦ ╮` footer, per-mode system prompts with a shared cute pixie persona (playful before/after, pure-JSON tool calls). Chat migrated to `/v1/chat/completions` (proper roles incl. `tool`). Small-model armor: narrated tool calls extracted from prose, Cline-style tool/arg aliases (`code_editor`→`write_local_file`…), corrective errors for unknown tools, 3x-repeat guard, 6-round cap. `web_research` falls back DDG html → lite → Wikipedia API (DDG bot-blocks scrapers here). **Finding: qwen2.5-coder-3b is ~30% reliable at agentic tool loops — model upgrade flagged in pixie plan** (qwen3-4b has native tool calls).
+- **2026-08-04 (chat)** — **Pixie grows a classic assistant chat TUI**: bare `pixie` now launches the bubbled chat (user bubble left, Pixie bubble right with `✦ time ✦`, tool-call box centered with `thought for Xs`, live token streaming from menagerie's SSE endpoint, helper line vanishes once typing starts, esc clears / q quits / ctrl-c cancels). One-shot `pixie "…"` mode unchanged. Tool intercept reused from ask: hidden JSON intent → tool box → streamed final answer. Verified under pty harness at 53 cols with a live `manage_systemd_service` call.
+- **2026-08-04** — **Spellbook** gains `--pick --output` mode (shared file picker, like Windows common dialog). **Tome** integrates it: `tome` (no args) or `tome <dir>` opens spellbook picker; `o` key in read mode opens another file via picker. `tui_suspend`/`tui_resume` bridges the TTY handoff. Infrastructure now lists spellbook as shared file picker.
+- **2026-08-04 (fix)** — **Picker integration hardened** after `tome` "did nothing" on bare launch: spellbook's open/pick key was only `o`/`→`/`l` — **enter now opens/picks** (footer updated). Tome's `pick_file_via_spellbook` guards pty I/O against EIO when the child exits (previously the picked file was never read back), sizes the child pty via `TIOCSWINSZ` (forkpty starts at 0×0), and prints a real message instead of silently exiting when nothing is picked. No-TTY fallback message now says *file not found here* instead of a misleading TTY error. Verified end-to-end with a pty harness.
+- **2026-08-04 (root cause)** — **`tome` silent-death on real terminal found**: the minimum-size gate (60×20) killed `tome` instantly on terminals under 61 cols — the "terminal too small" message was written to the alt screen and wiped by cleanup before it could be read. User's terminal is 53 cols. Gate lowered to 40×12 (unreachable under termart's 44×12 floors, so it never blocks) and the failure path now waits for a key + echoes to stderr instead of vanishing.
+- **2026-08-04 (arrows)** — **picker keys broken in real terminal**: `pick_file_via_spellbook` called `tui_suspend()`, cooking the parent terminal (ECHO on, ICANON line-buffering) for the whole picker session — arrow keys echoed as `^[` garbage and were buffered until Enter. Removed suspend/resume (child has its own pty; parent only forwards raw bytes) and set the child pty to cbreak right after `forkpty` to close the startup echo window. Arrows now navigate live; verified at 53 cols (3× down → enter → reader opens on `Tome — faeOSplan.md`).
+- **2026-08-04 (theme+back)** — **Tome themed + history**: tome was the only app not setting `PIXIE_UNICODE=1`, so its frames fell back to ASCII `+- * ... * -+` (other apps set it at startup). Now fancy `╭─ ✦ Tome — file.md ✦ ╮` like the rest of faeOS. Reader gained a back-stack: `o` opens another file (picker now starts in the current file's directory) and pushes the current doc; `b` returns to the previous file; footer + plan updated.
+- **2026-08-03 (night)** — **Tome** v0.1: document reader, first of the **Scriptorium** office pack. Markdown renderer (headings/bullets/quotes/tables/code/inline), `/` search with highlight + `n/N`, Tab contents (heading jumps), dir browse mode; format registry for pdf/epub later. `box()` upgraded: pre-styled body lines now keep their colors (all apps benefit). Registered in scroll + registry + [docs/plans/tome.md](docs/plans/tome.md).
+- **2026-08-03 (evening)** — AI brain renamed **pixie-llm → menagerie** (3-port: qwen 8080 · kur 8081 · imp 8082); old name kept as symlink. Mistral-7b **removed** (qwen coder is the model); `fae_termart.py` rename (shared TUI layer). Ether gained the **Conjuring** panel (live download list with siren-style bars, `<name>.size` sidecar convention). All `box()` titles now double-starred by termart (`✦ Title ✦`). Missing-OS-essentials list added to this file. Qwen2.5-Coder 3B download in progress (8 parallel streams, ~35%).
+- **2026-08-03** — Single main plan created (`faeOSplan.md`), per-app plans under `docs/plans/`; ROADMAP.md folded in. App registry completed (scry/zen/tick/Wizard's Tower added to the list). Kur hidden from scroll (easter egg). LLM profiles decided: Pixie = qwen coder (2.1GB, being downloaded), Kur = smollm2-360m on 8081. LLM sleep-idle (300s) shipped in `menagerie`/`menagerie-run` + systemd unit (ctx 4096). All six TUIs migrated to shared layer (ether/scroll/siren/scry/goblin/spellbook). SIREN plan marked v1.1 (queue, playlists, repeat, progress done).
 - **2026-08-02** — Initial commit of ecosystem; TUIs consolidated onto shared layer.
 
 ## Docs layout

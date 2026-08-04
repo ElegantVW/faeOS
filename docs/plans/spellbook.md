@@ -6,6 +6,7 @@
 
 ## Current
 - `spellbook [dir]` — TUI: j/k/↑↓ move, l/o open, h parent, ? help, s sort, . hidden, n/d/r/e dialogs
+- `spellbook --pick --output <file> [dir]` — **shared file picker**: choose a file, write path to `<file>`, exit (other apps call this)
 - Sort by name/date/size/type; input() dialogs use `tui_suspend`/`tui_resume`
 - Runs on shared `tui_*` layer (alt screen + hold)
 

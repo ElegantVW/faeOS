@@ -1,0 +1,693 @@
+#!/usr/bin/env python3
+"""tome — faeOS document reader (first of the Scriptorium pack).
+
+tome <file>       read a document (markdown / plain text today)
+tome              browse readable files in the current directory
+tome --help       this
+
+Keys:
+  j/k or up/down     scroll                         g/G    top/bottom
+  space / pagedown   page down                      n/N    next/prev search hit
+  ctrl-u / pageup    page up                        /      search
+  Tab                table of contents (headings)   o      open another file
+  b                  back to previous file          q/esc  quit
+
+Growth: FORMATS is a registry — add a (label, renderer) per suffix
+(pdf/epub/html…) and Tome grows with it. Styling lives in fae_termart.
+"""
+
+import argparse
+import fcntl
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+
+os.environ.setdefault("PIXIE_UNICODE", "1")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[0])))
+sys.path.insert(0, os.path.expanduser("~/.local/bin"))
+sys.path.insert(0, os.path.expanduser("~/bin"))
+sys.path.insert(0, os.path.expanduser("~/faeos/bin"))
+try:
+    import fae_termart as art
+except ImportError:
+    print("tome: cannot import fae_termart (deploy it to ~/bin)", file=sys.stderr)
+    raise SystemExit(1)
+
+P = art.P
+
+# ---------------------------------------------------------------------------
+# format registry — extend with (label, renderer) per suffix
+# renderer(text) -> list[Line];  Line = (plain, runs); runs = [(txt, style)]
+# ---------------------------------------------------------------------------
+
+
+def render_text(text: str) -> list:
+    return [(raw.rstrip(), [(raw.rstrip(), (P.SILVER,))]) for raw in text.splitlines()]
+
+
+INLINE = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`|\[[^\]\n]+\]\([^)]*\)|\*[^*]+\*)")
+HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+BULLET = re.compile(r"^(\s*)([-*+])\s+(.*)$")
+NUMB = re.compile(r"^(\s*)(\d+[.)])\s+(.*)$")
+QUOTE = re.compile(r"^(\s*)>\s?(.*)$")
+TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
+TABLE_SEP = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
+
+
+def _style_inline(s: str, base: tuple = (P.SILVER,)) -> list:
+    runs = []
+    for part in INLINE.split(s):
+        if not part:
+            continue
+        if part.startswith("**") and part.endswith("**"):
+            runs.append((part[2:-2], (P.BOLD, P.PINK)))
+        elif part.startswith("`") and part.endswith("`"):
+            runs.append((part[1:-1], (P.PINK_DIM,)))
+        elif part.startswith("[") and "](" in part:
+            m = re.fullmatch(r"\[([^\]]*)\]\(([^)]*)\)", part)
+            if m:
+                runs.append((m.group(1), (P.BOLD, P.PINK)))
+                runs.append((f"  →{m.group(2)}", (P.MUTED,)))
+            else:
+                runs.append((part, base))
+        elif part.startswith("*") and part.endswith("*"):
+            runs.append((part[1:-1], (P.ITALIC,)))
+        else:
+            runs.append((part, base))
+    return runs or [("", base)]
+
+
+def _table_block(rows: list) -> list:
+    cells = [[c.strip() for c in r.group(1).split("|")] for r in rows]
+    widths = [max(len(cells[j][i]) for j in range(len(cells)) if i < len(cells[j]))
+              for i in range(max(len(r) for r in cells))]
+    out = []
+    for j, row in enumerate(cells):
+        style = (P.BOLD, P.PINK) if j == 0 else (P.SILVER,)
+        txt = "│ ".join(c.ljust(widths[i]) for i, c in enumerate(row))
+        out.append((txt, [(txt, style)]))
+        if j == 0:
+            rule = "─┼─".join("─" * w for w in widths)
+            out.append((rule, [(rule, (P.MUTED,))]))
+    return out
+
+
+def render_markdown(text: str) -> list:
+    lines: list = []
+    i = 0
+    src = text.splitlines()
+    in_fence = False
+    while i < len(src):
+        raw = src[i].rstrip()
+        s = raw.strip()
+
+        if s.startswith("```"):
+            in_fence = not in_fence
+            i += 1
+            continue
+        if in_fence:
+            lines.append((raw, [(raw, (P.MUTED,))]))
+            i += 1
+            continue
+
+        m = HEADING.match(s)
+        if m:
+            level = len(m.group(1))
+            style = {1: (P.BOLD, P.PINK), 2: (P.BOLD, P.PINK_DIM),
+                     3: (P.BOLD, P.MUTED)}.get(level, (P.MUTED,))
+            plain = "  " * level + m.group(2)
+            lines.append((plain, [(plain, style)], {"heading": (level, m.group(2))}))
+            i += 1
+            continue
+
+        if s in ("---", "***", "___"):
+            lines.append(("", [("─" * 40, (P.MUTED,))]))
+            i += 1
+            continue
+
+        m = QUOTE.match(raw)
+        if m:
+            runs = [("  │ ", (P.MUTED,))] + _style_inline(m.group(2), (P.ITALIC, P.DARK))
+            lines.append(("  │ " + m.group(2), runs))
+            i += 1
+            continue
+
+        if s.startswith("|"):
+            rows = []
+            j = i
+            while j < len(src):
+                r = src[j].rstrip()
+                if TABLE_SEP.match(r):
+                    j += 1
+                    continue
+                m2 = TABLE_ROW.match(r)
+                if m2:
+                    rows.append(m2)
+                    j += 1
+                    continue
+                break
+            if len(rows) >= 2:
+                lines.extend(_table_block(rows))
+                i = j
+                continue
+
+        m = BULLET.match(raw)
+        if m:
+            indent = "    " * (len(m.group(1)) // 2)
+            body = m.group(3)
+            lines.append((f"{indent}  ·  {body}",
+                          [(f"{indent}  ·  ", (P.PINK_DIM,))] + _style_inline(body)))
+            i += 1
+            continue
+
+        m = NUMB.match(raw)
+        if m:
+            indent = "    " * (len(m.group(1)) // 2)
+            body = m.group(3)
+            lines.append((f"{indent}  {m.group(2)}  {body}",
+                          [(f"{indent}  {m.group(2)}  ", (P.PINK_DIM,))] + _style_inline(body)))
+            i += 1
+            continue
+
+        lines.append((s, _style_inline(s) if s else []))
+        i += 1
+
+    if not lines:
+        lines = render_text(text)
+    return lines
+
+
+FORMATS = {
+    ".md": ("Markdown", render_markdown),
+    ".markdown": ("Markdown", render_markdown),
+    ".txt": ("Text", render_text),
+    ".log": ("Text", render_text),
+}
+READABLE = tuple(FORMATS)
+
+
+def load_doc(path: str) -> tuple[list, str | None]:
+    try:
+        with open(path, "r", errors="replace") as fh:
+            text = fh.read()
+    except OSError as e:
+        return [], f"tome: cannot open {path}: {e}"
+    ext = os.path.splitext(path)[1].lower()
+    renderer = FORMATS.get(ext, render_text)[1]
+    return renderer(text), None
+
+
+def pick_file_via_spellbook(fd, start_dir: str | None = None) -> str | None:
+    # NOTE: no tui_suspend() here — the child runs in its own pty, and the
+    # parent fd must STAY in cbreak so keystrokes pass through raw. Cooking
+    # the terminal (echo + line buffering) made arrow keys echo as ^[ garbage
+    # and buffer until Enter.
+    try:
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tf:
+            out_path = tf.name
+        try:
+            cmd = ["spellbook", "--pick", "--output", out_path]
+            if start_dir:
+                cmd.append(start_dir)
+            # Fork a child with a proper PTY so spellbook gets a TTY
+            pid, child_fd = os.forkpty()
+            if pid == 0:
+                # Child: run spellbook
+                os.execvp(cmd[0], cmd)
+            else:
+                # Parent: size the child pty (forkpty starts at 0x0) and put it
+                # in cbreak immediately so startup input is never echoed/buffered
+                try:
+                    w, h = art.term_width(), art.term_height()
+                    fcntl.ioctl(child_fd, termios.TIOCSWINSZ,
+                                struct.pack("HHHH", h, w, 0, 0))
+                except OSError:
+                    pass
+                try:
+                    import tty as _tty
+                    _tty.setcbreak(child_fd)
+                except Exception:
+                    pass
+                import select
+                try:
+                    while True:
+                        r, _, _ = select.select([fd, child_fd], [], [], 0.1)
+                        if fd in r:
+                            try:
+                                data = os.read(fd, 1024)
+                            except OSError:
+                                break  # user terminal closed
+                            if data:
+                                try:
+                                    os.write(child_fd, data)
+                                except OSError:
+                                    break  # child already gone
+                        if child_fd in r:
+                            try:
+                                data = os.read(child_fd, 1024)
+                            except OSError:
+                                break  # child exited and closed its side
+                            if data:
+                                try:
+                                    os.write(fd, data)
+                                except OSError:
+                                    break  # user terminal closed
+                        # Check if child exited
+                        pid_done, status = os.waitpid(pid, os.WNOHANG)
+                        if pid_done:
+                            break
+                finally:
+                    os.close(child_fd)
+                if os.path.exists(out_path):
+                    with open(out_path, "r") as f:
+                        path = f.read().strip()
+                    if path:
+                        return path
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+    except Exception as e:
+        print(f"tome: spellbook picker failed: {e}", file=sys.stderr)
+    return None
+
+
+def find_headings(lines: list) -> list:
+    heads = []
+    for idx, line in enumerate(lines):
+        if len(line) > 2 and line[2].get("heading"):
+            level, title = line[2]["heading"]
+            heads.append((idx, level, title))
+    return heads
+
+
+# ---------------------------------------------------------------------------
+# row wrapping + highlight
+# ---------------------------------------------------------------------------
+
+def wrap_runs(runs: list, width: int) -> list:
+    """runs [(txt, style)] -> rows of char-runs, wrapped to `width`."""
+    out = []
+    row: list = []
+    row_len = 0
+    for txt, style in runs:
+        for ch in txt:
+            w = art._char_width(ch)
+            if row_len + w > width and row:
+                out.append(row)
+                row, row_len = [], 0
+            row.append((ch, style))
+            row_len += w
+    if row or not out:
+        out.append(row)
+    return out
+
+
+def row_text(row: list) -> str:
+    return "".join(t for t, _s in row)
+
+
+def row_styled(row: list, cre: re.Pattern | None) -> str:
+    out = []
+    i = 0
+    while i < len(row):
+        j = i
+        while j < len(row) and row[j][1] == row[i][1]:
+            j += 1
+        txt = "".join(t for t, _s in row[i:j])
+        style = row[i][1]
+        if cre is None:
+            out.append(art.paint(txt, *style))
+        else:
+            last = 0
+            for m in cre.finditer(txt):
+                out.append(art.paint(txt[last:m.start()], *style))
+                out.append(art.paint(m.group(), P.BOLD, P.PINK))
+                last = m.end()
+            out.append(art.paint(txt[last:], *style))
+        i = j
+    return "".join(out)
+
+
+def pad_to(styled: str, width: int) -> str:
+    n = art.vis_len(art.strip_ansi(styled))
+    return styled + " " * max(0, width - n)
+
+
+# ---------------------------------------------------------------------------
+# TUI
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="tome", description="faeOS document reader (Scriptorium)")
+    ap.add_argument("file", nargs="?")
+    args = ap.parse_args()
+
+    fd = art.tui_open_tty()
+    if fd is None:
+        # Fallback: simple non-TUI output
+        def readable(f: str) -> bool:
+            return os.path.splitext(f)[1].lower() in READABLE and os.path.isfile(os.path.join(".", f))
+        if args.file and os.path.isfile(args.file):
+            lines, err = load_doc(args.file)
+            if err:
+                print(err, file=sys.stderr)
+                return 1
+            for line in lines:
+                plain = line[0]
+                print(plain)
+            return 0
+        elif not args.file:
+            # No TTY, no args: list readable files and exit
+            base_dir = "."
+            files = sorted(f for f in os.listdir(".") if os.path.splitext(f)[1].lower() in READABLE and os.path.isfile(f))
+            if files:
+                print("Readable documents in current directory:")
+                for i, f in enumerate(files, 1):
+                    print(f"  {i}. {f}")
+                print("\nRun 'tome <file>' to read, or use a terminal with TTY for interactive mode.")
+            else:
+                print("No readable documents found in current directory.")
+            return 0
+        print(f"tome: cannot read {args.file}: no TTY for interactive mode and file not found here.", file=sys.stderr)
+        return 2
+    art.tui_begin(fd, "tome")
+
+    # Minimum terminal size check — failure must be VISIBLE, never silent.
+    min_w, min_h = 40, 12
+    if art.term_width() < min_w or art.term_height() < min_h:
+        msg = f"Terminal too small for Tome (need at least {min_w}x{min_h}, got {art.term_width()}x{art.term_height()}).\nResize the window and try again.\n\n(press any key to continue)"
+        art.tty_write(fd, art.clear_screen() + msg + "\n")
+        try:
+            art.tui_read_key(fd, timeout=2.5)
+        except Exception:
+            pass
+        art.tui_cleanup()
+        print(f"tome: terminal too small ({art.term_width()}x{art.term_height()}, need {min_w}x{min_h}).", file=sys.stderr)
+        return 1
+
+    files: list[str] = []
+    base_dir = args.file if args.file and os.path.isdir(args.file) else "."
+    doc_label = "tome"
+    cur_path: str | None = None
+    history: list[tuple[str, str | None, list]] = []  # (label, path, lines) of previous docs
+    raw_lines: list = []
+
+    def readable(f: str) -> bool:
+        return os.path.splitext(f)[1].lower() in READABLE and os.path.isfile(os.path.join(base_dir, f))
+
+    if args.file and os.path.isfile(args.file):
+        lines, err = load_doc(args.file)
+        if err:
+            art.tty_write(fd, art.clear_screen() + err + "\n")
+            art.tui_cleanup()
+            return 1
+        raw_lines = lines
+        doc_label = os.path.basename(args.file)
+        cur_path = os.path.abspath(args.file)
+        mode = "read"
+    elif args.file and os.path.isdir(args.file):
+        # Directory given — let spellbook pick a file
+        picked = pick_file_via_spellbook(fd, args.file)
+        if not picked:
+            art.tui_cleanup()
+            print("tome: no file picked (spellbook cancelled or failed).", file=sys.stderr)
+            return 1
+        lines, err = load_doc(picked)
+        if err:
+            art.tty_write(fd, art.clear_screen() + err + "\n")
+            art.tui_cleanup()
+            return 1
+        raw_lines = lines
+        doc_label = os.path.basename(picked)
+        cur_path = picked
+        mode = "read"
+    else:
+        # No args — let spellbook pick a file
+        picked = pick_file_via_spellbook(fd, ".")
+        if not picked:
+            art.tui_cleanup()
+            print("tome: no file picked (spellbook cancelled or failed).", file=sys.stderr)
+            return 1
+        lines, err = load_doc(picked)
+        if err:
+            art.tty_write(fd, art.clear_screen() + err + "\n")
+            art.tui_cleanup()
+            return 1
+        raw_lines = lines
+        doc_label = os.path.basename(picked)
+        cur_path = picked
+        mode = "read"
+
+    ui = {
+        "mode": mode, "offset": 0,
+        "search": "", "matches": [], "match_idx": -1,
+        "toc": [], "toc_sel": 0, "prompt": "",
+        "rows": [], "width": 0, "height": 0,
+    }
+
+    def build_rows(width: int) -> None:
+        body_w = max(20, width - 4)
+        rows = []
+        for line in raw_lines:
+            runs = line[1] if len(line) > 1 else None
+            if not runs:
+                runs = [("", (P.SILVER,))]
+            rows.extend(wrap_runs(runs, body_w))
+        ui["rows"] = rows
+
+    def body_h() -> int:
+        return max(1, ui["height"] - 6)  # Reserve space for header + footer + margins
+
+    def total_rows() -> int:
+        return len(ui["rows"])
+
+    def clamp(offset: int) -> int:
+        return max(0, min(offset, max(0, total_rows() - body_h())))
+
+    def jump_to_match(match_idx: int) -> None:
+        matches = ui["matches"]
+        if not matches:
+            return
+        ui["match_idx"] = match_idx % len(matches)
+        ui["offset"] = clamp(ui["matches"][ui["match_idx"]] - body_h() // 2)
+
+    def jump_to_heading(toc_idx: int) -> None:
+        ui["offset"] = clamp(ui["toc"][toc_idx][0] - 2)
+
+    def draw() -> str:
+        width = art.term_width()
+        ui["height"] = art.term_height()
+        body_w = max(20, width - 2)
+        if width != ui["width"]:
+            ui["width"] = width
+            build_rows(width)
+
+        if ui["mode"] == "browse":
+            n = len(files)
+            start = max(0, min(ui["sel"] - body_h() // 2, max(0, n - body_h())))
+            shown = []
+            for k in range(start, min(start + body_h(), n)):
+                name = files[k]
+                if k == ui["sel"]:
+                    shown.append("  " + art.paint("→", P.PINK) + "  " + art.paint(name, P.BOLD, P.PINK))
+                else:
+                    shown.append("  ·  " + art.paint(name, P.SILVER))
+            frame = art.box(shown or ["(empty)"], title="Tome", width=width)
+            footer = art.box([f"j/k pick · enter read · q quit   —  {n} documents"],
+                             title="browse", width=width, body_style=(P.MUTED,))
+            return frame + "\n\n" + footer
+
+        if ui["mode"] == "toc":
+            toc = ui["toc"]
+            shown = []
+            for k in range(min(len(toc), body_h())):
+                _idx, level, title = toc[k]
+                if k == ui["toc_sel"]:
+                    shown.append("  " + art.paint("→", P.PINK) + "  " + "  " * (level - 1)
+                                 + art.paint(title, P.BOLD, P.PINK))
+                else:
+                    shown.append("  ·  " + "  " * (level - 1) + art.paint(title, P.SILVER))
+            frame = art.box(shown or ["no headings"], title="contents", width=width)
+            footer = art.box(["j/k pick · enter jump · esc back"], title="Tome",
+                             width=width, body_style=(P.MUTED,))
+            return frame + "\n\n" + footer
+
+        if ui["mode"] == "search":
+            frame = art.box([f"  / {ui['prompt']}█",
+                             "",
+                             art.paint(f"  {len(ui['matches'])} matches so far", P.MUTED)],
+                            title="search", width=width)
+            footer = art.box(["type to search · enter jump · esc cancel"], title="Tome",
+                             width=width, body_style=(P.MUTED,))
+            return frame + "\n\n" + footer
+
+        offset = clamp(ui["offset"])
+        ui["offset"] = offset
+        cre = None
+        if ui["search"]:
+            try:
+                cre = re.compile(re.escape(ui["search"]), re.IGNORECASE)
+            except re.error:
+                cre = None
+        body = []
+        for r in range(offset, min(offset + body_h(), total_rows())):
+            body.append(row_styled(ui["rows"][r], cre))
+
+        pct = 100 * (offset + body_h()) // max(1, total_rows())
+        status = f" {pct}% · {offset + 1}-{min(offset + body_h(), total_rows())}/{total_rows()}"
+        if ui["search"]:
+            status += f" · “{ui['search']}” {max(1, ui['match_idx'] + 1)}/{max(1, len(ui['matches']))}"
+        frame = art.box(body, title=f"Tome — {doc_label}", width=width)
+        footer = art.box([f"j/k scroll · / search · Tab contents · o open · b back · q quit     {status}"],
+                         title="read", width=width, body_style=(P.MUTED,))
+        return frame + "\n\n" + footer
+
+    def refresh_search() -> None:
+        ui["matches"] = []
+        if not ui["search"]:
+            return
+        try:
+            cre = re.compile(re.escape(ui["search"]), re.IGNORECASE)
+        except re.error:
+            return
+        for r in range(total_rows()):
+            if cre.search(row_text(ui["rows"][r])):
+                ui["matches"].append(r)
+        ui["match_idx"] = -1
+        if ui["matches"]:
+            jump_to_match(0)
+
+    try:
+        while True:
+            frame = draw()
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                art.tty_write(fd, art.clear_screen() + frame + "\n")
+
+            key = art.tui_read_key(fd, timeout=0.2)
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                break
+
+            if ui["mode"] == "browse":
+                if key in ("j", "down"):
+                    ui["sel"] = (ui["sel"] + 1) % len(files)
+                elif key in ("k", "up"):
+                    ui["sel"] = (ui["sel"] - 1) % len(files)
+                elif key in ("enter", "space"):
+                    chosen = os.path.join(base_dir, files[ui["sel"]])
+                    lines, err = load_doc(chosen)
+                    if not err:
+                        raw_lines = lines
+                        doc_label = os.path.basename(chosen)
+                        ui["mode"] = "read"
+                        ui["offset"], ui["width"] = 0, 0
+                        ui["search"], ui["matches"] = "", []
+                continue
+
+            if ui["mode"] == "toc":
+                if key in ("esc", "q", "tab"):
+                    ui["mode"] = "read"
+                elif key in ("j", "down"):
+                    ui["toc_sel"] = (ui["toc_sel"] + 1) % len(ui["toc"])
+                elif key in ("k", "up"):
+                    ui["toc_sel"] = (ui["toc_sel"] - 1) % len(ui["toc"])
+                elif key in ("enter", "space"):
+                    jump_to_heading(ui["toc_sel"])
+                    ui["mode"] = "read"
+                continue
+
+            if ui["mode"] == "search":
+                if key in ("esc", "ctrl-c"):
+                    ui["prompt"] = ""
+                    ui["mode"] = "read"
+                    ui["search"] = ""
+                    ui["matches"] = []
+                elif key == "enter":
+                    ui["search"] = ui["prompt"]
+                    refresh_search()
+                    ui["mode"] = "read"
+                elif key == "backspace":
+                    ui["prompt"] = ui["prompt"][:-1]
+                elif len(key) == 1 and key.isprintable():
+                    ui["prompt"] += key
+                continue
+
+            bh = body_h()
+            if key in ("j", "down"):
+                ui["offset"] = clamp(ui["offset"] + 1)
+            elif key in ("k", "up"):
+                ui["offset"] = clamp(ui["offset"] - 1)
+            elif key in ("space", "pagedown", "ctrl-d"):
+                ui["offset"] = clamp(ui["offset"] + bh)
+            elif key in ("pageup", "ctrl-u"):
+                ui["offset"] = clamp(ui["offset"] - bh)
+            elif key == "g":
+                ui["offset"] = 0
+            elif key == "G":
+                ui["offset"] = clamp(10 ** 9)
+            elif key == "tab":
+                ui["toc"] = find_headings(raw_lines)
+                ui["toc_sel"] = 0
+                ui["mode"] = "toc"
+            elif key == "/":
+                ui["prompt"] = ""
+                ui["mode"] = "search"
+            elif key == "o":
+                # Open another file — picker starts in the current file's directory
+                start_dir = os.path.dirname(cur_path) if cur_path else "."
+                picked = pick_file_via_spellbook(fd, start_dir)
+                if picked:
+                    lines, err = load_doc(picked)
+                    if not err:
+                        history.append((doc_label, cur_path, raw_lines))
+                        if len(history) > 50:
+                            history.pop(0)
+                        raw_lines = lines
+                        doc_label = os.path.basename(picked)
+                        cur_path = picked
+                        ui["offset"], ui["width"] = 0, 0
+                        ui["search"], ui["matches"] = "", []
+            elif key == "b":
+                # Go back: previous file if we have history, else reopen the picker
+                if history:
+                    doc_label, cur_path, raw_lines = history.pop()
+                    ui["offset"], ui["width"] = 0, 0
+                    ui["search"], ui["matches"] = "", []
+                else:
+                    start_dir = os.path.dirname(cur_path) if cur_path else "."
+                    picked = pick_file_via_spellbook(fd, start_dir)
+                    if picked and picked != cur_path:
+                        lines, err = load_doc(picked)
+                        if not err:
+                            history.append((doc_label, cur_path, raw_lines))
+                            if len(history) > 50:
+                                history.pop(0)
+                            raw_lines = lines
+                            doc_label = os.path.basename(picked)
+                            cur_path = picked
+                            ui["offset"], ui["width"] = 0, 0
+                            ui["search"], ui["matches"] = "", []
+            elif key in ("n", "N"):
+                if ui["matches"]:
+                    step = 1 if key == "n" else -1
+                    jump_to_match((ui["match_idx"] + step) % len(ui["matches"]) if ui["match_idx"] >= 0
+                                  else (0 if step == 1 else len(ui["matches"]) - 1))
+    finally:
+        art.tui_cleanup()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print()
+        raise SystemExit(130)

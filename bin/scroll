@@ -20,7 +20,7 @@ from pathlib import Path
 
 # shared art / TTY helpers
 sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art  # noqa: E402
+import fae_termart as art  # noqa: E402
 
 # Force Unicode box drawing for smooth round corners
 os.environ["PIXIE_UNICODE"] = "1"
@@ -31,6 +31,15 @@ PIXIE_SCREEN = Path.home() / "bin" / "pixie-screen"
 NAME = "scroll"
 
 SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
+    (
+        "TOME - READING (SCRIPTORIUM)",
+        [
+            ("tome <file>", "Read a document (markdown · text)"),
+            ("tome", "Browse readable files in this directory"),
+            ("tome ~/faeos/faeOSplan.md", "The faeOS plan itself"),
+            ("tome ~/faeos/docs/plans", "All app plans"),
+        ],
+    ),
     (
         "SIREN - MUSIC",
         [
@@ -74,16 +83,16 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
     (
         "AI - PIXIE",
         [
-            ("pixie-llm start", "Offline llama.cpp server"),
-            ("pixie-llm status", "URL / model / running"),
-            ("pixie-llm stop", "Stop local LLM"),
+            ("menagerie start", "Offline llama.cpp server"),
+            ("menagerie status", "URL / model / running"),
+            ("menagerie stop", "Stop local LLM"),
             ('pixie "', "Local agent - finish the quote"),
             ("pixie -v \"", "Show tools this run"),
             ("pixie verbose on", "Always show tools"),
             ("pixie verbose off", "Quiet tools"),
             ('ask "', "Same engine as pixie"),
             ('ask-web "', "Agent biased to web"),
-            ('pixie-llm chat "', "Raw offline chat"),
+            ('menagerie chat "', "Raw offline chat"),
         ],
     ),
     (

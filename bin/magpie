@@ -29,18 +29,18 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
-# Import pixie_termart for shared color palette
+# Import fae_termart for shared color palette
 import sys as _sys
 _sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art  # noqa: E402
+import fae_termart as art  # noqa: E402
 
-from pixie_termart import Palette as P, PIXIE_WAIT
+from fae_termart import Palette as P, PIXIE_WAIT
 
 # Force Unicode box drawing for smooth round corners
 os.environ["PIXIE_UNICODE"] = "1"
 
 LLAMA = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
-MODEL = os.environ.get("ASK_MODEL", os.environ.get("ASK_WEB_MODEL", "mistral"))
+MODEL = os.environ.get("ASK_MODEL", os.environ.get("ASK_WEB_MODEL", "qwen"))
 UA = "duck/3.0 (terminal search; +https://github.com/jarun/ddgr)"
 # How many top hits to open when -a / --deep
 DEEP_DEFAULT = 3
@@ -56,7 +56,7 @@ def _max_tokens(default: int = 512) -> int:
     return default
 
 # Use art.paint() which internally handles color detection via art.color_ok()
-# Color palette from pixie_termart.P:
+# Color palette from fae_termart.P:
 # PINK=175, DARK=168, PINK_DIM=132, BLUSH=218, SILVER=252, MUTED=245
 # ERR=197, WARN=214, OK=78, RESET, BOLD, DIM
 
@@ -621,7 +621,7 @@ def llm_up() -> bool:
 def llm_generate(prompt: str, *, max_tokens: int | None = None) -> str:
     """One-shot generation via offline llama.cpp (localhost only)."""
     if not llm_up():
-        raise RuntimeError("pixie-llm not running")
+        raise RuntimeError("menagerie not running")
     mt = max_tokens if max_tokens is not None else _max_tokens()
     body = {
         "model": MODEL,
@@ -863,7 +863,7 @@ def main() -> int:
             if not llm_up():
                 eprint(
                     art.paint(
-                        "⚠ AI skip: no local LLM (try: pixie-llm start)",
+                        "⚠ AI skip: no local LLM (try: menagerie start)",
                         P.BOLD,
                         P.WARN,
                     )

@@ -2,11 +2,11 @@
 # ask-web — web-focused wrapper around `ask` (search + local model).
 # Usage:
 #   ask-web "What happened with the AUR malware in 2026?"
-#   ask-web -m mistral "Latest Arch news"
+#   ask-web -m qwen "Latest Arch news"
 #   ask-web --search-only "ufw arch linux"
 set -euo pipefail
 
-MODEL="${ASK_WEB_MODEL:-${ASK_MODEL:-mistral}}"
+MODEL="${ASK_WEB_MODEL:-${ASK_MODEL:-qwen}}"
 ARGS=()
 SEARCH_ONLY=0
 QUERY=()
@@ -15,7 +15,7 @@ usage() {
   cat <<'EOF'
 Usage: ask-web [options] "your question"
 
-  -m MODEL       local model alias (default: mistral)
+  -m MODEL       local model alias (default: qwen)
   --search-only  Only print search snippets (no LLM)
   -h, --help     Show this help
 

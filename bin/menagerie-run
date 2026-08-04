@@ -4,11 +4,13 @@ set -euo pipefail
 export PATH="$HOME/bin:$PATH"
 MODEL="${PIXIE_LLM_MODEL:-}"
 if [[ -z "$MODEL" ]]; then
-  # default profile: qwen (light, fast) if present, else legacy mistral
-  if [[ -f "$HOME/.local/share/pixie/models/qwen2.5-3b-instruct-q4_k_m.gguf" ]]; then
+  # default profile: qwen3-4b if present, else qwen base, else coder
+  if [[ -f "$HOME/.local/share/pixie/models/qwen3-4b-instruct-q4_k_m.gguf" ]]; then
+    MODEL="$HOME/.local/share/pixie/models/qwen3-4b-instruct-q4_k_m.gguf"
+  elif [[ -f "$HOME/.local/share/pixie/models/qwen2.5-3b-instruct-q4_k_m.gguf" ]]; then
     MODEL="$HOME/.local/share/pixie/models/qwen2.5-3b-instruct-q4_k_m.gguf"
   else
-    MODEL="$HOME/.local/share/pixie/models/mistral-7b-instruct.gguf"
+    MODEL="$(compgen -G "$HOME/.local/share/pixie/models/qwen*coder*.gguf" | head -1)"
   fi
 fi
 HOST="${PIXIE_LLM_HOST:-127.0.0.1}"
@@ -21,7 +23,7 @@ NGL="${PIXIE_LLM_NGL:-0}"
 # the server stays up and reloads it on the next request
 SLEEP_IDLE="${PIXIE_LLM_SLEEP_IDLE:-300}"
 if [[ "$SLEEP_IDLE" -le 0 ]]; then SLEEP_IDLE=-1; fi
-ALIAS="${PIXIE_LLM_ALIAS:-mistral}"
+ALIAS="${PIXIE_LLM_ALIAS:-qwen}"
 case "$MODEL" in
   *qwen*) ALIAS="${PIXIE_LLM_ALIAS:-qwen}" ;;
 esac

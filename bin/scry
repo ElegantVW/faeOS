@@ -29,8 +29,8 @@ from pathlib import Path
 import sys as _sys
 
 _sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art  # noqa: E402
-from pixie_termart import BIN
+import fae_termart as art  # noqa: E402
+from fae_termart import BIN
 
 # Force Unicode box drawing for smooth round corners
 os.environ["PIXIE_UNICODE"] = "1"
@@ -233,7 +233,7 @@ def format_header(index: int, total: int) -> str:
             "one vision at a time - peer into what was cast",
             f"showing {index} / {total}",
         ],
-        title="Scry ✦",
+        title="Scry",
         width=tw,
         body_style=(P.MUTED,),
     )

@@ -6,7 +6,7 @@ Used by scry, ask/pixie, cmds, duck, etc. Import from ~/bin:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path.home() / "bin"))
-    import pixie_termart as art
+    import fae_termart as art
 """
 from __future__ import annotations
 
@@ -167,9 +167,7 @@ def winsize(fd: int | None = None, default: tuple[int, int] = (80, 24)) -> tuple
 def term_width(default: int = 72, *, cap: int = 96, floor: int = 44, margin: int = 1) -> int:
     """Usable box width. margin keeps the last column free so print+newline
     does not auto-wrap (kmscon/xterm xenl) and shatter right borders on n/p."""
-    # Always probe with a neutral fallback; never pass `default` into winsize
-    # or a non-tty stdout makes every box only `default` columns wide.
-    cols, _ = winsize()
+    cols, _ = winsize(_size_fd)
     if cols <= 0:
         cols = default
     usable = max(1, cols - max(0, margin))
@@ -177,7 +175,7 @@ def term_width(default: int = 72, *, cap: int = 96, floor: int = 44, margin: int
 
 
 def term_height(default: int = 24) -> int:
-    _, rows = winsize()
+    _, rows = winsize(_size_fd)
     if rows <= 0:
         rows = default
     return max(12, rows)
@@ -413,18 +411,25 @@ def box(
         lines_in = []
         for para in body:
             for ln in str(para).splitlines() or [""]:
-                lines_in.extend(wrap_plain(strip_ansi(ln), body_w))
+                if ln and strip_ansi(ln) != ln:
+                    # pre-styled line: keep ANSI (caller already wrapped it);
+                    # too wide → fall back to plain so it gets re-wrapped
+                    if vis_len(strip_ansi(ln)) > body_w:
+                        ln = strip_ansi(ln)
+                    lines_in.append(ln)
+                else:
+                    lines_in.extend(wrap_plain(ln, body_w))
 
-    # Title bar:  +-- * Title ----+   (tl + hz + label + fill + tr)
+    # Title bar:  +-- * Title * -----+   (tl + hz + label + fill + tr)
     # Visible: 1 + 1 + len(label) + fill + 1  == outer  => fill = outer - 3 - len(label)
     # With outer = inner + 2: fill = inner - 1 - len(label)
     if title:
         tplain = strip_ansi(title)
-        label = f" {mark} {tplain} "
+        label = f" {mark} {tplain} {mark} "
         if vis_len(label) > inner - 2:
             # keep mark + truncated title
             keep = max(1, inner - 8)
-            label = f" {mark} {tplain[:keep]}{ell} "
+            label = f" {mark} {tplain[:keep]}{ell} {mark} "
             if vis_len(label) > inner - 2:
                 label = f" {tplain[: max(1, inner - 4)]} "
         fill = max(0, inner - vis_len(label) - 1)
@@ -455,6 +460,10 @@ def box(
 
     styles = body_style or (P.SILVER,)
     for ln in lines_in:
+        if strip_ansi(ln) != ln:
+            # pre-styled line — keep its colors, pad with spaces
+            out.append(paint(vt, acc) + " " + ln + " " * max(0, body_w - vis_len(strip_ansi(ln))) + " " + paint(vt, acc))
+            continue
         plain = pad_vis(strip_ansi(ln), body_w)
         if plain.strip():
             painted = paint(plain, *styles)
@@ -515,14 +524,32 @@ _tui_hold_name: str | None = None
 
 def tui_open_tty() -> int | None:
     """Controlling TTY (or stdin if it is one) for painting + keys."""
+    # Try /dev/tty first (standard controlling terminal)
     try:
-        return os.open("/dev/tty", os.O_RDWR)
+        return os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
     except OSError:
+        pass
+    # Try stdin/stdout/stderr if they are TTYs
+    for fd in (0, 1, 2):
         try:
-            if sys.stdin.isatty():
-                return sys.stdin.fileno()
+            if os.isatty(fd):
+                return os.dup(fd)
         except Exception:
             pass
+    # Try to get controlling terminal via os.ctermid() or os.ttyname
+    try:
+        cterm = os.ctermid()
+        if cterm:
+            return os.open(cterm, os.O_RDWR | os.O_NOCTTY)
+    except Exception:
+        pass
+    try:
+        for fd in (0, 1, 2):
+            name = os.ttyname(fd)
+            if name:
+                return os.open(name, os.O_RDWR | os.O_NOCTTY)
+    except Exception:
+        pass
     return None
 
 
@@ -657,12 +684,15 @@ def tui_read_key(fd: int, timeout: float | None = None) -> str:
     if ch == b"\x03":
         return "ctrl-c"
     if ch in (b"\x04",):
-        return "esc"
+        return "ctrl-d"
     if ch in (b"\x7f", b"\x08"):
         return "backspace"
     if ch == b"\x15":  # Ctrl-U
-        return "clear"
-    return ch.decode("utf-8", errors="replace")
+        return "ctrl-u"
+    try:
+        return ch.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
 
 
 def tui_suspend() -> None:

@@ -6,7 +6,7 @@
 
 ## Current
 - `kur` — haiku generation (local LLM + voice), `kur-server` (systemd, port 8081, `/generate`), `kur_voice.py`
-- Model: `smollm2-360m-instruct-q4_k_m.gguf` (~350MB) on port 8081; loaded on demand via `pixie-llm start kur`
+- Model: `smollm2-360m-instruct-q4_k_m.gguf` (~350MB) on port 8081; loaded on demand via `menagerie start kur`
 
 ## Next
 - [ ] Haiku quality pass (prompt/temperature tuning)

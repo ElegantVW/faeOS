@@ -1,10 +1,10 @@
 [Unit]
-Description=Pixie offline LLM (llama.cpp, 127.0.0.1 only)
+Description=Menagerie — offline AI brain (3-port llama.cpp) (llama.cpp, 127.0.0.1 only)
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/bin/pixie-llm-run
+ExecStart=%h/bin/menagerie-run
 Restart=on-failure
 RestartSec=5
 Environment=PIXIE_LLM_HOST=127.0.0.1

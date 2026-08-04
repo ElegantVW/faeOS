@@ -81,7 +81,7 @@ bin/
 | P2-001 | **Volume Normalization** | Auto-adjust volume levels between tracks | ⏳ Not Started | `siren_player.py` | `pydub`, `ffmpeg` |
 | P2-002 | **Gapless Playback** | Eliminate silence between tracks | ⏳ Not Started | `siren_player.py` | `mpv` flags |
 | P2-003 | **Repeat Modes** | Repeat track, repeat playlist, shuffle repeat | ✅ Done (2026-08-03) | `siren_player.py` | None |
-| P2-004 | **Color Themes** | Multiple color schemes for TUI (pink is the default) | ⏳ Not Started | `siren` | `pixie_termart` |
+| P2-004 | **Color Themes** | Multiple color schemes for TUI (pink is the default) | ⏳ Not Started | `siren` | `fae_termart` |
 | P2-005 | **Progress Bars** | Visual progress for current track | ✅ Done (2026-08-03) | `siren` | `tqdm` or custom |
 | P2-006 | **Track Info Panel** | Show metadata, album art (ASCII) | ⏳ Not Started | `siren` | `mutagen`, `Pillow` |
 | P2-007 | **Configuration System** | Persistent settings and preferences | ⏳ Not Started | New: `siren_config.py` | `json`, `toml` |
@@ -178,7 +178,7 @@ bin/
 Actual runtime (no pip deps today):
 - Python 3.8+
 - mpv (media player backend, IPC socket at /tmp/siren-mpv.sock)
-- pixie_termart.py (shared pink TUI layer: frames, paint, tui_* helpers)
+- fae_termart.py (shared pink TUI layer: frames, paint, tui_* helpers)
 
 Planned / optional (future features):
 - mutagen (audio metadata)          - fuzzywuzzy (fuzzy search)
@@ -418,8 +418,8 @@ def play_track(path: str, volume: int = 75) -> bool:
 - Queue system shipped: `siren queue add|list|clear|play|next` + TUI queue panel (P1-003)
 - Playlists shipped: `siren playlist save|load|list|remove` (P1-002)
 - Shuffle + repeat modes shipped (P2-003); progress bar + vol in header (P2-005)
-- TUI migrated to shared `pixie_termart` layer (`tui_begin`/`tui_read_key`/`tui_cleanup`), screen holds via `pixie-screen`
-- File structure + dependencies corrected (no `siren_free.py`; runtime deps = stdlib + mpv + pixie_termart)
+- TUI migrated to shared `fae_termart` layer (`tui_begin`/`tui_read_key`/`tui_cleanup`), screen holds via `pixie-screen`
+- File structure + dependencies corrected (no `siren_free.py`; runtime deps = stdlib + mpv + fae_termart)
 - Vision aligned with FaeOS objective: offline-first, privacy; cloud/mobile/GUI marked anti-goals
 
 ### Version 1.0 (2026-08-01)

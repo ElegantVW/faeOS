@@ -16,4 +16,4 @@
 - [ ] Distro phase: becomes the post-install landing app
 
 ## Notes
-- Uses shared `pixie_termart` frames; should adopt `tui_*` layer when it grows a TUI.
+- Uses shared `fae_termart` frames; should adopt `tui_*` layer when it grows a TUI.

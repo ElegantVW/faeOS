@@ -3,7 +3,7 @@
 
 Format rules (kmscon-hardened):
   - ASCII only (# - | + and spaces) for the bars themselves
-  - Color via shared pixie_termart (optional; safe if NO_COLOR)
+  - Color via shared fae_termart (optional; safe if NO_COLOR)
   - No wide glyphs; fixed column widths
 
 Data:
@@ -52,7 +52,7 @@ def _color_ok() -> bool:
 
         if str(_P.home() / "bin") not in sys.path:
             sys.path.insert(0, str(_P.home() / "bin"))
-        import pixie_termart as art  # type: ignore
+        import fae_termart as art  # type: ignore
 
         return bool(art.color_ok())
     except Exception:
@@ -495,7 +495,7 @@ def demo() -> None:
     import sys
 
     sys.path.insert(0, str(Path.home() / "bin"))
-    import pixie_termart as art
+    import fae_termart as art
 
     tw = art.term_width()
     body_w = max(20, tw - 6)

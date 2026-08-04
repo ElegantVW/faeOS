@@ -8,8 +8,8 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 
 | Command | Purpose |
 |---------|---------|
-| `pixie "…"` | Local agent (files + tools); needs `pixie-llm` |
-| `pixie-llm start\|stop\|status` | Offline llama.cpp on `127.0.0.1:8080` |
+| `pixie "…"` | Local agent (files + tools); needs `menagerie` |
+| `menagerie start\|stop\|status` | AI brain: hosts Pixie (8080), Kur (8081), Imp (8082) |
 | `siren` | Interactive media player TUI (arrow keys) |
 | `siren play` / `next` / `prev` / `stop` / `pause` / `now` | Music controls (recursive `~/Music`) |
 | `siren trove 10 music lofi` | Free & legal media (Internet Archive) |
@@ -54,10 +54,10 @@ exec zsh
 ### Model (Pixie)
 
 ```text
-~/.local/share/pixie/models/mistral-7b-instruct.gguf
+~/.local/share/pixie/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf
 ```
 
-Then: `pixie-llm start` and `pixie "hello"`.
+Then: `menagerie start` and `pixie "hello"`.
 
 ## Notes
 

@@ -17,15 +17,15 @@ Usage: ./install.sh [options]
   --with-libs     Copy llama.cpp libs from this machine's ~/.local/lib/pixie
                   (or from kit vendor if present). Needed if you don't install
                   system llama-cpp / have a bundled llama-server.
-  --enable-llm    systemctl --user enable --now pixie-llm
+  --enable-llm    systemctl --user enable --now menagerie
   --no-zsh        Don't touch ~/.zshrc
   -h, --help      This help
 
 After install:
   1. Put a GGUF model at:
-       ~/.local/share/pixie/models/mistral-7b-instruct.gguf
+       ~/.local/share/pixie/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf
   2. Open a new terminal (or: source ~/.config/pixie/pixie.zsh)
-  3. pixie-llm start   # or --enable-llm
+  3. menagerie start   # or --enable-llm
   4. pixie "hello"
 EOF
 }
@@ -58,7 +58,7 @@ cp -a "$ROOT/shell/pixie.zsh" "$PIXIE_CFG/pixie.zsh"
 if [[ ! -f "$PIXIE_CFG/tick" ]]; then
   cp -a "$ROOT/config/tick.default" "$PIXIE_CFG/tick"
 fi
-cp -a "$ROOT/systemd/pixie-llm.service" "$HOME/.config/systemd/user/pixie-llm.service"
+cp -a "$ROOT/systemd/menagerie.service" "$HOME/.config/systemd/user/menagerie.service"
 
 if (( WITH_LIBS )); then
   echo "==> llama.cpp libs → ~/.local/lib/pixie"
@@ -97,15 +97,15 @@ EOF
 fi
 
 if (( ENABLE_LLM )); then
-  echo "==> enable pixie-llm user service"
+  echo "==> enable menagerie user service"
   systemctl --user daemon-reload
-  systemctl --user enable --now pixie-llm.service || {
+  systemctl --user enable --now menagerie.service || {
     echo "    service failed to start — is the GGUF model installed?"
-    echo "    Place model, then: systemctl --user restart pixie-llm"
+    echo "    Place model, then: systemctl --user restart menagerie"
   }
 fi
 
-MODEL="$HOME/.local/share/pixie/models/mistral-7b-instruct.gguf"
+MODEL="$HOME/.local/share/pixie/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
 echo
 echo "Done."
 echo "  tools:   $BIN_DST"

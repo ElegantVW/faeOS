@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art  # noqa: E402
+import fae_termart as art  # noqa: E402
 
 os.environ.setdefault("PIXIE_UNICODE", "1")
 

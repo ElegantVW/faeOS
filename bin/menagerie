@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# pixie-llm — fully offline llama.cpp server(s) for Pixie + friends
+# menagerie — fully offline llama.cpp server(s) for Pixie + friends
 #
 # Profiles (models under ~/.local/share/pixie/models/):
-#   qwen     Qwen2.5-3B-Instruct   port 8080  (default Pixie)
-#   kur      SmolLM2-360M-Instruct port 8081  (haiku dragon — tiny/fast)
-#   mistral  Mistral-7B-Instruct   port 8080  (legacy quality)
-#   default  same as qwen if present, else mistral
+#   qwen     Qwen2.5 (Base or Coder) port 8080  (default Pixie)
+#   kur      SmolLM2-360M-Instruct  port 8081  (haiku dragon — tiny/fast)
+#   imp      Qwen2.5 Coder          port 8082  (terminal art generator)
+#   default  qwen (base), else qwen coder
 #
 # Usage:
-#   pixie-llm start [qwen|kur|mistral|default]
-#   pixie-llm stop  [qwen|kur|mistral|all]
-#   pixie-llm status [profile|all]
-#   pixie-llm restart [profile]
-#   pixie-llm chat [profile] "hello"
-#   pixie-llm path|logs [profile]
+#   menagerie start [qwen|kur|imp|default]
+#   menagerie stop  [qwen|kur|all]
+#   menagerie status [profile|all]
+#   menagerie restart [profile]
+#   menagerie chat [profile] "hello"
+#   menagerie path|logs [profile]
 #
 set -euo pipefail
 
@@ -38,17 +38,28 @@ resolve_profile() {
   local p="${1:-default}"
   case "$p" in
     default|pixie|"")
-      if [[ -f "$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf" ]]; then
+      if [[ -f "$MODEL_DIR/qwen3-4b-instruct-q4_k_m.gguf" ]] || \
+         [[ -f "$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf" ]] || \
+         compgen -G "$MODEL_DIR/qwen*coder*.gguf" > /dev/null; then
         p=qwen
       else
-        p=mistral
+        echo "menagerie: no model found under $MODEL_DIR" >&2
+        echo "  download the coder: hf download Qwen/Qwen2.5-Coder-3B-Instruct-GGUF \\" >&2
+        echo "    qwen2.5-coder-3b-instruct-q4_k_m.gguf --local-dir \"$MODEL_DIR\"" >&2
+        return 1
       fi
       ;;
   esac
   PROFILE="$p"
   case "$PROFILE" in
     qwen)
-      MODEL="${PIXIE_LLM_MODEL:-$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf}"
+      MODEL="${PIXIE_LLM_MODEL:-$MODEL_DIR/qwen3-4b-instruct-q4_k_m.gguf}"
+      if [[ ! -f "$MODEL" ]]; then
+        MODEL="$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf"
+      fi
+      if [[ ! -f "$MODEL" ]]; then
+        MODEL="$(compgen -G "$MODEL_DIR/qwen*coder*.gguf" | head -1)"
+      fi
       PORT="${PIXIE_LLM_PORT:-8080}"
       CTX="${PIXIE_LLM_CTX:-4096}"
       ALIAS="${PIXIE_LLM_ALIAS:-qwen}"
@@ -62,15 +73,28 @@ resolve_profile() {
       # tiny model: all cores OK for snappy haiku
       THREADS="${KUR_LLM_THREADS:-$_NPROC}"
       ;;
-    mistral)
-      MODEL="${PIXIE_LLM_MODEL_MISTRAL:-$MODEL_DIR/mistral-7b-instruct.gguf}"
-      PORT="${PIXIE_LLM_PORT:-8080}"
-      CTX="${PIXIE_LLM_CTX:-2048}"
-      ALIAS="${PIXIE_LLM_ALIAS:-mistral}"
-      THREADS="${PIXIE_LLM_THREADS:-$THREADS_DEFAULT}"
+    imp)
+      # Imp's art generator — a Qwen2.5 Coder on its own port so it never
+      # fights Pixie (8080) or the comment dragon (8081). Default to any
+      # coder GGUF already present, else the conventional coder filename.
+      MODEL=""
+      if [[ -n "${IMP_LLM_MODEL:-}" ]]; then
+        MODEL="$IMP_LLM_MODEL"
+      else
+        for f in "$MODEL_DIR"/qwen*coder*.gguf "$MODEL_DIR"/*coder*.gguf; do
+          if [[ -f "$f" ]]; then MODEL="$f"; break; fi
+        done
+      fi
+      if [[ -z "$MODEL" ]]; then
+        MODEL="$MODEL_DIR/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
+      fi
+      PORT="${IMP_LLM_PORT:-8082}"
+      CTX="${IMP_LLM_CTX:-4096}"
+      ALIAS="${IMP_LLM_ALIAS:-imp}"
+      THREADS="${IMP_LLM_THREADS:-$THREADS_DEFAULT}"
       ;;
     *)
-      echo "unknown profile: $p  (qwen|kur|mistral|default)" >&2
+      echo "unknown profile: $p  (qwen|kur|imp|default)" >&2
       return 1
       ;;
   esac
@@ -162,7 +186,7 @@ cmd_status() {
 
 cmd_status_all() {
   local p rc=0
-  for p in qwen kur mistral; do
+  for p in qwen kur imp; do
     echo "── $p ──"
     resolve_profile "$p"
     cmd_status || true
@@ -172,7 +196,7 @@ cmd_status_all() {
 
 cmd_start() {
   if is_running && health; then
-    echo "pixie-llm [$PROFILE] already running at $URL"
+    echo "menagerie [$PROFILE] already running at $URL"
     return 0
   fi
   # if something else holds the port, stop our profile's pid first
@@ -245,12 +269,12 @@ cmd_stop() {
   if command -v fuser >/dev/null 2>&1; then
     fuser -k "${PORT}/tcp" 2>/dev/null || true
   fi
-  echo "pixie-llm [$PROFILE] stopped"
+  echo "menagerie [$PROFILE] stopped"
 }
 
 cmd_stop_all() {
   local p
-  for p in qwen kur mistral; do
+  for p in qwen kur imp; do
     resolve_profile "$p"
     cmd_stop 2>/dev/null || true
   done
@@ -266,7 +290,7 @@ cmd_stop_all() {
 cmd_chat() {
   local prompt="${*:-hello}"
   if ! health; then
-    echo "server not up — try: pixie-llm start $PROFILE" >&2
+    echo "server not up — try: menagerie start $PROFILE" >&2
     return 1
   fi
   curl -fsS --max-time 300 "${URL}/v1/chat/completions" \
@@ -310,7 +334,7 @@ shift || true
 case "$cmd" in
   start|stop|restart|status|logs|chat|path)
     prof=default
-    if [[ "${1:-}" =~ ^(qwen|kur|mistral|default|pixie|all)$ ]]; then
+    if [[ "${1:-}" =~ ^(qwen|kur|imp|default|pixie|all)$ ]]; then
       prof="$1"
       shift || true
     fi
@@ -338,22 +362,22 @@ case "$cmd" in
     ;;
   -h|--help|help)
     cat <<'H'
-pixie-llm — offline llama.cpp profiles
+menagerie — offline llama.cpp profiles
 
-  pixie-llm start [qwen|kur|mistral]   start a profile (default: qwen if present)
-  pixie-llm stop  [qwen|kur|mistral|all]
-  pixie-llm status [profile|all]
-  pixie-llm restart [profile]
-  pixie-llm chat [profile] "hello"
-  pixie-llm models
+  menagerie start [qwen|kur|imp]         start a profile (default: qwen if present)
+  menagerie stop  [qwen|kur|imp|all]
+  menagerie status [profile|all]
+  menagerie restart [profile]
+  menagerie chat [profile] "hello"
+  menagerie models
 
-Ports:  qwen/mistral → 8080    kur → 8081
+Ports:  qwen → 8080    kur → 8081    imp → 8082
 Idle RAM: models unload after PIXIE_LLM_SLEEP_IDLE seconds of inactivity
           (default 300; set 0 to keep the model loaded, like before)
 H
     ;;
   *)
-    echo "Usage: pixie-llm {start|stop|restart|status|logs|chat|path|models}" >&2
+    echo "Usage: menagerie {start|stop|restart|status|logs|chat|path|models}" >&2
     exit 1
     ;;
 esac

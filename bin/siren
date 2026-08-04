@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / "bin"))
 os.environ.setdefault("PIXIE_UNICODE", "1")
-import pixie_termart as art
+import fae_termart as art
 import siren_player as player
 import siren_waves as waves
 
@@ -166,7 +166,7 @@ def build_header(track: str, status: str, pos: float, dur: float, vol: int, shuf
     rep_icon = {"all": "[REP:ALL]", "track": "[REP:ONE]", "off": "[REP:OFF]"}[repeat]
     line1 = f" {status_icon}  {track}"
     line2 = f" vol: {vol}%  {shuffle_icon} {rep_icon}  {prog}"
-    return art.box([line1, line2], title=" Siren ✦", width=width, body_style=(P.SILVER,))
+    return art.box([line1, line2], title="Siren", width=width, body_style=(P.SILVER,))
 
 
 def build_waves_panel(path: str, pos: float, playing: bool, paused: bool, volume: float, width: int, height: int) -> list[str]:
@@ -345,7 +345,7 @@ def build_missing_notification(removed: list[dict], playlist_name: str) -> str:
         lines.append(f"File {fname} was removed from {playlist_name}")
         lines.append(f"Reason was {reason}")
     body = "\n".join(lines)
-    return art.box(body.splitlines(), title=" Siren ✦", width=60, body_style=(P.WARN,))
+    return art.box(body.splitlines(), title="Siren", width=60, body_style=(P.WARN,))
 
 
 def ui_loop() -> int:
@@ -481,18 +481,18 @@ def ui_loop() -> int:
                         name = buf or "playlist"
                         count = len(player.queue_list())
                         if player.save_playlist_json(name, player.queue_list()):
-                            notification = art.box([f"Saved playlist: {name} ({count} tracks)"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                            notification = art.box([f"Saved playlist: {name} ({count} tracks)"], title="Siren", width=50, body_style=(P.OK,))
                         else:
-                            notification = art.box([f"Failed to save: {name}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                            notification = art.box([f"Failed to save: {name}"], title="Siren", width=50, body_style=(P.WARN,))
                         notification_time = time.time()
                     elif action == "load":
                         name = buf
                         if player.play_playlist(name):
-                            notification = art.box([f"Playing playlist: {name}"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                            notification = art.box([f"Playing playlist: {name}"], title="Siren", width=50, body_style=(P.OK,))
                         elif name and name in player.list_playlists_json():
-                            notification = art.box([f"Playlist '{name}' has no playable tracks"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                            notification = art.box([f"Playlist '{name}' has no playable tracks"], title="Siren", width=50, body_style=(P.WARN,))
                         else:
-                            notification = art.box([f"No playlist: {name}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                            notification = art.box([f"No playlist: {name}"], title="Siren", width=50, body_style=(P.WARN,))
                         notification_time = time.time()
                     elif action == "open":
                         dir_input = buf or str(Path.home() / "Music")
@@ -500,16 +500,16 @@ def ui_loop() -> int:
                         if target.is_dir():
                             browser.set_dir(str(target))
                             focus_mode = 0
-                            notification = art.box([f"Open: {browser.get_display_path()}"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                            notification = art.box([f"Open: {browser.get_display_path()}"], title="Siren", width=50, body_style=(P.OK,))
                         else:
-                            notification = art.box([f"Not a directory: {dir_input}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                            notification = art.box([f"Not a directory: {dir_input}"], title="Siren", width=50, body_style=(P.WARN,))
                         notification_time = time.time()
                     elif action == "rmplaylist":
                         name = buf
                         if player.delete_playlist(name):
-                            notification = art.box([f"Removed playlist: {name}"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                            notification = art.box([f"Removed playlist: {name}"], title="Siren", width=50, body_style=(P.OK,))
                         else:
-                            notification = art.box([f"No playlist: {name}"], title=" Siren ✦", width=50, body_style=(P.WARN,))
+                            notification = art.box([f"No playlist: {name}"], title="Siren", width=50, body_style=(P.WARN,))
                         notification_time = time.time()
                     # action == "filter": filter stays applied, just exit input
                 elif key == "ctrl-c":
@@ -600,7 +600,7 @@ def ui_loop() -> int:
                         if count:
                             notification = art.box(
                                 [f"Added {count} track(s) to queue"],
-                                title=" Siren ✦", width=50, body_style=(P.OK,)
+                                title="Siren", width=50, body_style=(P.OK,)
                             )
                             notification_time = time.time()
             elif focus_mode == 1:
@@ -631,12 +631,12 @@ def ui_loop() -> int:
                         if removed:
                             notification = art.box(
                                 [f"Removed: {removed.get('display', 'track')}"],
-                                title=" Siren ✦", width=50, body_style=(P.OK,)
+                                title="Siren", width=50, body_style=(P.OK,)
                             )
                             notification_time = time.time()
                 elif key == "c":
                     player.queue_clear()
-                    notification = art.box(["Queue cleared"], title=" Siren ✦", width=30, body_style=(P.OK,))
+                    notification = art.box(["Queue cleared"], title="Siren", width=30, body_style=(P.OK,))
                     notification_time = time.time()
             else:
                 # EQ panel focused
@@ -682,7 +682,7 @@ def ui_loop() -> int:
                         random.shuffle(files)
                         for f in files[:10]:
                             player.queue_add(f)
-                        notification = art.box([f"Added {min(10, len(files))} tracks to queue"], title=" Siren ✦", width=50, body_style=(P.OK,))
+                        notification = art.box([f"Added {min(10, len(files))} tracks to queue"], title="Siren", width=50, body_style=(P.OK,))
                         notification_time = time.time()
 
     finally:
@@ -812,7 +812,7 @@ def main():
                     "",
                     "downloads land in ~/Music/trove and ~/Videos/trove",
                 ],
-                title=" Siren ✦",
+                title="Siren",
                 width=_compact_width([], min_width=60),
             ))
             print()
@@ -833,7 +833,7 @@ def main():
             import time; time.sleep(0.15)
             msg = f"Playing: {player.now_label()}" if player.now_label() else "Playback resumed"
             print()
-            print(art.box([msg], title=" Siren ✦", width=_compact_width([msg])))
+            print(art.box([msg], title="Siren", width=_compact_width([msg])))
             print()
             return 0
 
@@ -847,13 +847,13 @@ def main():
     elif cmd in ("pause", "toggle"):
         player.cmd_pause()
         print()
-        print(art.box(["Playback paused / resumed"], title=" Siren ✦", width=_compact_width(["Playback paused / resumed"])))
+        print(art.box(["Playback paused / resumed"], title="Siren", width=_compact_width(["Playback paused / resumed"])))
         print()
         return 0
     elif cmd == "stop":
         player.cmd_stop()
         print()
-        print(art.box(["Playback stopped"], title=" Siren ✦", width=_compact_width(["Playback stopped"])))
+        print(art.box(["Playback stopped"], title="Siren", width=_compact_width(["Playback stopped"])))
         print()
         return 0
     elif cmd in ("next", "nex"):
@@ -861,7 +861,7 @@ def main():
         import time; time.sleep(0.15)
         msg = f"Next: {player.now_label()}"
         print()
-        print(art.box([msg], title=" Siren ✦", width=_compact_width([msg])))
+        print(art.box([msg], title="Siren", width=_compact_width([msg])))
         print()
         return 0
     elif cmd == "prev":
@@ -869,13 +869,13 @@ def main():
         import time; time.sleep(0.15)
         msg = f"Previous: {player.now_label()}"
         print()
-        print(art.box([msg], title=" Siren ✦", width=_compact_width([msg])))
+        print(art.box([msg], title="Siren", width=_compact_width([msg])))
         print()
         return 0
     elif cmd == "cove":
         msg = f"Siren Cove Directory:\nMusic"
         print()
-        print(art.box([msg], title=" Siren Cove ✦", width=_compact_width([msg])))
+        print(art.box([msg], title="Siren Cove", width=_compact_width([msg])))
         print()
         return 0
     elif cmd == "random":
@@ -961,7 +961,7 @@ def main():
             "TUI: / filter · o open · a add · S/L save·load · R rm playlist · r repeat · g go to path · Tab focus · q quit",
         ]
         print()
-        print(art.box(lines, title=" Siren ✦", width=_compact_width(lines)))
+        print(art.box(lines, title="Siren", width=_compact_width(lines)))
         print()
         return 0
     else:

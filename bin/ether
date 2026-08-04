@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art  # noqa: E402
+import fae_termart as art  # noqa: E402
 
 os.environ.setdefault("PIXIE_UNICODE", "1")
 P = art.P
@@ -102,7 +102,7 @@ def _nmcli(args: list[str], *, timeout: float = 60) -> subprocess.CompletedProce
 
 def banner(title: str, label: str) -> None:
     print()
-    print(art.box([], title="Ether ✦", subtitle=label + "  ·  " + title, width=art.term_width()))
+    print(art.box([], title="Ether", subtitle=label + "  ·  " + title, width=art.term_width()))
     print()
 
 
@@ -242,24 +242,24 @@ def cmd_veil(args: argparse.Namespace) -> int:
 
     if action in ("on", "raise", "up"):
         if wanted in active:
-            print(art.box([f"the veil already rises — {wanted}"], title="Ether ✦", body_style=(art.P.MUTED,), width=art.term_width()))
+            print(art.box([f"the veil already rises — {wanted}"], title="Ether", body_style=(art.P.MUTED,), width=art.term_width()))
             return 0
         r = _nmcli(["con", "up", wanted], timeout=90)
         if r.returncode != 0:
-            print(art.box([f"could not raise {wanted}: {(r.stderr or r.stdout or '').strip()}"], title="Ether ✦", body_style=(art.P.WARN,), width=art.term_width()))
+            print(art.box([f"could not raise {wanted}: {(r.stderr or r.stdout or '').strip()}"], title="Ether", body_style=(art.P.WARN,), width=art.term_width()))
             return 1
-        print(art.box([f"the veil rises — {wanted}"], title="Ether ✦", body_style=(art.P.OK,), width=art.term_width()))
+        print(art.box([f"the veil rises — {wanted}"], title="Ether", body_style=(art.P.OK,), width=art.term_width()))
         return 0
 
     if action in ("off", "lower", "down"):
         if wanted not in active:
-            print(art.box([f"the veil already falls — {wanted} is down"], title="Ether ✦", body_style=(art.P.MUTED,), width=art.term_width()))
+            print(art.box([f"the veil already falls — {wanted} is down"], title="Ether", body_style=(art.P.MUTED,), width=art.term_width()))
             return 0
         r = _nmcli(["con", "down", wanted], timeout=90)
         if r.returncode != 0:
-            print(art.box([f"could not lower {wanted}: {(r.stderr or r.stdout or '').strip()}"], title="Ether ✦", body_style=(art.P.WARN,), width=art.term_width()))
+            print(art.box([f"could not lower {wanted}: {(r.stderr or r.stdout or '').strip()}"], title="Ether", body_style=(art.P.WARN,), width=art.term_width()))
             return 1
-        print(art.box([f"the veil falls — {wanted}"], title="Ether ✦", body_style=(art.P.OK,), width=art.term_width()))
+        print(art.box([f"the veil falls — {wanted}"], title="Ether", body_style=(art.P.OK,), width=art.term_width()))
         return 0
 
     # toggle
@@ -423,13 +423,13 @@ def cmd_weave(verb: str, token: str | None) -> int:
     if token not in (None, "", "ether"):
         print(art.box(
             [f"no such weave — {token}", "the ether only answers to: whisper / listen / status"],
-            title="Ether ✦", body_style=(art.P.WARN,), width=art.term_width(),
+            title="Ether", body_style=(art.P.WARN,), width=art.term_width(),
         ))
         print()
         return 1
 
     ok, msg = _weave(verb)
-    print(art.box([msg], title="Ether ✦",
+    print(art.box([msg], title="Ether",
                   body_style=(art.P.OK,) if ok else (art.P.WARN,),
                   width=art.term_width()))
     print()
@@ -441,7 +441,7 @@ def cmd_weave(verb: str, token: str | None) -> int:
 # ---------------------------------------------------------------------------
 
 def _collect_status() -> dict:
-    data: dict = {"bt": [], "wifi": [], "lan": [], "sinks": [], "conns": []}
+    data: dict = {"bt": [], "wifi": [], "lan": [], "sinks": [], "conns": [], "dls": []}
 
     for mac, name in _bt_devices():
         state = _bt_state(mac)
@@ -495,6 +495,7 @@ def _collect_status() -> dict:
     tcp_probe("archive.org", 443, socket.AF_INET, "IA :443")
 
     data["sinks"] = _wpctl_sinks()
+    data["dls"] = _collect_downloads()
     return data
 
 
@@ -555,16 +556,169 @@ def _lan_panel(data: dict, width: int) -> str:
     return art.box(lines, title="lan · weave", width=width, body_style=(P.SILVER,))
 
 
+_DL_DIRS = (
+    os.path.expanduser("~/.local/share/pixie/models"),
+    os.path.expanduser("~/Downloads"),
+    "/var/cache/pacman/pkg",
+    "/tmp",
+)
+_DL_HIST: dict[str, tuple[float, int]] = {}
+_TMP1_RE = re.compile(r"\.(part|tmp)(\d*)$")
+_TMP2_RE = re.compile(r"\.(incomplete|crdownload|download|part|tmp)$")
+
+
+def _human_bytes(n: int) -> str:
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if v < 1024 or unit == "GB":
+            return f"{v:.0f}{unit}" if unit == "B" else f"{v:.1f}{unit}"
+        v /= 1024
+    return f"{n}B"
+
+
+def _dl_group_base(name: str) -> str:
+    """Strip temp suffixes (.part, .part3, .tmp, .tmp3, .incomplete, …)."""
+    base = name
+    while True:
+        nb = _TMP1_RE.sub("", base)
+        nb = _TMP2_RE.sub("", nb)
+        if nb == base:
+            return nb
+        base = nb
+
+
+def _is_committed_chunk(name: str) -> bool:
+    """True for committed chunk suffixes (.part, .partN) — excludes merging .tmp/.tmpN."""
+    m = _TMP1_RE.search(name)
+    return m is not None and m.group(1) == "part"
+
+
+def _collect_downloads() -> list[dict]:
+    """What the loom is weaving: temp-suffixed files growing in known dirs.
+
+    A `<name>.size` sidecar next to a partial group provides its total size
+    so the panel can show a true progress bar (menagerie writes these).
+    """
+    groups: dict[str, int] = {}
+    for d in _DL_DIRS:
+        if not os.path.isdir(d):
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            if n.endswith((".size", ".aria2", ".lock")):
+                continue
+            path = os.path.join(d, n)
+            if not os.path.isfile(path):
+                continue
+            base = _dl_group_base(n)
+            if base == n and not os.path.exists(path + ".aria2"):
+                continue
+            # Only count committed chunks (.part*) for progress; skip merging .tmp*
+            if not _is_committed_chunk(n):
+                continue
+            try:
+                groups[base] = groups.get(base, 0) + os.path.getsize(path)
+            except OSError:
+                continue
+    now = time.monotonic()
+
+    # Remove completed downloads: final file exists with expected size
+    complete = set()
+    for base in groups:
+        total = None
+        for d in _DL_DIRS:
+            t = os.path.join(d, base + ".size")
+            if os.path.isfile(t):
+                try:
+                    with open(t) as fh:
+                        total = int(fh.read().strip())
+                except (OSError, ValueError):
+                    total = None
+                break
+        if total and total > 0:
+            for d in _DL_DIRS:
+                try:
+                    for fn in os.listdir(d):
+                        if fn.endswith((".size", ".aria2", ".lock", ".part", ".tmp", ".incomplete", ".crdownload", ".download")):
+                            continue
+                        fp = os.path.join(d, fn)
+                        if os.path.isfile(fp):
+                            try:
+                                sz = os.path.getsize(fp)
+                                if abs(sz - total) <= 1024:
+                                    complete.add(base)
+                                    break
+                            except OSError:
+                                pass
+                    if base in complete:
+                        break
+                except OSError:
+                    pass
+    for base in complete:
+        groups.pop(base, None)
+
+    dls: list[dict] = []
+    for base, cur in groups.items():
+        total = None
+        for d in _DL_DIRS:
+            t = os.path.join(d, base + ".size")
+            if os.path.isfile(t):
+                try:
+                    with open(t) as fh:
+                        total = int(fh.read().strip())
+                except (OSError, ValueError):
+                    total = None
+                break
+        speed = 0.0
+        prev = _DL_HIST.get(base)
+        if prev:
+            dt = now - prev[0]
+            if 0 < dt < 30:
+                speed = max(0.0, (cur - prev[1]) / dt)
+        _DL_HIST[base] = (now, cur)
+        dls.append({"name": base, "cur": cur, "total": total, "speed": speed})
+    for base in list(_DL_HIST):
+        if base not in groups:
+            del _DL_HIST[base]
+    dls.sort(key=lambda x: -x["cur"])
+    return dls
+
+
+def _downloads_panel(data: list, width: int) -> str:
+    lines = []
+    if not data:
+        lines.append(art.paint("  nothing being conjured", P.MUTED))
+    for d in data:
+        speed = d["speed"]
+        speed_s = f"{speed/1e6:.1f} MB/s" if speed >= 1e6 else f"{speed/1e3:.0f} KB/s"
+        if d["total"] and d["total"] > 0:
+            pct = min(1.0, d["cur"] / d["total"])
+            bar_w = max(8, min(24, width - 2 - len(d["name"]) - 32))
+            filled = int(bar_w * pct)
+            bar = "█" * filled + "░" * (bar_w - filled)
+            tail = f" {bar} {pct*100:3.0f}% {speed_s}"
+        else:
+            tail = f" {_human_bytes(d['cur'])} · {speed_s}"
+        room = max(8, width - 2 - len(tail) - 4)
+        nm = d["name"] if len(d["name"]) <= room else d["name"][: room - 1] + "…"
+        lines.append(f"  ✦  {art.paint(nm, P.PINK_DIM)}{' ' * max(1, room - len(nm))}{tail}")
+    return art.box(lines, title="Conjuring", width=width, body_style=(P.SILVER,))
+
+
 def build_frame(data: dict, width: int, height: int) -> str:
     panel_w = max(44, min(width - 2, 88))
     bt = _bt_panel(data, panel_w)
     wifi = _wifi_panel(data, panel_w)
     lan = _lan_panel(data, panel_w)
+    dls = _downloads_panel(data.get("dls", []), panel_w)
     footer = art.box(
         ["w whisper · l listen · s scan · n new · d remove · R restart · r refresh · q quit"],
         title="runes", width=width, body_style=(P.MUTED,),
     )
-    return "\n".join([bt, "", wifi, "", lan, "", footer])
+    return "\n".join([bt, "", wifi, "", lan, "", dls, "", footer])
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +746,7 @@ def _confirm_frame(msg: str, width: int) -> str:
 
 
 def _work_frame(msg: str, width: int) -> str:
-    return art.box([f"  {msg} …"], title="weaving", width=width, body_style=(P.MUTED,))
+    return art.box([f"  {msg} …"], title="Conjuring", width=width, body_style=(P.MUTED,))
 
 
 def _result_frame(ok: bool, msg: str, width: int) -> str:
@@ -1044,12 +1198,14 @@ def cmd_info(_: argparse.Namespace | None = None) -> int:
     width = art.term_width()
     panel_w = max(44, min(width - 2, 88))
     print()
-    print(art.box([], title="Ether ✦", subtitle="status — the aether at a glance", width=width))
+    print(art.box([], title="Ether", subtitle="status — the aether at a glance", width=width))
     print(_bt_panel(data, panel_w))
     print()
     print(_wifi_panel(data, panel_w))
     print()
     print(_lan_panel(data, panel_w))
+    print()
+    print(_downloads_panel(data.get("dls", []), panel_w))
     print()
     return 0
 
@@ -1079,7 +1235,7 @@ def cmd_about(_: argparse.Namespace) -> int:
             "  ~/.config/ether/netherweave.env",
             "    ETHER_NETHER_SSID=…  ETHER_NETHER_PSK=…",
         ],
-        title="Ether ✦",
+        title="Ether",
         subtitle="network paths & weaves",
         body_style=(art.P.MUTED,),
         width=art.term_width(),

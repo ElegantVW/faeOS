@@ -3,7 +3,7 @@
 
 Usage:
   faectl status           # Show dashboard of all services (LLM, Kur, Siren, Audio)
-  faectl restart-llm      # Restart local LLM / pixie-llm
+  faectl restart-llm      # Restart local LLM / menagerie
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ os.environ["PIXIE_UNICODE"] = "1"
 
 import sys as _sys
 _sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art
-from pixie_termart import Palette as P
+import fae_termart as art
+from fae_termart import Palette as P
 
 def check_llm() -> tuple[bool, str]:
     try:
@@ -91,14 +91,14 @@ def main() -> int:
         ]
         w = max(45, min(65, art.term_width()))
         print()
-        print(art.box(lines, title=" Fae OS Control Panel ✦ ", accent=P.PINK, width=w))
+        print(art.box(lines, title="Fae OS Control Panel", accent=P.PINK, width=w))
         print()
         return 0
 
     elif args.action == "restart-llm":
-        print("Restarting local LLM (pixie-llm)...")
+        print("Restarting local LLM (menagerie)...")
         subprocess.run(["pkill", "-f", "llama-server"], stderr=subprocess.DEVNULL)
-        subprocess.Popen([str(Path.home() / "bin" / "pixie-llm")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        subprocess.Popen([str(Path.home() / "bin" / "menagerie")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         print("Done.")
         return 0
 

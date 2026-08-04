@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / "bin"))
 os.environ.setdefault("PIXIE_UNICODE", "1")
-import pixie_termart as art
+import fae_termart as art
 
 if len(sys.argv) < 2:
     print("Usage: kur \"[your prompt/observation]\"")
@@ -38,7 +38,7 @@ try:
         max_len = max((len(l) for l in lines), default=20)
         box_width = max(30, min(max_len + 6, art.term_width()))
         print()
-        print(art.box(reply_text, title=" Kur ✦", width=box_width))
+        print(art.box(reply_text, title="Kur", width=box_width))
         print()
 except Exception:
     print("Kur server down on 8081.\n\nKur must be loaded with his main command.")

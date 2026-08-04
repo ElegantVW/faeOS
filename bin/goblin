@@ -36,8 +36,8 @@ from urllib.parse import unquote, urlparse
 
 os.environ.setdefault("PIXIE_UNICODE", "1")
 
-import pixie_termart as art  # noqa: E402
-from pixie_termart import P  # noqa: E402
+import fae_termart as art  # noqa: E402
+from fae_termart import P  # noqa: E402
 
 MAIL_ROOT = Path.home() / ".cache" / "goblin" / "mail"
 UNREAD = MAIL_ROOT / "unread"
@@ -548,7 +548,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         (f"  Subject: {m.get('subject','')}", (P.SILVER,)),
         ("", (P.MUTED,)),
     ] + [(f"  {ln} ", (P.SILVER,)) for ln in body_lines]
-    print(tui_frame(rows, title="Goblin ✦", width=w))
+    print(tui_frame(rows, title="Goblin", width=w))
     return 0
 
 
@@ -776,7 +776,7 @@ def tui_run() -> int:
                 f"{acc_name} · box: {box} · unread: {unread_n} · last sync: {state.get('last_sync', 'never')}"
                 + (f" · {status}" if status else "")
             )
-            frame = tui_frame(visible, title="Goblin ✦", subtitle=subtitle, width=width)
+            frame = tui_frame(visible, title="Goblin", subtitle=subtitle, width=width)
             footer = art.paint(
                 f"runes: ↑↓/j/k move · enter open · s sync · m read · t trash · 1/2/3 box · q quit",
                 P.PINK_DIM,
@@ -879,7 +879,7 @@ def tui_reader(fd: int, m: dict, acc_name: str, width: int, box: str) -> str:
         bottom = max(1, max_rows - head_n)
         seg = body_lines[pos : pos + bottom]
         rows = header_rows + [("", (P.MUTED,))] + [(f"  {ln} ", (P.SILVER,)) for ln in seg]
-        frame = tui_frame(rows, title="Goblin ✦", subtitle=sub, width=width)
+        frame = tui_frame(rows, title="Goblin", subtitle=sub, width=width)
         pos_hint = ""
         if len(body_lines) > bottom:
             pos_hint = f" · {pos + 1}-{min(len(body_lines), pos + bottom)}/{len(body_lines)}"

@@ -10,12 +10,12 @@ import sys
 import time
 from pathlib import Path
 
-# Import pixie_termart for shared color palette
+# Import fae_termart for shared color palette
 import sys as _sys
 _sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art  # noqa: E402
+import fae_termart as art  # noqa: E402
 
-from pixie_termart import Palette as P, PIXIE_SCREEN
+from fae_termart import Palette as P, PIXIE_SCREEN
 
 CACHE = Path.home() / ".cache" / "pixie"
 LAST_REPLY = CACHE / "last-reply.txt"

@@ -15,7 +15,7 @@ Controls:
   q           Quit
   ?           Help
 
-Theme: Uses pixie_termart for consistent colors and box drawing.
+Theme: Uses fae_termart for consistent colors and box drawing.
 """
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ import time
 import subprocess
 from pathlib import Path
 
-# Import pixie_termart for shared styling
+# Import fae_termart for shared styling
 sys.path.insert(0, str(Path.home() / "bin"))
-import pixie_termart as art
-from pixie_termart import Palette as P
+import fae_termart as art
+from fae_termart import Palette as P
 
 # Force Unicode box drawing for smooth round corners
 os.environ["PIXIE_UNICODE"] = "1"
@@ -88,7 +88,7 @@ def narrate(cast: str, answered: str, *, ok: bool = True) -> str:
 class FileManager:
     """Terminal file manager with fae theme."""
 
-    def __init__(self, start_path: str | None = None):
+    def __init__(self, start_path: str | None = None, pick_mode: bool = False, output_path: str | None = None):
         """Initialize the file manager."""
         self.current_path = Path(start_path or os.getcwd())
         self.selected_index = 0
@@ -96,6 +96,9 @@ class FileManager:
         self.status = ""
         self.sort_by = "name"  # name, date, size, type
         self.show_hidden = False
+        self.pick_mode = pick_mode
+        self.output_path = output_path
+        self.chosen_path: Path | None = None
 
     def get_files(self) -> list[Path]:
         """Get list of files in current directory."""
@@ -174,7 +177,7 @@ class FileManager:
         sub = f"{self.current_path} · {len(files)} scrolls · {dirs} {tome_w}"
         if self.status:
             sub += f" · {self.status}"
-        return tui_frame([], title="Spell Book ✦", subtitle=sub, width=art.term_width())
+        return tui_frame([], title="Spell Book", subtitle=sub, width=art.term_width())
 
     def draw_file_list(self, files: list[Path]) -> str:
         """Windowed scroll shelf — styled rows inside one frame."""
@@ -207,7 +210,7 @@ class FileManager:
         footer = tui_frame(
             [
                 (
-                    "j/k move · l/o open · h parent · ? help · s sort · . hidden · "
+                    "j/k move · enter/l/o open · h parent · ? help · s sort · . hidden · "
                     "n new · d delete · r rename · e edit · q quit",
                     (P.PINK_DIM,),
                 )
@@ -286,6 +289,9 @@ class FileManager:
             self.offset = 0
             self.status = narrate(f"cd {file.name}/", "a new path unfolds")
         else:
+            if self.pick_mode:
+                self.chosen_path = file
+                return
             # Open with default application
             try:
                 if sys.platform == "darwin":
@@ -320,6 +326,9 @@ class FileManager:
                         break
                     if key:  # Only handle non-empty keys
                         self.handle_key(key)
+
+                    if self.pick_mode and self.chosen_path:
+                        break
                 except KeyboardInterrupt:
                     # Clean exit on Ctrl+C
                     break
@@ -332,6 +341,14 @@ class FileManager:
             raise e
         finally:
             art.tui_cleanup()
+
+        if self.pick_mode and self.chosen_path:
+            if self.output_path:
+                with open(self.output_path, "w") as f:
+                    f.write(str(self.chosen_path))
+            else:
+                print(self.chosen_path)
+            sys.stdout.flush()
 
     def clear_screen(self):
         """Clear the terminal screen."""
@@ -352,7 +369,7 @@ class FileManager:
                 self.selected_index -= 1
                 if self.selected_index < self.offset:
                     self.offset -= 1
-        elif key in ('right', 'l', 'o'):  # Right arrow, l, or 'o'
+        elif key in ('right', 'l', 'o', 'enter'):  # Right arrow, l, 'o', or enter
             if files and self.selected_index < len(files):
                 self.open_file(files[self.selected_index])
         elif key in ('left', 'h'):  # Left arrow or h
@@ -534,6 +551,16 @@ def main():
         help='Starting directory'
     )
     parser.add_argument(
+        '--pick',
+        action='store_true',
+        help='Pick a file and print path to stdout'
+    )
+    parser.add_argument(
+        '--output',
+        default=None,
+        help='Write chosen path to this file (used with --pick)'
+    )
+    parser.add_argument(
         '--version',
         action='version',
         version='Spellbook 1.0.0'
@@ -542,7 +569,7 @@ def main():
     args = parser.parse_args()
     
     # Initialize file manager
-    fm = FileManager(start_path=args.path)
+    fm = FileManager(start_path=args.path, pick_mode=args.pick, output_path=args.output)
     
     # Run the file manager
     fm.run()
