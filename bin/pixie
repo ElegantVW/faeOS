@@ -888,7 +888,9 @@ def chat_ui(verbose: bool = False) -> int:
         rune_line = "".join(rune_parts).strip() + " · esc · q"
         runes_box = art.box(rune_line, title="Runes", width=tw - 4)
 
-        # viewport: only show recent chat up to visible area
+        # viewport: chat flows up from the prompt box; blank rows go above the
+        # chat (never between chat and the input box), so the newest message
+        # always hugs the prompt box and the prompt box is never buried
         chat_area = max(3, th - 2 - len(input_box.splitlines()) - len(runes_box.splitlines()))
         all_lines: list[str] = []
         for sec in sections:
@@ -897,8 +899,8 @@ def chat_ui(verbose: bool = False) -> int:
         if view["off"] > max_off:
             view["off"] = max_off
         out = all_lines[view["off"] : view["off"] + chat_area]
-        while len(out) < chat_area:
-            out.append("")
+        if len(out) < chat_area:
+            out = [""] * (chat_area - len(out)) + out
         out.extend(input_box.splitlines())
         out.extend(runes_box.splitlines())
 

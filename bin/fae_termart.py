@@ -285,9 +285,13 @@ def paint_frame(fd: int, body: str, *, disable_wrap: bool = True) -> None:
         if n <= 0:
             break
         view = view[n:]
-    # body via tty_write → CR-LF
+    # body via tty_write → CR-LF; skip the trailing newline if the frame fills
+    # the screen so we never scroll a full-height frame (which pushes the top
+    # border off and shifts everything up one row)
     if not body.endswith("\n"):
-        body = body + "\n"
+        lines = body.count("\n") + 1
+        if lines < term_height():
+            body = body + "\n"
     body = body + "\033[0m"
     if disable_wrap:
         body = body + "\033[?7h"
