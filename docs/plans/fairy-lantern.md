@@ -16,11 +16,13 @@
 
 ## CLI
 ```
-fairy-lantern <rom.gba> [--frames N] [--present] [--dump out.ppm]
-fairy-lantern info <rom.gba>
-fairy-lantern test
-fairy-lantern tui [--dir ~/roms]
-fairy-lantern run <rom.gba> …
+fairy                 # home TUI — last / SPARK / roms / open path
+fairy-lantern         # same
+fairy last            # re-open last .gba
+fairy spark           # built-in SPARK
+fairy play game.gba   # play + remember as last
+fairy game.gba        # same
+fairy info / test / run …
 ```
 
 ## Current
@@ -29,14 +31,16 @@ fairy-lantern run <rom.gba> …
 - [x] Thumb interpreter subset (ALU, imm, load/store, push/pop, B/BL, BX…)
 - [x] Bus map + KEYINPUT + DMA enable + timer reloads + IF clear
 - [x] PPU Mode 3/4 + VBlank flag/IRQ raise
-- [x] **Interactive window** (`minifb`) — `fairy-lantern spark` / `play`
-- [x] **Built-in SPARK fable** — Mode 3 pixel you steer (100% playable on this emu)
-- [x] Self-tests (`fairy-lantern test`)
+- [x] **Interactive window** (`minifb`) — `fairy spark` / `play`
+- [x] **Built-in SPARK fable** — Mode 3 pixel you steer
+- [x] **Home TUI** on bare `fairy` — Last, SPARK, roms/, recents, Open path
+- [x] Self-tests (`fairy test`)
 - [ ] Mode 0 tiles + sprites (commercial ROMs)
 - [ ] Saves / fuller BIOS HLE
 
 ## Data
-`$XDG_DATA_HOME/faeos/fairy-lantern/` · env `FAIRY_LANTERN_ROMS`, `FAIRY_LANTERN_BIOS`
+`$XDG_DATA_HOME/faeos/fairy-lantern/` · `last.txt` · `recents.txt` · `roms/`  
+env: `FAIRY_LANTERN_ROMS`, `FAIRY_LANTERN_BIOS`, `FAIRY_LANTERN_DIR`
 
 ## Build
 ```
