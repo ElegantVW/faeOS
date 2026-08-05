@@ -245,6 +245,38 @@ bindkey '^[[Z' _scry-widget
 bindkey '\e[Z' _scry-widget
 bindkey '\e[27;2;9~' _scry-widget
 
+# ── Summon / Scroll — pick → put on the prompt (print -z) ──
+# Binary paints TUI on /dev/tty; selection is one line on stdout.
+# Flags that shouldn't be wrapped: list / refresh / exec / help.
+summon() {
+  case "${1:-}" in
+    -x|--exec|-l|--list|--refresh|-h|--help)
+      command summon "$@"
+      return $?
+      ;;
+  esac
+  local selected ec=0
+  selected=$(command summon "$@") || ec=$?
+  (( ec != 0 )) && return "$ec"
+  [[ -z $selected ]] && return 1
+  print -z -- "$selected"
+}
+
+# scroll bare / picker → insert chosen command on the prompt
+scroll() {
+  case "${1:-}" in
+    list|menu|board|-h|--help)
+      command scroll "$@"
+      return $?
+      ;;
+  esac
+  local selected ec=0
+  selected=$(command scroll "$@") || ec=$?
+  (( ec != 0 )) && return "$ec"
+  [[ -z $selected ]] && return 1
+  print -z -- "$selected"
+}
+
 # open scroll → command directory (help page) · open spellbook → file manager
 up() {
   local arg="${1:-}"

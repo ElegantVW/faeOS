@@ -623,7 +623,7 @@ def tui_read_key(fd: int, timeout: float | None = None) -> str:
     """One keypress: CSI arrows → 'up'/'down'/'left'/'right', CSI Z →
     'shift-tab', 5~/6~ → 'pgup'/'pgdn', H/1~/7~ → 'home', F/4~/8~ → 'end',
     3~ → 'delete', Enter → 'enter', space → 'space', tab → 'tab',
-    Ctrl-C → 'ctrl-c', Ctrl-U → 'clear', DEL/BS → 'backspace',
+    Ctrl-C → 'ctrl-c', Ctrl-U → 'ctrl-u', DEL/BS → 'backspace',
     lone Esc → 'esc', everything else as a single decoded char.
     Returns '' on timeout."""
     if timeout is not None:

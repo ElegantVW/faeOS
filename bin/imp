@@ -1367,7 +1367,7 @@ class ImpApp:
                 buf = buf[:-1]
             elif key == "space":
                 buf += " "
-            elif key == "clear":
+            elif key in ("clear", "ctrl-u"):
                 buf = ""
             elif len(key) == 1 and key.isprintable():
                 buf += key
@@ -1410,7 +1410,7 @@ class ImpApp:
             self._edit(self.prompt[:-1])
         elif key == "space":
             self._edit(self.prompt + " ")
-        elif key == "clear":
+        elif key in ("clear", "ctrl-u"):
             self._edit("")
         elif key in ("up", "down", "left", "right"):
             pass

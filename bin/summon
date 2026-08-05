@@ -158,7 +158,7 @@ def picker_frame(visible: list[tuple[str, str]], sel: int, filt: str, status: st
             rows.append(art.paint(line, P.PINK) if i == sel else line)
     body = art.box(rows, title="spells", width=tw, body_style=(P.SILVER,))
     runes = art.box(
-        ["up/dn move · type filter · Backspace erases · Ctrl-U clears · PgUp/PgDn",
+        ["↑↓ move · type to filter · ⌫ erase · ^U clear · PgUp/PgDn",
          "Enter cast · Esc / q leave"],
         title="runes",
         width=tw,
@@ -197,9 +197,10 @@ def run_picker(run_now: bool, initial: str = "") -> int:
             if key in ("q", "Q", "esc", "ctrl-c"):
                 art.tui_cleanup()
                 return 1
-            if key in ("up", "k"):
+            # Arrows only for move — letters always filter (so jq/nano type-work).
+            if key == "up":
                 sel = max(0, sel - 1)
-            elif key in ("down", "j"):
+            elif key == "down":
                 sel = min(max(0, len(visible) - 1), sel + 1)
             elif key == "pgup":
                 sel = max(0, sel - 8)
@@ -227,11 +228,14 @@ def run_picker(run_now: bool, initial: str = "") -> int:
             elif key == "backspace":
                 filt = filt[:-1]
                 sel = 0
-            elif key == "clear":
+            elif key in ("clear", "ctrl-u"):  # termart returns ctrl-u for ^U
                 filt = ""
                 sel = 0
             elif key == "delete":
                 pass
+            elif key == "space":
+                filt += " "
+                sel = 0
             elif len(key) == 1 and key.isprintable():
                 filt += key
                 sel = 0
@@ -248,37 +252,39 @@ def run_picker(run_now: bool, initial: str = "") -> int:
 
 def main(argv: list[str]) -> int:
     argv = list(argv)
-    first = argv.pop(0) if argv else ""
-    if first in ("-h", "--help"):
+    if argv and argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0
-    if first == "--refresh":
+    if argv and argv[0] == "--refresh":
         write_cache(scan_path())
         for name, _ in read_cache():
             print(name)
         return 0
-    if first in ("-l", "--list"):
+    if argv and argv[0] in ("-l", "--list"):
         for name, _ in entries():
             print(name)
         return 0
 
-    run_now = first in ("-x", "--exec")
-    rest = argv
+    run_now = False
+    if argv and argv[0] in ("-x", "--exec"):
+        run_now = True
+        argv = argv[1:]
 
-    if run_now and rest:
-        hits = filter_entries(entries(), rest[0])
+    # -x <query> [args…] → resolve query, exec with remaining args (not the query)
+    if run_now and argv:
+        hits = filter_entries(entries(), argv[0])
         if not hits:
-            print(f"summon: no command matches '{rest[0]}'", file=sys.stderr)
+            print(f"summon: no command matches '{argv[0]}'", file=sys.stderr)
             return 1
-        name, path = hits[0]
+        name, _path = hits[0]
         try:
-            os.execvpe(name, [name] + rest, os.environ)
+            os.execvpe(name, [name] + argv[1:], os.environ)
         except OSError as e:
             print(f"summon: {e}", file=sys.stderr)
             return 1
 
     # picker: bare (prints) / -x (runs) / bare <query> (pre-filtered prints)
-    return run_picker(run_now, initial=rest[0] if rest else "")
+    return run_picker(run_now, initial=argv[0] if argv else "")
 
 
 if __name__ == "__main__":

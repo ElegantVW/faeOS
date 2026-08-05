@@ -143,7 +143,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("tick on 10", "Idle clear every 10s"),
             ("tick off", "Freeze idle clear"),
             ("scry", "Cmd + output history (also Shift-Tab)"),
-            ("spellbook", "Themed command directory"),
+            ("spellbook", "File manager TUI"),
             ("faectl", "FaeOS control panel (status / restart-llm)"),
             ("pixie-term fancy", "Fancy DRM terminal (no X/startx)"),
             ("pixie-term dress", "Pink palette + big font on this VT"),
@@ -337,7 +337,7 @@ def run_picker() -> int:
             elif key == "backspace":
                 filt = filt[:-1]
                 sel = 0
-            elif key == "clear":
+            elif key in ("clear", "ctrl-u"):  # termart: ^U → ctrl-u
                 filt = ""
                 sel = 0
             elif key == "delete":
