@@ -171,6 +171,7 @@ pub fn spark_rom() -> Cart {
         game_code: "FLSP".into(),
         maker: "FL".into(),
         path: "<built-in: spark>".into(),
+        inner_name: None,
     }
 }
 

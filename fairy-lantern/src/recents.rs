@@ -92,12 +92,7 @@ pub fn list_roms_dir() -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = rd
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.eq_ignore_ascii_case("gba"))
-                .unwrap_or(false)
-        })
+        .filter(|p| crate::cart::is_fable_path(p))
         .collect();
     paths.sort();
     paths

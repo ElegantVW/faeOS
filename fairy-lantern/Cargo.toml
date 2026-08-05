@@ -19,6 +19,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 minifb = "0.27"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = true

@@ -89,7 +89,7 @@ pub fn run_home() -> Result<Choice> {
                         return Ok(Choice::Rom(p));
                     }
                     None => {
-                        flash = "no fable chosen (or not a .gba)".into();
+                        flash = "no fable chosen (need .gba or .zip)".into();
                         items = build_items();
                     }
                 }
@@ -128,7 +128,7 @@ fn act_item(item: &Item, term: &mut RawTerm) -> Result<Option<Choice>> {
     }
 }
 
-/// Leave our TUI, run Spellbook --pick with arrow keys, return a .gba path.
+/// Leave our TUI, run Spellbook --pick with arrow keys, return a .gba/.zip path.
 fn pick_via_spellbook(term: &mut RawTerm) -> Result<Option<PathBuf>> {
     term.restore_soft()?;
 
@@ -177,13 +177,12 @@ fn pick_via_spellbook(term: &mut RawTerm) -> Result<Option<PathBuf>> {
     if !p.is_file() {
         return Ok(None);
     }
-    // only light .gba fables
-    let ok = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("gba"))
-        .unwrap_or(false);
-    if !ok {
+    if !crate::cart::is_fable_path(&p) {
+        return Ok(None);
+    }
+    // For zip: ensure it actually contains a .gba (fail early with a clear message)
+    if let Err(e) = Cart::load(&p) {
+        eprintln!("fairy-lantern: {e:#}");
         return Ok(None);
     }
     Ok(Some(p))
@@ -245,7 +244,7 @@ fn label(item: &Item) -> String {
     match item {
         Item::Last(p) => format!("Last     ·  {}", file_label(p)),
         Item::Spark => "SPARK    ·  built-in fable (always works)".into(),
-        Item::FromSpellbook => "Spellbook ·  open file manager, pick a .gba".into(),
+        Item::FromSpellbook => "Spellbook ·  pick a .gba or .zip (arrow keys)".into(),
         Item::Browse(p) => {
             let name = file_label(p);
             let title = Cart::load(p)

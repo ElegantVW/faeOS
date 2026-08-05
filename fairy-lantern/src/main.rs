@@ -282,6 +282,7 @@ fn run_self_tests() -> usize {
             game_code: "T".into(),
             maker: "00".into(),
             path: "m".into(),
+            inner_name: None,
         };
         let mut emu = Emu::new(&cart, None);
         emu.cpu.set_pc(0x0800_0000);
@@ -298,6 +299,7 @@ fn run_self_tests() -> usize {
             game_code: "T".into(),
             maker: "00".into(),
             path: "m".into(),
+            inner_name: None,
         };
         let mut emu = Emu::new(&cart, None);
         emu.bus.write16(0x0300_0000, 0x2005);
@@ -331,6 +333,7 @@ fn run_self_tests() -> usize {
             game_code: "P".into(),
             maker: "00".into(),
             path: "m".into(),
+            inner_name: None,
         };
         let mut emu = Emu::new(&cart, None);
         emu.bus.write16(0x0400_0000, 0x0003);
@@ -348,7 +351,7 @@ fn run_self_tests() -> usize {
         rom[0x100..0x108].copy_from_slice(b"FLASH_V ");
         assert!(matches!(battery::detect(&rom), battery::SaveType::Flash64 | battery::SaveType::Flash128) || matches!(battery::detect(&rom), battery::SaveType::Flash64));
         // round-trip sav
-        let cart = Cart { data: { let mut r=vec![0u8;0x400]; r[0x100..0x106].copy_from_slice(b"SRAM_V"); r }, title:"b".into(), game_code:"B".into(), maker:"00".into(), path:"m".into() };
+        let cart = Cart { data: { let mut r=vec![0u8;0x400]; r[0x100..0x106].copy_from_slice(b"SRAM_V"); r }, title:"b".into(), game_code:"B".into(), maker:"00".into(), path:"m".into(), inner_name: None };
         let mut emu = Emu::new(&cart, None);
         let sav = std::env::temp_dir().join("fairy-bat-test.sav");
         let _ = std::fs::remove_file(&sav);
