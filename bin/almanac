@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""almanac — calendar hub for faeOS.
+
+The third piece of the calendar system: month view + day agenda.
+Pulls in **Quests** (due: dates) and **Hourglass** (sessions) as read-only
+feeds. Both remain fully independent apps — Almanac never starts them
+unless you ask (keys Q / H).
+
+Own events:  $XDG_DATA_HOME/faeos/almanac/events.json
+  { "YYYY-MM-DD": [ {"title": "…", "note": "…"}, … ] }
+
+    almanac                 TUI month + agenda
+    almanac today           agenda for today (stdout)
+    almanac day YYYY-MM-DD  agenda for a day
+    almanac -h
+
+TUI:
+  ←→ month · ↑↓ day · enter day focus · n new event
+  Q open quests · H open hourglass · r refresh · q leave
+"""
+
+from __future__ import annotations
+
+import calendar
+import json
+import os
+import subprocess
+import sys
+from datetime import date, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Almanac"
+
+# ── peer data paths (read-only; same locations Quests/Hourglass use) ──
+
+def _quests_file() -> Path:
+    env = os.environ.get("QUESTS_FILE", "").strip()
+    if env:
+        return Path(env).expanduser()
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "faeos" / "quests" / "todo.txt"
+
+
+def _hourglass_sessions() -> Path:
+    env = os.environ.get("HOURGLASS_DIR", "").strip()
+    if env:
+        return Path(env).expanduser() / "sessions.jsonl"
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "faeos" / "hourglass" / "sessions.jsonl"
+
+
+def _feed_quests_due(day: date) -> list[str]:
+    """Parse todo.txt for open items with due:YYYY-MM-DD == day."""
+    path = _quests_file()
+    if not path.is_file():
+        return []
+    day_s = day.isoformat()
+    out: list[str] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or s.startswith("x "):
+                continue
+            if f"due:{day_s}" in s:
+                # strip leading priority for display
+                text = s
+                if text.startswith("(") and ") " in text[:4]:
+                    text = text[4:] if text[2] == ")" else text
+                out.append(text)
+    except OSError:
+        pass
+    return out
+
+
+def _feed_hourglass(day: date) -> list[str]:
+    path = _hourglass_sessions()
+    if not path.is_file():
+        return []
+    day_s = day.isoformat()
+    out: list[str] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = str(r.get("ts", ""))
+            if not ts.startswith(day_s):
+                continue
+            ok = "✓" if r.get("completed") else "✗"
+            sec = int(r.get("seconds", 0))
+            m, s = divmod(sec, 60)
+            out.append(f"{ok} {r.get('label', 'timer')} {m}m{s:02d}s")
+    except OSError:
+        pass
+    return out
+
+
+def data_dir() -> Path:
+    env = os.environ.get("ALMANAC_DIR", "").strip()
+    if env:
+        p = Path(env).expanduser()
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+        p = base / "faeos" / "almanac"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def events_path() -> Path:
+    return data_dir() / "events.json"
+
+
+def load_events() -> dict[str, list[dict]]:
+    path = events_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def save_events(data: dict[str, list[dict]]) -> None:
+    path = events_path()
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def add_event(day: date, title: str, note: str = "") -> None:
+    data = load_events()
+    key = day.isoformat()
+    data.setdefault(key, []).append({"title": title, "note": note})
+    save_events(data)
+
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+def agenda_for(day: date) -> list[tuple[str, str]]:
+    """Return (kind, text) rows for a day. kind in event|quest|sand."""
+    rows: list[tuple[str, str]] = []
+    for ev in load_events().get(day.isoformat(), []):
+        title = ev.get("title", "event")
+        note = ev.get("note", "")
+        rows.append(("event", title + (f" — {note}" if note else "")))
+    # Read peer files directly — no import of extensionless bin scripts
+    for text in _feed_quests_due(day):
+        rows.append(("quest", text))
+    for text in _feed_hourglass(day):
+        rows.append(("sand", text))
+    return rows
+
+
+def days_with_marks(year: int, month: int) -> set[int]:
+    """Day numbers that have any agenda item."""
+    marks: set[int] = set()
+    cal = calendar.Calendar(firstweekday=0)
+    for d in cal.itermonthdates(year, month):
+        if d.month != month:
+            continue
+        if agenda_for(d):
+            marks.add(d.day)
+    return marks
+
+
+# ── CLI ────────────────────────────────────────────────────────────────
+
+def cmd_day(day: date) -> int:
+    rows = agenda_for(day)
+    print(f"# {NAME}  {day.isoformat()}  ({len(rows)})")
+    if not rows:
+        print("  (nothing on the parchment)")
+        return 0
+    for kind, text in rows:
+        print(f"  [{kind:5}]  {text}")
+    return 0
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return cmd_day(date.today())
+
+    art.tui_begin(fd, "almanac")
+    today = date.today()
+    cursor = today
+    status = "the year turns"
+    focus = "month"  # month | day
+
+    def launch(cmd: str) -> None:
+        nonlocal status
+        art.tui_cleanup()
+        try:
+            subprocess.call([str(Path.home() / "bin" / cmd)])
+        except OSError:
+            try:
+                subprocess.call([cmd])
+            except OSError as e:
+                print(f"almanac: {e}")
+        new_fd = art.tui_open_tty()
+        if new_fd is None:
+            raise SystemExit(0)
+        art.tui_begin(new_fd, "almanac")
+        # rebind — caller must update fd_box
+        fd_box[0] = new_fd
+        status = f"returned from {cmd}"
+
+    fd_box = [fd]
+
+    try:
+        while True:
+            fd = fd_box[0]
+            y, m = cursor.year, cursor.month
+            marks = days_with_marks(y, m)
+            tw = art.term_width()
+            th = art.term_height()
+            body_w = tw - 4
+
+            month_name = calendar.month_name[m]
+            head = art.box(
+                [
+                    _fit(f"{month_name} {y} · cursor {cursor.isoformat()} · today {today.isoformat()}", body_w),
+                    _fit(status, body_w),
+                ],
+                title=f"{NAME} ✦ calendar",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+            runes = art.box(
+                [
+                    _fit("←→ month · ↑↓←→ day · enter focus · n event", body_w),
+                    _fit("Q quests · H hourglass · r refresh · q leave", body_w),
+                ],
+                title="Runes",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+
+            # month grid
+            weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(y, m)
+            grid: list[str] = []
+            grid.append(art.paint(art.pad_vis("  Mo Tu We Th Fr Sa Su", body_w), P.PINK_DIM))
+            for week in weeks:
+                cells = []
+                for d in week:
+                    if d == 0:
+                        cells.append("   ")
+                        continue
+                    day = date(y, m, d)
+                    label = f"{d:2d}"
+                    if day == cursor:
+                        label = f"[{d:2d}]" if d < 10 else f"{d:2d}*"
+                        # compact select mark
+                        cell = f"{d:2d}"
+                        cell = f"\033[7m{cell}\033[27m"
+                    else:
+                        cell = f"{d:2d}"
+                        if day == today:
+                            cell = art.paint(cell, P.OK)
+                        elif d in marks:
+                            cell = art.paint(cell, P.PINK)
+                    cells.append(f"{cell} " if not cell.startswith("\033") else cell + " ")
+                # rebuild cleaner
+                parts = []
+                for d in week:
+                    if d == 0:
+                        parts.append("  .")
+                        continue
+                    day = date(y, m, d)
+                    s = f"{d:2d}"
+                    if day == cursor:
+                        s = "\033[7m" + s + "\033[27m"
+                    elif day == today:
+                        s = "\033[38;5;78m" + s + "\033[0m"
+                    elif d in marks:
+                        s = "\033[38;5;175m" + s + "\033[0m"
+                    parts.append(s)
+                line = "  " + " ".join(parts)
+                grid.append(art.pad_vis(line, body_w))
+
+            # agenda for cursor day
+            agenda = agenda_for(cursor)
+            ag_rows = [art.paint(art.pad_vis(_fit(f"agenda · {cursor.isoformat()}", body_w), body_w), P.PINK_DIM)]
+            if not agenda:
+                ag_rows.append(_fit("  (nothing — n to add event, or due: in quests)", body_w))
+            else:
+                for kind, text in agenda[:12]:
+                    icon = {"event": "✦", "quest": "○", "sand": "⌛"}.get(kind, "·")
+                    ag_rows.append(_fit(f"  {icon} [{kind}] {text}", body_w))
+
+            # split body: grid + agenda
+            avail = max(6, th - _line_count(head) - _line_count(runes) - 4)
+            # use single box with both sections
+            body_lines = grid + [""] + ag_rows
+            body_lines = body_lines[:avail]
+            while len(body_lines) < min(avail, 8):
+                body_lines.append(" " * body_w)
+
+            body = art.box(
+                [art.pad_vis(r if art.vis_len(r) <= body_w else _fit(art.strip_ansi(r), body_w), body_w)
+                 if art.strip_ansi(r) == r else (
+                     r + " " * max(0, body_w - art.vis_len(r))
+                 )
+                 for r in body_lines],
+                title="leaf",
+                width=tw,
+                body_style=(P.SILVER,),
+            )
+            frame = "\n".join([head, "", body, "", runes])
+            if _line_count(frame) > th:
+                frame = "\n".join(frame.splitlines()[:th])
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                pass
+            status = "the year turns"
+
+            key = art.tui_read_key(fd)
+            if key == "Q":
+                launch("quests")
+                continue
+            if key == "H":
+                launch("hourglass")
+                continue
+            if key in ("q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "left":
+                cursor = cursor - timedelta(days=1)
+            elif key == "right":
+                cursor = cursor + timedelta(days=1)
+            elif key == "up":
+                cursor = cursor - timedelta(days=7)
+            elif key == "down":
+                cursor = cursor + timedelta(days=7)
+            elif key == "[":
+                # previous month (clamp day)
+                if m == 1:
+                    ny, nm = y - 1, 12
+                else:
+                    ny, nm = y, m - 1
+                last = calendar.monthrange(ny, nm)[1]
+                cursor = date(ny, nm, min(cursor.day, last))
+            elif key == "]":
+                if m == 12:
+                    ny, nm = y + 1, 1
+                else:
+                    ny, nm = y, m + 1
+                last = calendar.monthrange(ny, nm)[1]
+                cursor = date(ny, nm, min(cursor.day, last))
+            elif key == "t":
+                cursor = date.today()
+                status = "back to today"
+            elif key == "r":
+                status = "refreshed"
+            elif key == "n":
+                art.tui_suspend()
+                title = ""
+                try:
+                    with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
+                        tout.write(art.paint(f"\n  ✦ event on {cursor.isoformat()}: ", P.PINK))
+                        tout.flush()
+                        title = tin.readline().strip()
+                except OSError:
+                    title = ""
+                finally:
+                    art.tui_resume()
+                if title:
+                    add_event(cursor, title)
+                    status = "event inked"
+                else:
+                    status = "cancelled"
+            elif key == "enter":
+                rows = agenda_for(cursor)
+                status = f"{len(rows)} items on {cursor.isoformat()}"
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    if not argv:
+        return run_tui()
+    if argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if argv[0] in ("today", "t"):
+        return cmd_day(date.today())
+    if argv[0] in ("day", "d"):
+        if len(argv) < 2:
+            print("almanac day YYYY-MM-DD", file=sys.stderr)
+            return 2
+        return cmd_day(date.fromisoformat(argv[1]))
+    if argv[0] in ("tui", "ui"):
+        return run_tui()
+    # bare date
+    try:
+        return cmd_day(date.fromisoformat(argv[0]))
+    except ValueError:
+        print(f"almanac: unknown {argv[0]!r}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

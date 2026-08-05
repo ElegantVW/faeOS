@@ -33,6 +33,9 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | `alchemy` / `brew` / `sip` / `distill` | Alchemy — pacman UI: search, install, upgrade, clean cache |
 | `grimoire` / `grimoire new …` | Grimoire — markdown notes under `~/notes` |
 | `abacus` / `abacus "2+2"` | Abacus — calculator (TUI or one-shot) |
+| `quests` / `quests add …` | Quests — todo.txt log (independent) |
+| `hourglass` / `hourglass 25` | Hourglass — timer / pomodoro (independent) |
+| `almanac` / `almanac today` | Almanac — calendar hub (reads quests + hourglass) |
 | `spellbook` | File-manager TUI (j/k move, ? help, n/d/r/e dialogs) |
 | `tick` / `termfix` | Screen tick + TTY line-edit recovery |
 
@@ -51,6 +54,9 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | **Alchemy** | Packages (pacman) |
 | **Grimoire** | Notes (markdown) |
 | **Abacus** | Calculator |
+| **Quests** | Todos (todo.txt) |
+| **Hourglass** | Timer / pomodoro |
+| **Almanac** | Calendar hub |
 
 Prompt: framed pink status box (user · mood · music · RAM/CPU/HDD/temp) + `>`.
 

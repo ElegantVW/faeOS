@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""quests — todo log for faeOS (todo.txt).
+
+Independent app. Almanac reads the same file for due dates; Quests never
+needs Almanac to run.
+
+Storage:  $XDG_DATA_HOME/faeos/quests/todo.txt   (default ~/.local/share/…)
+Override: QUESTS_FILE=/path/to/todo.txt
+
+    quests                    TUI
+    quests list [q]           open quests
+    quests add <text>         append a quest
+    quests done <n|text>      complete by index or match
+    quests due [YYYY-MM-DD]   due on day (default today)
+    quests -h
+
+TUI: ↑↓ · enter/x complete · n new · d delete · / filter · . show done · q
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+import time
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Quests"
+_DUE_RE = re.compile(r"\bdue:(\d{4}-\d{2}-\d{2})\b")
+_PRI_RE = re.compile(r"^\(([A-Z])\)\s+")
+
+
+def data_file() -> Path:
+    env = os.environ.get("QUESTS_FILE", "").strip()
+    if env:
+        return Path(env).expanduser()
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    p = base / "faeos" / "quests" / "todo.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        p.write_text(
+            "# quests — todo.txt · due:YYYY-MM-DD · (A) priority · +project @context\n",
+            encoding="utf-8",
+        )
+    return p
+
+
+@dataclass
+class Quest:
+    raw: str
+    text: str
+    done: bool
+    priority: str | None
+    due: date | None
+    line_no: int  # 0-based in file lines list
+
+
+def parse_line(raw: str, line_no: int) -> Quest | None:
+    s = raw.rstrip("\n")
+    if not s.strip() or s.lstrip().startswith("#"):
+        return None
+    done = s.startswith("x ")
+    body = s[2:] if done else s
+    pri = None
+    m = _PRI_RE.match(body)
+    if m:
+        pri = m.group(1)
+        body = body[m.end() :]
+    due = None
+    dm = _DUE_RE.search(s)
+    if dm:
+        try:
+            due = date.fromisoformat(dm.group(1))
+        except ValueError:
+            pass
+    return Quest(raw=s, text=body.strip(), done=done, priority=pri, due=due, line_no=line_no)
+
+
+def load_quests(path: Path | None = None) -> tuple[list[str], list[Quest]]:
+    path = path or data_file()
+    try:
+        plain = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        plain = []
+    quests: list[Quest] = []
+    for i, line in enumerate(plain):
+        q = parse_line(line, i)
+        if q:
+            quests.append(q)
+    return plain, quests
+
+
+def save_lines(lines: list[str], path: Path | None = None) -> None:
+    path = path or data_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "\n".join(lines)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    path.write_text(text, encoding="utf-8")
+
+
+def add_quest(text: str, path: Path | None = None) -> Quest:
+    path = path or data_file()
+    lines, _ = load_quests(path)
+    lines.append(text.strip())
+    save_lines(lines, path)
+    return parse_line(text.strip(), len(lines) - 1)  # type: ignore[return-value]
+
+
+def complete_quest(q: Quest, path: Path | None = None) -> None:
+    path = path or data_file()
+    lines, _ = load_quests(path)
+    if q.line_no < 0 or q.line_no >= len(lines):
+        return
+    line = lines[q.line_no]
+    if line.startswith("x "):
+        return
+    today = date.today().isoformat()
+    lines[q.line_no] = f"x {today} {line}"
+    save_lines(lines, path)
+
+
+def delete_quest(q: Quest, path: Path | None = None) -> None:
+    path = path or data_file()
+    lines, _ = load_quests(path)
+    if 0 <= q.line_no < len(lines):
+        del lines[q.line_no]
+        save_lines(lines, path)
+
+
+def quests_due_on(day: date, path: Path | None = None) -> list[Quest]:
+    _, qs = load_quests(path)
+    return [q for q in qs if not q.done and q.due == day]
+
+
+def quests_open(path: Path | None = None) -> list[Quest]:
+    _, qs = load_quests(path)
+    return [q for q in qs if not q.done]
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+def _fmt_quest(q: Quest) -> str:
+    pri = f"({q.priority}) " if q.priority else ""
+    mark = "✓ " if q.done else "○ "
+    # q.text already includes due:/+/@ tags from the raw line
+    return f"{mark}{pri}{q.text}"
+
+
+# ── CLI ────────────────────────────────────────────────────────────────
+
+def cmd_list(filt: str = "", *, show_done: bool = False) -> int:
+    _, qs = load_quests()
+    if not show_done:
+        qs = [q for q in qs if not q.done]
+    if filt:
+        toks = filt.lower().split()
+        qs = [q for q in qs if all(t in _fmt_quest(q).lower() for t in toks)]
+    print(f"# {NAME}  {data_file()}  ({len(qs)})")
+    for i, q in enumerate(qs, 1):
+        print(f"{i:3}  {_fmt_quest(q)}")
+    return 0
+
+
+def cmd_due(day_s: str | None = None) -> int:
+    day = date.fromisoformat(day_s) if day_s else date.today()
+    qs = quests_due_on(day)
+    print(f"# {NAME} due {day.isoformat()}  ({len(qs)})")
+    for q in qs:
+        print(f"  {_fmt_quest(q)}")
+    return 0
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return cmd_list()
+
+    art.tui_begin(fd, "quests")
+    show_done = False
+    filt = ""
+    mode = "nav"
+    sel = 0
+    status = ""
+    confirm = ""
+    pending: Quest | None = None
+
+    def reload() -> list[Quest]:
+        _, qs = load_quests()
+        if not show_done:
+            qs = [q for q in qs if not q.done]
+        if filt:
+            toks = filt.lower().split()
+            qs = [q for q in qs if all(t in _fmt_quest(q).lower() for t in toks)]
+        # priority sort: A first, then due soon, then text
+        def key(q: Quest):
+            pri = q.priority or "Z"
+            due = q.due.toordinal() if q.due else 10**9
+            return (q.done, pri, due, q.text.lower())
+        qs.sort(key=key)
+        return qs
+
+    try:
+        while True:
+            qs = reload()
+            if sel >= len(qs):
+                sel = max(0, len(qs) - 1)
+            tw = art.term_width()
+            th = art.term_height()
+            body_w = tw - 4
+            st = status or f"{len(qs)} quests · {data_file().name}"
+            if mode == "filter":
+                st = f"filter: {filt}_"
+            head = art.box(
+                [_fit(st, body_w)]
+                + ([art.paint(_fit(confirm, body_w), P.WARN)] if confirm else []),
+                title=f"{NAME} ✦ log",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+            runes = art.box(
+                [
+                    _fit("↑↓ move · enter/x complete · n new · d delete", body_w),
+                    _fit("/ filter · . toggle done · q leave", body_w),
+                ],
+                title="Runes",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+            avail = max(2, th - _line_count(head) - _line_count(runes) - 4)
+            rows: list[str] = []
+            if not qs:
+                rows = [_fit("(no quests — n to add)", body_w)]
+            else:
+                start = max(0, min(sel - avail // 2, max(0, len(qs) - avail)))
+                end = min(len(qs), start + avail)
+                for i in range(start, end):
+                    q = qs[i]
+                    mark = "✦" if i == sel else " "
+                    line = f" {mark} {_fmt_quest(q)}"
+                    line = art.pad_vis(_fit(line, body_w), body_w)
+                    if i == sel:
+                        rows.append(art.paint(line, P.PINK))
+                    elif q.due and q.due < date.today() and not q.done:
+                        rows.append(art.paint(line, P.WARN))
+                    elif q.done:
+                        rows.append(art.paint(line, P.MUTED))
+                    else:
+                        rows.append(line)
+            body = art.box(rows or [" "], title="board", width=tw, body_style=(P.SILVER,))
+            frame = "\n".join([head, "", body, "", runes])
+            if _line_count(frame) > th:
+                frame = "\n".join(frame.splitlines()[:th])
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                pass
+            status = ""
+
+            key = art.tui_read_key(fd)
+
+            if mode == "confirm":
+                if key in ("y", "Y") and pending:
+                    delete_quest(pending)
+                    status = "quest burned"
+                    pending = None
+                    confirm = ""
+                    mode = "nav"
+                elif key in ("n", "N", "esc", "q"):
+                    pending = None
+                    confirm = ""
+                    mode = "nav"
+                    status = "kept"
+                continue
+
+            if mode == "filter":
+                if key in ("esc", "enter"):
+                    mode = "nav"
+                elif key == "backspace":
+                    filt = filt[:-1]
+                elif key in ("clear", "ctrl-u"):
+                    filt = ""
+                elif key == "space":
+                    filt += " "
+                elif len(key) == 1 and key.isprintable():
+                    filt += key
+                continue
+
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "up":
+                sel = max(0, sel - 1)
+            elif key == "down":
+                sel = min(max(0, len(qs) - 1), sel + 1)
+            elif key in ("enter", "x", "X"):
+                if qs:
+                    complete_quest(qs[sel])
+                    status = "completed"
+            elif key == "n":
+                art.tui_suspend()
+                try:
+                    with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
+                        tout.write(art.paint("\n  ✦ new quest: ", P.PINK))
+                        tout.flush()
+                        line = tin.readline().strip()
+                except (EOFError, OSError):
+                    line = ""
+                finally:
+                    art.tui_resume()
+                if line:
+                    add_quest(line)
+                    status = "quest added"
+                else:
+                    status = "cancelled"
+            elif key in ("d", "D", "delete"):
+                if qs:
+                    pending = qs[sel]
+                    mode = "confirm"
+                    confirm = f"burn quest?  y / n  ·  {pending.text[:40]}"
+            elif key == "/":
+                mode = "filter"
+            elif key == ".":
+                show_done = not show_done
+                status = "showing done" if show_done else "open only"
+                sel = 0
+            elif key in ("clear", "ctrl-u"):
+                filt = ""
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    if not argv:
+        return run_tui()
+    cmd = argv[0]
+    rest = argv[1:]
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if cmd in ("list", "ls"):
+        return cmd_list(" ".join(rest))
+    if cmd in ("add", "a", "new"):
+        if not rest:
+            print("quests add <text>", file=sys.stderr)
+            return 2
+        q = add_quest(" ".join(rest))
+        print(_fmt_quest(q))
+        return 0
+    if cmd in ("done", "x", "complete"):
+        if not rest:
+            print("quests done <n|text>", file=sys.stderr)
+            return 2
+        _, qs = load_quests()
+        open_qs = [q for q in qs if not q.done]
+        target = " ".join(rest)
+        if target.isdigit():
+            i = int(target) - 1
+            if 0 <= i < len(open_qs):
+                complete_quest(open_qs[i])
+                print("ok")
+                return 0
+        for q in open_qs:
+            if target.lower() in q.text.lower():
+                complete_quest(q)
+                print("ok")
+                return 0
+        print("quests: not found", file=sys.stderr)
+        return 1
+    if cmd == "due":
+        return cmd_due(rest[0] if rest else None)
+    if cmd in ("tui", "ui"):
+        return run_tui()
+    # bare text → add
+    add_quest(" ".join(argv))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

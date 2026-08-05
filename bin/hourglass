@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""hourglass — timer for faeOS.
+
+Independent app. Almanac can list finished sessions from the same log;
+Hourglass never needs Almanac to run.
+
+Storage:
+  $XDG_DATA_HOME/faeos/hourglass/sessions.jsonl   (completed)
+  Override dir: HOURGLASS_DIR=…
+
+    hourglass                 TUI (pick / run)
+    hourglass 25              start 25-minute sand
+    hourglass 90s             90 seconds
+    hourglass pomodoro        25 min focus
+    hourglass break           5 min break
+    hourglass log             recent sessions
+    hourglass -h
+
+TUI: ↑↓ preset · enter start · n custom minutes · q leave
+During run: space pause · q abort · auto-logs on complete
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Hourglass"
+
+PRESETS = [
+    ("pomodoro", 25 * 60, "focus sand (25m)"),
+    ("break", 5 * 60, "short break (5m)"),
+    ("long break", 15 * 60, "long break (15m)"),
+    ("hour", 60 * 60, "one hour"),
+    ("5 min", 5 * 60, "five minutes"),
+]
+
+
+def data_dir() -> Path:
+    env = os.environ.get("HOURGLASS_DIR", "").strip()
+    if env:
+        p = Path(env).expanduser()
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+        p = base / "faeos" / "hourglass"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def sessions_path() -> Path:
+    return data_dir() / "sessions.jsonl"
+
+
+def log_session(label: str, seconds: int, *, completed: bool) -> None:
+    rec = {
+        "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "label": label,
+        "seconds": seconds,
+        "completed": completed,
+    }
+    path = sessions_path()
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def load_sessions(limit: int = 50) -> list[dict]:
+    path = sessions_path()
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return []
+    return rows[-limit:]
+
+
+def sessions_on_day(day_iso: str) -> list[dict]:
+    """day_iso = YYYY-MM-DD local."""
+    out = []
+    for r in load_sessions(200):
+        ts = r.get("ts", "")
+        if ts.startswith(day_iso):
+            out.append(r)
+    return out
+
+
+def parse_duration(s: str) -> int | None:
+    s = s.strip().lower()
+    if not s:
+        return None
+    if s in ("pomodoro", "focus"):
+        return 25 * 60
+    if s in ("break", "short"):
+        return 5 * 60
+    if s in ("long", "longbreak", "long-break"):
+        return 15 * 60
+    if s.endswith("s") and s[:-1].isdigit():
+        return int(s[:-1])
+    if s.endswith("m") and s[:-1].isdigit():
+        return int(s[:-1]) * 60
+    if s.endswith("h") and s[:-1].isdigit():
+        return int(s[:-1]) * 3600
+    if s.isdigit():
+        return int(s) * 60  # bare number = minutes
+    return None
+
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+def _fmt_mmss(sec: float) -> str:
+    sec = max(0, int(sec))
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def _bar(pct: float, width: int) -> str:
+    pct = max(0.0, min(1.0, pct))
+    width = max(8, width)
+    filled = int(round(width * pct))
+    return "█" * filled + "░" * (width - filled)
+
+
+def run_timer(fd: int, label: str, total: int) -> bool:
+    """Run countdown. Returns True if completed fully."""
+    remaining = float(total)
+    paused = False
+    last = time.monotonic()
+    status = "running"
+
+    while remaining > 0:
+        now = time.monotonic()
+        if not paused:
+            remaining -= now - last
+        last = now
+        if remaining < 0:
+            remaining = 0
+
+        tw = art.term_width()
+        th = art.term_height()
+        body_w = tw - 4
+        pct = 1.0 - (remaining / total) if total else 1.0
+        big = _fmt_mmss(remaining)
+        head = art.box(
+            [
+                _fit(f"{label} · {status}", body_w),
+                _fit(f" {_bar(pct, max(10, body_w - 4))}  {int(pct * 100)}%", body_w),
+            ],
+            title=f"{NAME} ✦ sand",
+            width=tw,
+            body_style=(P.MUTED,),
+        )
+        # big time in body
+        pad = max(0, (body_w - art.vis_len(big)) // 2)
+        rows = [
+            " " * body_w,
+            art.paint((" " * pad) + big + (" " * max(0, body_w - pad - art.vis_len(big))), P.PINK, P.BOLD),
+            " " * body_w,
+            art.pad_vis(_fit(f"  total {_fmt_mmss(total)} · elapsed {_fmt_mmss(total - remaining)}", body_w), body_w),
+        ]
+        # fill height a bit
+        while len(rows) < max(4, th - 14):
+            rows.append(" " * body_w)
+        body = art.box(rows, title="glass", width=tw, body_style=(P.SILVER,))
+        runes = art.box(
+            [_fit("space pause/resume · q abort (logs incomplete)", body_w)],
+            title="Runes",
+            width=tw,
+            body_style=(P.MUTED,),
+        )
+        frame = "\n".join([head, "", body, "", runes])
+        if _line_count(frame) > th:
+            frame = "\n".join(frame.splitlines()[:th])
+        try:
+            art.paint_frame(fd, frame)
+        except OSError:
+            pass
+
+        key = art.tui_read_key(fd, timeout=0.2)
+        if key == "":
+            continue
+        if key in ("q", "Q", "esc", "ctrl-c"):
+            log_session(label, total, completed=False)
+            return False
+        if key == "space":
+            paused = not paused
+            status = "paused" if paused else "running"
+            last = time.monotonic()
+
+    log_session(label, total, completed=True)
+    # done flash
+    for _ in range(6):
+        tw = art.term_width()
+        body_w = tw - 4
+        msg = art.paint(art.pad_vis("  ✦ the sand has run out ✦", body_w), P.OK, P.BOLD)
+        head = art.box([_fit(f"{label} · complete", body_w)], title=f"{NAME} ✦ done", width=tw)
+        body = art.box([msg, " " * body_w, _fit("  press any key", body_w)], title="glass", width=tw)
+        try:
+            art.paint_frame(fd, "\n".join([head, "", body]))
+        except OSError:
+            pass
+        if art.tui_read_key(fd, timeout=0.4):
+            break
+    # bell if possible
+    try:
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+    except Exception:
+        pass
+    return True
+
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        print("hourglass: need a tty (or: hourglass 25)", file=sys.stderr)
+        return 1
+    art.tui_begin(fd, "hourglass")
+    sel = 0
+    status = "choose a sand"
+    try:
+        while True:
+            tw = art.term_width()
+            th = art.term_height()
+            body_w = tw - 4
+            head = art.box(
+                [_fit(status, body_w)],
+                title=f"{NAME} ✦ presets",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+            runes = art.box(
+                [
+                    _fit("↑↓ move · enter start · n custom minutes · l log · q leave", body_w),
+                ],
+                title="Runes",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+            avail = max(3, th - _line_count(head) - _line_count(runes) - 4)
+            rows = []
+            for i, (name, sec, blurb) in enumerate(PRESETS):
+                mark = "✦" if i == sel else " "
+                line = f" {mark} {name:<12} {_fmt_mmss(sec):>8}  {blurb}"
+                line = art.pad_vis(_fit(line, body_w), body_w)
+                rows.append(art.paint(line, P.PINK) if i == sel else line)
+            while len(rows) < min(avail, 8):
+                rows.append(" " * body_w)
+            body = art.box(rows, title="vials", width=tw, body_style=(P.SILVER,))
+            frame = "\n".join([head, "", body, "", runes])
+            if _line_count(frame) > th:
+                frame = "\n".join(frame.splitlines()[:th])
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                pass
+            status = "choose a sand"
+
+            key = art.tui_read_key(fd)
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "up":
+                sel = max(0, sel - 1)
+            elif key == "down":
+                sel = min(len(PRESETS) - 1, sel + 1)
+            elif key == "enter":
+                name, sec, _ = PRESETS[sel]
+                run_timer(fd, name, sec)
+                status = "sand finished"
+            elif key == "n":
+                art.tui_suspend()
+                mins = ""
+                try:
+                    with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
+                        tout.write(art.paint("\n  ✦ minutes: ", P.PINK))
+                        tout.flush()
+                        mins = tin.readline().strip()
+                except OSError:
+                    mins = ""
+                finally:
+                    art.tui_resume()
+                sec = parse_duration(mins if (mins.endswith(("m", "s", "h")) or not mins.isdigit()) else mins)
+                if sec and sec > 0:
+                    run_timer(fd, f"custom {mins}", sec)
+                else:
+                    status = "bad duration"
+            elif key == "l":
+                art.tui_suspend()
+                try:
+                    with open("/dev/tty", "w") as tout:
+                        tout.write(f"\n# {NAME} log\n")
+                        for r in load_sessions(20):
+                            ok = "✓" if r.get("completed") else "✗"
+                            tout.write(
+                                f"  {ok} {r.get('ts', '')}  {r.get('label')}  "
+                                f"{_fmt_mmss(int(r.get('seconds', 0)))}\n"
+                            )
+                        tout.write("\n  press Enter…\n")
+                        tout.flush()
+                    with open("/dev/tty", "r") as tin:
+                        tin.readline()
+                except OSError:
+                    pass
+                finally:
+                    art.tui_resume()
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    if not argv:
+        return run_tui()
+    if argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if argv[0] in ("log", "sessions"):
+        for r in load_sessions(30):
+            ok = "✓" if r.get("completed") else "✗"
+            print(f"{ok}  {r.get('ts','')}  {r.get('label')}  {_fmt_mmss(int(r.get('seconds',0)))}")
+        return 0
+    if argv[0] in ("tui", "ui"):
+        return run_tui()
+    sec = parse_duration(argv[0])
+    if sec is None:
+        print(f"hourglass: bad duration {argv[0]!r}", file=sys.stderr)
+        return 2
+    label = argv[0]
+    fd = art.tui_open_tty()
+    if fd is None:
+        # headless: sleep with prints
+        print(f"# {NAME}  {_fmt_mmss(sec)}")
+        end = time.time() + sec
+        try:
+            while time.time() < end:
+                left = end - time.time()
+                print(f"\r  {_fmt_mmss(left)}  ", end="", flush=True)
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            log_session(label, sec, completed=False)
+            print("\naborted")
+            return 1
+        print("\ndone")
+        log_session(label, sec, completed=True)
+        return 0
+    art.tui_begin(fd, "hourglass")
+    try:
+        run_timer(fd, label, sec)
+    finally:
+        art.tui_cleanup()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
