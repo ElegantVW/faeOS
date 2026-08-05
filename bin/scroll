@@ -166,6 +166,8 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("reflection full", "Capture whole desktop"),
             ("reflection window", "Capture focused window"),
             ("reflection region", "Drag a rectangle"),
+            ("reflection view chafa|normal", "Terminal art vs real image open"),
+            ("reflection open --normal", "Open last shot in image viewer"),
             ("termfix", "Reset TTY + line-edit after glitches"),
             ("tick status", "Tick + grace state"),
             ("tick on 10", "Idle clear every 10s"),

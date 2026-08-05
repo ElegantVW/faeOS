@@ -6,19 +6,24 @@ Backends: ImageMagick import, scrot/maim/grim, or pure X11 grab.
 
 Storage:  $XDG_DATA_HOME/faeos/reflection/shots/
 Override: REFLECTION_DIR=/path
+View:     REFLECTION_VIEW=chafa|normal  (or: reflection view …)
 
     reflection                  TUI gallery
-    reflection full             capture whole desktop
-    reflection window           focused window
-    reflection region           drag a rectangle
+    reflection full [--open]    capture whole desktop
+    reflection window [--open]  focused window
+    reflection region [--open]  drag a rectangle
     reflection list [N]         recent shots
     reflection last             path of newest
-    reflection open [path]      preview (chafa / open)
+    reflection open [path]      open by current view mode
+    reflection open --chafa     force terminal (chafa) preview
+    reflection open --normal    force real image (xdg-open / feh / …)
+    reflection view [chafa|normal]  show or set default view mode
     reflection backend          which tools are live
     reflection -h
 
-TUI: ↑↓ move · enter open · f full · w window · r region
-     d delete · o open external · y path to stdout · q leave
+TUI: ↑↓ move · enter open (by view mode) · v toggle chafa/normal
+     f full · w window · r region · d delete · o always normal
+     y path · q leave
 """
 
 from __future__ import annotations
@@ -43,6 +48,9 @@ from fae_termart import Palette as P
 
 NAME = "Reflection"
 MAX_INDEX = 500
+VIEW_CHAFA = "chafa"
+VIEW_NORMAL = "normal"
+VIEW_MODES = (VIEW_CHAFA, VIEW_NORMAL)
 
 
 # ── paths ──────────────────────────────────────────────────────────────
@@ -70,6 +78,71 @@ def shots_dir() -> Path:
 
 def index_path() -> Path:
     return data_dir() / "index.jsonl"
+
+
+def config_path() -> Path:
+    return data_dir() / "config.json"
+
+
+def load_config() -> dict:
+    path = config_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_config(cfg: dict) -> None:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def get_view_mode() -> str:
+    """chafa = terminal art · normal = real image viewer / text glass."""
+    env = os.environ.get("REFLECTION_VIEW", "").strip().lower()
+    if env in VIEW_MODES:
+        return env
+    if env in ("term", "terminal", "symbols"):
+        return VIEW_CHAFA
+    if env in ("real", "image", "external", "native", "viewer"):
+        return VIEW_NORMAL
+    cfg = load_config()
+    mode = str(cfg.get("view", VIEW_CHAFA)).strip().lower()
+    if mode in VIEW_MODES:
+        return mode
+    if mode in ("term", "terminal", "symbols"):
+        return VIEW_CHAFA
+    if mode in ("real", "image", "external", "native", "viewer"):
+        return VIEW_NORMAL
+    # default: chafa when available, else normal
+    return VIEW_CHAFA if _have("chafa") else VIEW_NORMAL
+
+
+def set_view_mode(mode: str) -> str:
+    mode = mode.strip().lower()
+    aliases = {
+        "term": VIEW_CHAFA,
+        "terminal": VIEW_CHAFA,
+        "symbols": VIEW_CHAFA,
+        "c": VIEW_CHAFA,
+        "real": VIEW_NORMAL,
+        "image": VIEW_NORMAL,
+        "external": VIEW_NORMAL,
+        "native": VIEW_NORMAL,
+        "viewer": VIEW_NORMAL,
+        "n": VIEW_NORMAL,
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in VIEW_MODES:
+        raise ValueError(f"view must be chafa or normal, not {mode!r}")
+    cfg = load_config()
+    cfg["view"] = mode
+    save_config(cfg)
+    return mode
 
 
 # ── index ──────────────────────────────────────────────────────────────
@@ -710,7 +783,7 @@ def cmd_last() -> int:
     return 0
 
 
-def cmd_capture(mode: str) -> int:
+def cmd_capture(mode: str, *, open_after: bool = False, open_mode: str | None = None) -> int:
     shot, be = do_capture(mode)
     if shot is None:
         print(f"reflection: capture failed — {be}", file=sys.stderr)
@@ -720,10 +793,12 @@ def cmd_capture(mode: str) -> int:
         f"reflection: {shot.mode} via {be} · {shot.width}×{shot.height} · {_fmt_bytes(shot.bytes)}",
         file=sys.stderr,
     )
+    if open_after:
+        return cmd_open(shot.path, view=open_mode or get_view_mode())
     return 0
 
 
-def cmd_open(path: Path | None = None) -> int:
+def cmd_open(path: Path | None = None, *, view: str | None = None) -> int:
     if path is None:
         shots = list_shots(1)
         if not shots:
@@ -734,18 +809,50 @@ def cmd_open(path: Path | None = None) -> int:
     if not path.is_file():
         print(f"reflection: not found: {path}", file=sys.stderr)
         return 1
-    # if stdout is tty, try chafa
-    if sys.stdout.isatty() and _have("chafa"):
-        cols = shutil.get_terminal_size((80, 24)).columns
-        rows = max(8, shutil.get_terminal_size((80, 24)).lines - 4)
-        lines = preview_chafa(path, cols, rows)
-        if lines:
-            print("\n".join(lines))
-            print(f"\n{path}")
-            return 0
+    mode = (view or get_view_mode()).lower()
+    if mode == VIEW_CHAFA:
+        if not _have("chafa"):
+            print("reflection: chafa not installed — opening normal image", file=sys.stderr)
+            mode = VIEW_NORMAL
+        elif sys.stdout.isatty() or True:
+            cols = shutil.get_terminal_size((80, 24)).columns
+            rows = max(8, shutil.get_terminal_size((80, 24)).lines - 4)
+            lines = preview_chafa(path, cols, rows)
+            if lines:
+                # write to tty when stdout is piped so colours still work
+                dest = sys.stdout
+                try:
+                    if not sys.stdout.isatty():
+                        dest = open("/dev/tty", "w")
+                except OSError:
+                    dest = sys.stdout
+                print("\n".join(lines), file=dest)
+                print(f"\n{path}", file=dest)
+                if dest is not sys.stdout:
+                    dest.close()
+                return 0
+            print("reflection: chafa preview empty — falling back to normal", file=sys.stderr)
+            mode = VIEW_NORMAL
     be = open_external(path)
-    print(f"reflection: opened with {be}: {path}", file=sys.stderr)
-    return 0 if be != "no viewer" and be != "missing" else 1
+    print(f"reflection: opened normal image with {be}: {path}", file=sys.stderr)
+    return 0 if be not in ("no viewer", "missing") else 1
+
+
+def cmd_view(argv: list[str]) -> int:
+    if not argv:
+        mode = get_view_mode()
+        print(f"view: {mode}")
+        print(f"  chafa  — terminal art preview (chafa symbols)")
+        print(f"  normal — real PNG via xdg-open / feh / imv / …")
+        print(f"config: {config_path()}")
+        return 0
+    try:
+        mode = set_view_mode(argv[0])
+    except ValueError as e:
+        print(f"reflection: {e}", file=sys.stderr)
+        return 2
+    print(f"reflection: view mode → {mode}", file=sys.stderr)
+    return 0
 
 
 # ── TUI ────────────────────────────────────────────────────────────────
@@ -785,8 +892,14 @@ def _mirror_rows(
     return rows[:n_rows]
 
 
-def _glass_rows(shot: Shot | None, body_w: int, n_rows: int) -> list[str]:
-    """Looking-glass body: chafa preview or text fallback, exactly n_rows."""
+def _glass_rows(
+    shot: Shot | None,
+    body_w: int,
+    n_rows: int,
+    *,
+    view: str,
+) -> list[str]:
+    """Looking-glass body: chafa art or normal meta card, exactly n_rows."""
     n_rows = max(1, n_rows)
     if shot is None:
         rows = [
@@ -795,20 +908,36 @@ def _glass_rows(shot: Shot | None, body_w: int, n_rows: int) -> list[str]:
                 body_w,
             )
         ]
-    else:
-        chafa_lines = preview_chafa(shot.path, body_w, n_rows)
+    elif view == VIEW_CHAFA:
+        chafa_lines = preview_chafa(shot.path, body_w, n_rows) if _have("chafa") else []
         if chafa_lines:
             rows = list(chafa_lines)
         else:
             dim = f"{shot.width}×{shot.height}" if shot.width else "?"
             rows = [
+                art.pad_vis(_fit("(chafa unavailable — v for normal · o open image)", body_w), body_w),
                 art.pad_vis(_fit(shot.path.name, body_w), body_w),
                 art.pad_vis(
                     _fit(f"{dim} · {_fmt_bytes(shot.bytes)} · {shot.mode}", body_w),
                     body_w,
                 ),
-                art.pad_vis(_fit(str(shot.path), body_w), body_w),
             ]
+    else:
+        # normal mode — facts card; enter/o opens the real PNG
+        dim = f"{shot.width}×{shot.height}" if shot.width else "?"
+        rows = [
+            art.pad_vis(_fit("view · normal (real image)", body_w), body_w),
+            art.pad_vis(_fit(shot.path.name, body_w), body_w),
+            art.pad_vis(
+                _fit(f"{dim} · {_fmt_bytes(shot.bytes)} · {shot.mode}", body_w),
+                body_w,
+            ),
+            art.pad_vis(_fit(str(shot.path), body_w), body_w),
+            art.pad_vis(
+                _fit("enter / o → open PNG in image viewer", body_w),
+                body_w,
+            ),
+        ]
     while len(rows) < n_rows:
         rows.append(" " * body_w)
     return rows[:n_rows]
@@ -821,6 +950,7 @@ def build_frame(
     flash: str,
     mode: str,
     pending: Shot | None,
+    view: str,
 ) -> tuple[str, int]:
     """Height-safe layout: head + mirrors + looking glass + Runes always fit.
 
@@ -833,7 +963,8 @@ def build_frame(
     outer = max(36, min(tw, 96))
     body_w = outer - 4
 
-    st = flash or f"{len(shots)} mirrors · {shots_dir().name}/"
+    view_label = "chafa" if view == VIEW_CHAFA else "normal"
+    st = flash or f"{len(shots)} mirrors · view {view_label} · {shots_dir().name}/"
     head_lines = [_fit(st, body_w)]
     if mode == "confirm_del" and pending:
         head_lines.append(
@@ -850,8 +981,8 @@ def build_frame(
     )
     runes = art.box(
         [
-            _fit("↑↓ move · enter open · f full · w window · r region", body_w),
-            _fit("d delete · o external · y path · q leave", body_w),
+            _fit("↑↓ move · enter open · v chafa|normal · f/w/r capture", body_w),
+            _fit("o always real image · d delete · y path · q leave", body_w),
         ],
         title="Runes",
         width=outer,
@@ -870,7 +1001,11 @@ def build_frame(
         glass_content = 0
     else:
         # prefer a useful glass (~40% of remain, content rows), min 3 max 12
-        glass_total_budget = max(5, min(14, remain * 2 // 5))
+        # normal mode needs less glass height than chafa
+        if view == VIEW_NORMAL:
+            glass_total_budget = max(5, min(10, remain // 3))
+        else:
+            glass_total_budget = max(5, min(14, remain * 2 // 5))
         glass_content = max(3, glass_total_budget - 2)
         list_total = remain - (glass_content + 2)
         list_content = max(1, list_total - 2)
@@ -886,9 +1021,10 @@ def build_frame(
         )
         parts = [head, "", body]
         if gc > 0:
+            glass_title = "looking glass · chafa" if view == VIEW_CHAFA else "looking glass · normal"
             glass = art.box(
-                _glass_rows(shot, body_w, gc),
-                title="looking glass",
+                _glass_rows(shot, body_w, gc, view=view),
+                title=glass_title,
                 width=outer,
                 body_style=(P.SILVER,),
             )
@@ -939,6 +1075,51 @@ def build_frame(
     return frame, list_content
 
 
+def _wait_one_key() -> None:
+    try:
+        with open("/dev/tty", "r") as tin:
+            term_fd = tin.fileno()
+            import termios
+            import tty
+
+            old = termios.tcgetattr(term_fd)
+            try:
+                tty.setcbreak(term_fd)
+                os.read(term_fd, 1)
+            finally:
+                termios.tcsetattr(term_fd, termios.TCSADRAIN, old)
+    except (OSError, EOFError):
+        pass
+
+
+def open_shot_in_tui(path: Path, view: str) -> str:
+    """Open selected shot according to view mode. Returns status flash."""
+    if view == VIEW_CHAFA and _have("chafa"):
+        try:
+            with open("/dev/tty", "w") as tout:
+                tout.write("\033[2J\033[H")
+                cols = shutil.get_terminal_size((80, 24)).columns
+                rows_n = max(10, shutil.get_terminal_size((80, 24)).lines - 3)
+                lines = preview_chafa(path, cols, rows_n)
+                if lines:
+                    tout.write("\n".join(lines) + "\n")
+                else:
+                    tout.write(art.paint("  (chafa empty)\n", P.WARN))
+                tout.write(
+                    art.paint(
+                        f"\n  {path}  ·  chafa  ·  any key to return\n",
+                        P.MUTED,
+                    )
+                )
+                tout.flush()
+            _wait_one_key()
+            return "chafa preview"
+        except (OSError, EOFError):
+            return "chafa failed"
+    be = open_external(path)
+    return f"normal image via {be}"
+
+
 def run_tui() -> int:
     fd = art.tui_open_tty()
     if fd is None:
@@ -950,6 +1131,7 @@ def run_tui() -> int:
     mode = "nav"  # nav | confirm_del
     pending: Shot | None = None
     list_rows = 3
+    view = get_view_mode()
     try:
         while True:
             shots = list_shots()
@@ -957,7 +1139,7 @@ def run_tui() -> int:
                 sel = max(0, len(shots) - 1)
 
             frame, list_rows = build_frame(
-                shots, sel, flash=flash, mode=mode, pending=pending
+                shots, sel, flash=flash, mode=mode, pending=pending, view=view
             )
             try:
                 art.paint_frame(fd, frame)
@@ -996,39 +1178,35 @@ def run_tui() -> int:
                 sel = min(max(0, len(shots) - 1), sel + list_rows)
             elif key in ("enter", "right", " "):
                 if shots:
-                    # enlarge chafa in a one-shot suspend view
                     art.tui_suspend()
                     try:
-                        with open("/dev/tty", "w") as tout:
-                            tout.write("\033[2J\033[H")
-                            cols = shutil.get_terminal_size((80, 24)).columns
-                            rows_n = max(10, shutil.get_terminal_size((80, 24)).lines - 3)
-                            lines = preview_chafa(shots[sel].path, cols, rows_n)
-                            if lines:
-                                tout.write("\n".join(lines) + "\n")
-                            tout.write(
-                                art.paint(
-                                    f"\n  {shots[sel].path}  ·  any key to return\n",
-                                    P.MUTED,
-                                )
-                            )
-                            tout.flush()
-                        with open("/dev/tty", "r") as tin:
-                            # one key
-                            term_fd = tin.fileno()
-                            import termios
-                            import tty
-
-                            old = termios.tcgetattr(term_fd)
-                            try:
-                                tty.setcbreak(term_fd)
-                                os.read(term_fd, 1)
-                            finally:
-                                termios.tcsetattr(term_fd, termios.TCSADRAIN, old)
-                    except (OSError, EOFError):
-                        pass
+                        flash = open_shot_in_tui(shots[sel].path, view)
                     finally:
                         art.tui_resume()
+            elif key in ("v", "V", "t", "T"):
+                # toggle view mode and remember it
+                view = VIEW_NORMAL if view == VIEW_CHAFA else VIEW_CHAFA
+                try:
+                    set_view_mode(view)
+                except ValueError:
+                    pass
+                flash = f"view → {view}" + (
+                    " (terminal art)" if view == VIEW_CHAFA else " (real image)"
+                )
+            elif key == "c":
+                view = VIEW_CHAFA
+                try:
+                    set_view_mode(view)
+                except ValueError:
+                    pass
+                flash = "view → chafa (terminal art)"
+            elif key == "n":
+                view = VIEW_NORMAL
+                try:
+                    set_view_mode(view)
+                except ValueError:
+                    pass
+                flash = "view → normal (real image)"
             elif key in ("f", "F"):
                 art.tui_suspend()
                 try:
@@ -1038,6 +1216,14 @@ def run_tui() -> int:
                 if shot:
                     flash = f"full via {be} · {shot.path.name}"
                     sel = 0
+                    # in normal view, offer immediate open of the real shot
+                    if view == VIEW_NORMAL:
+                        art.tui_suspend()
+                        try:
+                            open_external(shot.path)
+                        finally:
+                            art.tui_resume()
+                        flash = f"full via {be} · opened normal image"
                 else:
                     flash = f"full failed — {be}"
             elif key in ("w", "W"):
@@ -1052,6 +1238,13 @@ def run_tui() -> int:
                 if shot:
                     flash = f"window via {be} · {shot.path.name}"
                     sel = 0
+                    if view == VIEW_NORMAL:
+                        art.tui_suspend()
+                        try:
+                            open_external(shot.path)
+                        finally:
+                            art.tui_resume()
+                        flash = f"window via {be} · opened normal image"
                 else:
                     flash = f"window failed — {be}"
             elif key in ("r", "R"):
@@ -1071,6 +1264,13 @@ def run_tui() -> int:
                 if shot:
                     flash = f"region via {be} · {shot.path.name}"
                     sel = 0
+                    if view == VIEW_NORMAL:
+                        art.tui_suspend()
+                        try:
+                            open_external(shot.path)
+                        finally:
+                            art.tui_resume()
+                        flash = f"region via {be} · opened normal image"
                 else:
                     flash = f"region failed — {be}"
             elif key in ("d", "D", "delete"):
@@ -1078,9 +1278,10 @@ def run_tui() -> int:
                     pending = shots[sel]
                     mode = "confirm_del"
             elif key in ("o", "O"):
+                # always real image, regardless of view mode
                 if shots:
                     be = open_external(shots[sel].path)
-                    flash = f"opened with {be}"
+                    flash = f"normal image via {be}"
             elif key in ("y", "Y"):
                 if shots:
                     art.tui_cleanup()
@@ -1097,6 +1298,39 @@ def run_tui() -> int:
 
 
 # ── main ───────────────────────────────────────────────────────────────
+
+
+def _parse_open_flags(args: list[str]) -> tuple[Path | None, str | None]:
+    """Return (path, view_override) from open argv."""
+    view: str | None = None
+    path: Path | None = None
+    for a in args:
+        if a in ("--chafa", "-c", "--term"):
+            view = VIEW_CHAFA
+        elif a in ("--normal", "--real", "--image", "-n", "--native"):
+            view = VIEW_NORMAL
+        elif a in ("--open",):
+            continue
+        elif a.startswith("-"):
+            continue
+        else:
+            path = Path(a).expanduser()
+    return path, view
+
+
+def _parse_capture_flags(args: list[str]) -> tuple[bool, str | None]:
+    open_after = False
+    view: str | None = None
+    for a in args:
+        if a in ("--open", "-o"):
+            open_after = True
+        elif a in ("--chafa", "-c", "--term"):
+            open_after = True
+            view = VIEW_CHAFA
+        elif a in ("--normal", "--real", "--image", "-n", "--native"):
+            open_after = True
+            view = VIEW_NORMAL
+    return open_after, view
 
 
 def main(argv: list[str]) -> int:
@@ -1122,19 +1356,26 @@ def main(argv: list[str]) -> int:
     if cmd == "last":
         return cmd_last()
     if cmd in ("full", "screen", "desktop"):
-        return cmd_capture("full")
+        open_after, view = _parse_capture_flags(rest)
+        return cmd_capture("full", open_after=open_after, open_mode=view)
     if cmd in ("window", "win"):
-        return cmd_capture("window")
+        open_after, view = _parse_capture_flags(rest)
+        return cmd_capture("window", open_after=open_after, open_mode=view)
     if cmd in ("region", "area", "sel"):
-        return cmd_capture("region")
+        open_after, view = _parse_capture_flags(rest)
+        return cmd_capture("region", open_after=open_after, open_mode=view)
     if cmd == "open":
-        p = Path(rest[0]).expanduser() if rest else None
-        return cmd_open(p)
+        p, view = _parse_open_flags(rest)
+        return cmd_open(p, view=view)
+    if cmd in ("view", "mode"):
+        return cmd_view(rest)
     if cmd == "backend":
         print(backend_report())
+        print(f"view mode: {get_view_mode()}")
         return 0
     if cmd == "capture" and rest:
-        return cmd_capture(rest[0])
+        open_after, view = _parse_capture_flags(rest[1:])
+        return cmd_capture(rest[0], open_after=open_after, open_mode=view)
     print(f"reflection: unknown command {cmd!r} (try reflection -h)", file=sys.stderr)
     return 2
 

@@ -5,14 +5,14 @@
 **Status:** new (v1)
 
 ## Current
-- `reflection` — TUI gallery (↑↓ · enter open · f full · w window · r region · d delete · o open external)
-- `reflection full` — full desktop → gallery
-- `reflection window` — focused window (or pick)
-- `reflection region` — drag a rectangle (ImageMagick import)
-- `reflection list [N]` — recent paths
-- `reflection last` — path of newest shot
-- `reflection open [path]` — chafa / xdg-open / kitty
-- `reflection backend` — which capture tools are live
+- `reflection` — TUI gallery (↑↓ · enter open · **v** toggle chafa|normal · f/w/r · d · **o** always real image)
+- View modes (saved in `config.json`, env `REFLECTION_VIEW=`):
+  - **chafa** — terminal art in looking glass; enter = fullscreen chafa
+  - **normal** — meta card; enter/capture opens real PNG (xdg-open / feh / imv)
+- `reflection full|window|region [--open|--normal|--chafa]`
+- `reflection open [--chafa|--normal] [path]`
+- `reflection view [chafa|normal]` — show/set default
+- `reflection list [N]` · `last` · `backend`
 
 ## Capture backends (first that works)
 1. **ImageMagick** `import` / `magick import` (full, window, interactive region)
