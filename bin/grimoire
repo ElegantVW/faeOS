@@ -3,22 +3,37 @@
 
 Pages of spells and scribbles. Plain .md under ~/notes (override: GRIMOIRE_DIR).
 
-    grimoire                 interactive TUI
+In-app editor uses the fae frame:
+
+  ╭─ ✦ Grimoire ✦ edit ✦ note.md ✦ ─────────────╮
+  │ … ink …                                       │
+  ╰───────────────────────────────────────────────╯
+  ╭─ ✦ Runes ✦ ───────────────────────────────────╮
+  │ ^s save · esc leave · arrows move · …          │
+  ╰───────────────────────────────────────────────╯
+
+    grimoire                 interactive TUI (pages list)
     grimoire list [q]        list notes (stdout)
-    grimoire new [title]     create + open in $EDITOR
-    grimoire edit <name>     open existing
+    grimoire new [title]     create + open in-app editor
+    grimoire edit <name>     open existing in-app editor
     grimoire show <name>     print to stdout
     grimoire -h
 
-TUI keys:
+TUI (pages):
   ↑↓          move
-  enter / e   edit (EDITOR / nano / vim)
-  v           view (read-only in-grimoire)
-  n           new note (title prompt)
-  d           delete — y/n confirm
+  enter / e   edit (in-app)
+  v           read-only view
+  n           new note
+  d           burn — y/n
   /           filter
-  r           refresh
+  E           external $EDITOR (optional escape hatch)
   q / esc     leave
+
+Editor:
+  arrows / home/end / pgup/pgdn   move
+  type / backspace / delete / enter
+  ^s save · ^a line-start · ^e line-end
+  esc leave (asks if dirty) · ^q leave without save prompt if clean
 """
 
 from __future__ import annotations
@@ -79,7 +94,7 @@ def _slug(title: str) -> str:
     return s or time.strftime("%Y%m%d-%H%M%S")
 
 
-def _editor() -> list[str]:
+def _editor_cmd() -> list[str]:
     for key in ("VISUAL", "EDITOR"):
         v = os.environ.get(key, "").strip()
         if v:
@@ -105,7 +120,6 @@ class Note:
 
 
 def _title_from_file(path: Path) -> tuple[str, str]:
-    """Return (title, preview) from first heading / first non-empty line."""
     title = path.stem.replace("-", " ").replace("_", " ")
     preview = ""
     try:
@@ -184,28 +198,6 @@ def create_note(title: str) -> Path:
     return path
 
 
-def edit_note(path: Path) -> int:
-    """Open path in $EDITOR on a fully cooked controlling tty.
-
-    Must not run under cbreak — otherwise nano/vim see Ctrl-G as literal ^G
-    and Esc inserts bytes into the buffer instead of commands.
-    """
-    art.force_sane_tty()
-    cmd = _editor() + [str(path)]
-    try:
-        # Bind the editor to /dev/tty so it never inherits a half-raw stdin
-        # left over from the TUI's separate /dev/tty fd.
-        with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
-            return int(subprocess.call(cmd, stdin=tin, stdout=tout, stderr=tout))
-    except OSError as e:
-        # fallback: whatever stdio we have, still after force_sane_tty
-        try:
-            return int(subprocess.call(cmd))
-        except OSError as e2:
-            print(f"grimoire: editor failed: {e2}", file=sys.stderr)
-            return 1
-
-
 def delete_note(path: Path) -> str:
     try:
         path.unlink()
@@ -214,6 +206,21 @@ def delete_note(path: Path) -> str:
         return "already gone"
     except OSError as e:
         return f"delete failed: {e}"
+
+
+def external_edit(path: Path) -> int:
+    """Optional escape hatch: $EDITOR on a cooked /dev/tty."""
+    art.force_sane_tty()
+    cmd = _editor_cmd() + [str(path)]
+    try:
+        with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
+            return int(subprocess.call(cmd, stdin=tin, stdout=tout, stderr=tout))
+    except OSError:
+        try:
+            return int(subprocess.call(cmd))
+        except OSError as e:
+            print(f"grimoire: editor failed: {e}", file=sys.stderr)
+            return 1
 
 
 # ── one-shot ───────────────────────────────────────────────────────────
@@ -232,9 +239,8 @@ def cmd_show(name: str) -> int:
     if path is None:
         print(f"grimoire: no note matching {name!r}", file=sys.stderr)
         return 1
-    sys.stdout.write(path.read_text(encoding="utf-8", errors="replace"))
-    if not path.read_text(encoding="utf-8", errors="replace").endswith("\n"):
-        sys.stdout.write("\n")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    sys.stdout.write(text if text.endswith("\n") else text + "\n")
     return 0
 
 
@@ -251,7 +257,6 @@ def _resolve(name: str) -> Path | None:
             p = d / f"{name}{ext}"
             if p.is_file():
                 return p
-    # fuzzy stem match
     q = name.lower().removesuffix(".md")
     for n in list_notes(d):
         if q in n.stem.lower() or q in n.title.lower():
@@ -259,9 +264,94 @@ def _resolve(name: str) -> Path | None:
     return None
 
 
-# ── TUI ────────────────────────────────────────────────────────────────
+# ── shared chrome ──────────────────────────────────────────────────────
 
-def frame(
+def _title_bar(menu: str, file: str = "") -> str:
+    """Build box title: Grimoire ✦ menu ✦ file."""
+    parts = [NAME, menu]
+    if file:
+        parts.append(file)
+    return " ✦ ".join(parts)
+
+
+def paint_screen(
+    fd: int,
+    *,
+    menu: str,
+    file: str = "",
+    body_lines: list[str],
+    runes: list[str],
+    status: str = "",
+    confirm: str = "",
+    body_title: str = "ink",
+) -> None:
+    """Full-frame: outer title box + body + Runes footer; fits terminal height."""
+    tw = art.term_width()
+    th = art.term_height()
+    body_w = tw - 4
+    title = _title_bar(menu, file)
+
+    meta: list[str] = []
+    if status:
+        meta.append(_fit(status, body_w))
+    if confirm:
+        meta.append(art.paint(_fit(art.strip_ansi(confirm), body_w), P.WARN))
+
+    # Outer frame holds meta + document body as one visual unit when possible,
+    # but we keep separate boxes so Runes stay a fixed footer.
+    head_bits = meta if meta else [_fit(f"{menu}" + (f" · {file}" if file else ""), body_w)]
+    head = art.box(head_bits, title=title, width=tw, body_style=(P.MUTED,))
+    runes_box = art.box(
+        [_fit(r, body_w) for r in runes],
+        title="Runes",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+
+    head_h = _line_count(head)
+    runes_h = _line_count(runes_box)
+    gaps = 2
+    chrome = 2  # body top+bottom border
+    avail = max(1, th - head_h - runes_h - gaps - chrome)
+
+    # clamp body rows
+    rows = list(body_lines[:avail])
+    if not rows:
+        rows = [" "]
+    # pad each to body_w (keep pre-styled ANSI, e.g. cursor reverse-video)
+    padded: list[str] = []
+    for r in rows:
+        if art.strip_ansi(r) != r:
+            plain_len = art.vis_len(r)
+            if plain_len > body_w:
+                padded.append(art.pad_vis(_fit(art.strip_ansi(r), body_w), body_w))
+            else:
+                padded.append(r + " " * (body_w - plain_len))
+        else:
+            padded.append(art.pad_vis(_fit(r, body_w), body_w))
+
+    body = art.box(padded, title=body_title, width=tw, body_style=(P.SILVER,))
+    frame_s = "\n".join([head, "", body, "", runes_box])
+    if _line_count(frame_s) > th:
+        # shrink body
+        overflow = _line_count(frame_s) - th
+        keep = max(1, len(padded) - overflow)
+        body = art.box(padded[:keep], title=body_title, width=tw, body_style=(P.SILVER,))
+        frame_s = "\n".join([head, "", body, "", runes_box])
+    if _line_count(frame_s) > th:
+        frame_s = "\n".join(frame_s.splitlines()[:th])
+    try:
+        art.paint_frame(fd, frame_s)
+    except OSError:
+        try:
+            art.tty_write(fd, art.clear_screen() + frame_s + "\n")
+        except OSError:
+            pass
+
+
+# ── pages list ─────────────────────────────────────────────────────────
+
+def frame_pages(
     notes: list[Note],
     sel: int,
     filt: str,
@@ -269,9 +359,9 @@ def frame(
     status: str,
     confirm: str,
     root: Path,
-) -> str:
+) -> tuple[list[str], list[str], str]:
+    """Return (body_lines, runes, status_extra) for pages view."""
     tw = art.term_width()
-    th = art.term_height()
     body_w = tw - 4
     try:
         disp = str(root)
@@ -281,85 +371,329 @@ def frame(
     except Exception:
         disp = str(root)
 
-    head_lines = [
-        _fit(f"pages {disp} · {len(notes)} shown", body_w),
-        _fit(
-            f"filter: {filt}_" if mode == "filter"
-            else (f"filter: {filt}" if filt else "filter: —  (/ to type)"),
-            body_w,
-        ),
-        _fit(f"mode {mode}", body_w),
-    ]
-    if status:
-        head_lines.append(_fit(status, body_w))
-    if confirm:
-        head_lines.append(art.paint(_fit(art.strip_ansi(confirm), body_w), P.WARN))
-    head = art.box(head_lines, title=NAME.upper(), width=tw, body_style=(P.MUTED,))
+    st = status or f"{len(notes)} pages · {disp}"
+    if mode == "filter":
+        st = f"filter: {filt}_ · {len(notes)} shown"
+    elif filt:
+        st = f"filter: {filt} · {len(notes)} shown · {disp}"
 
-    runes = art.box(
-        [
-            _fit("↑↓ move · enter/e edit · v view · n new · d burn", body_w),
-            _fit("/ filter · r refresh · q leave", body_w),
-        ],
-        title="runes",
-        width=tw,
-        body_style=(P.MUTED,),
-    )
-
-    def rows(h: int) -> list[str]:
-        if not notes:
-            return [_fit("(empty grimoire — press n for a new page)", body_w)]
-        if h <= 0:
-            return [_fit("(clipped)", body_w)]
+    # body height estimated later in paint; pass many rows and let paint clamp
+    th = art.term_height()
+    h = max(4, th - 14)
+    if not notes:
+        body = ["(empty grimoire — press n for a new page)"]
+    else:
         s = max(0, min(sel, len(notes) - 1))
         start = max(0, min(s - h // 2, max(0, len(notes) - h)))
         end = min(len(notes), start + h)
-        hdr = f" {'':1} {'AGE':>8}  {'TITLE'}"
-        out = [art.paint(art.pad_vis(_fit(hdr, body_w), body_w), P.PINK_DIM)]
+        body = [art.paint(art.pad_vis(_fit(f" {'':1} {'AGE':>8}  {'TITLE'}", body_w), body_w), P.PINK_DIM)]
         for i in range(start, end):
             n = notes[i]
             mark = "✦" if i == s else " "
             line = f" {mark} {fmt_age(n.mtime):>8}  {n.title}"
-            if n.preview and art.vis_len(line) < body_w - 10:
+            if n.preview:
                 line = f"{line}  · {n.preview}"
             line = art.pad_vis(_fit(line, body_w), body_w)
-            out.append(art.paint(line, P.PINK) if i == s else line)
-        return out
+            body.append(art.paint(line, P.PINK) if i == s else line)
 
-    def assemble(h: int, with_runes: bool) -> str:
-        body = art.box(rows(h), title="pages", width=tw, body_style=(P.SILVER,))
-        parts = [head, "", body]
-        if with_runes:
-            parts += ["", runes]
-        return "\n".join(parts)
+    runes = [
+        "↑↓ move · enter/e edit · v read · n new · d burn",
+        "/ filter · E external editor · r refresh · q leave",
+    ]
+    return body, runes, st
 
-    head_h = _line_count(head)
-    runes_h = _line_count(runes)
 
-    def max_h(with_runes: bool) -> int:
-        g = 2 if with_runes else 1
-        r = runes_h if with_runes else 0
-        return th - head_h - g - 2 - r - 1
+# ── in-app editor ──────────────────────────────────────────────────────
 
-    h = max(0, max_h(True))
-    frame_s = assemble(h, True)
-    while _line_count(frame_s) > th and h > 0:
-        h -= 1
-        frame_s = assemble(h, True)
-    if _line_count(frame_s) > th:
-        h = max(0, max_h(False))
-        frame_s = assemble(h, False)
-        while _line_count(frame_s) > th and h > 0:
-            h -= 1
-            frame_s = assemble(h, False)
-    if _line_count(frame_s) > th:
-        frame_s = "\n".join(frame_s.splitlines()[:th])
-    return frame_s
+def _load_lines(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [""]
+    if text == "":
+        return [""]
+    # keep trailing empty line if file ends with newline
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines = lines[:-1] if lines[-1] == "" else lines
+        if not lines:
+            lines = [""]
+    return lines or [""]
 
+
+def _join_lines(lines: list[str]) -> str:
+    return "\n".join(lines) + "\n"
+
+
+def _cursor_line(line: str, cx: int, body_w: int) -> str:
+    """Render one line with a reverse-video cursor cell."""
+    # clamp
+    if cx < 0:
+        cx = 0
+    if cx > len(line):
+        cx = len(line)
+    # horizontal scroll if line longer than body
+    left = 0
+    if cx >= body_w:
+        left = cx - body_w + 1
+    visible = line[left : left + body_w]
+    # cursor position in visible window
+    vis_cx = cx - left
+    # build with reverse on cursor cell (space if at EOL)
+    chars = list(visible)
+    if vis_cx >= len(chars):
+        # cursor past end — pad
+        pad = vis_cx - len(chars)
+        chars.extend([" "] * (pad + 1))
+    # reverse the cursor character
+    cur_ch = chars[vis_cx] if vis_cx < len(chars) else " "
+    if cur_ch == " ":
+        cur_ch = " "
+    before = "".join(chars[:vis_cx])
+    after = "".join(chars[vis_cx + 1 :])
+    # reverse video
+    painted = before + "\033[7m" + cur_ch + "\033[27m" + after
+    # pad to body_w
+    vis = art.vis_len(before + cur_ch + after)
+    if vis < body_w:
+        painted = painted + " " * (body_w - vis)
+    return painted
+
+
+def edit_in_app(fd: int, path: Path) -> bool:
+    """In-app framed editor. Returns True if file was saved at least once."""
+    lines = _load_lines(path)
+    cy = 0
+    cx = 0
+    scroll = 0
+    dirty = False
+    saved_once = False
+    status = "ready"
+    mode = "edit"  # edit | confirm_quit
+    confirm = ""
+
+    def save() -> str:
+        nonlocal dirty, saved_once, lines
+        try:
+            path.write_text(_join_lines(lines), encoding="utf-8")
+            dirty = False
+            saved_once = True
+            return f"saved {path.name}"
+        except OSError as e:
+            return f"save failed: {e}"
+
+    def clamp_cursor() -> None:
+        nonlocal cy, cx
+        cy = max(0, min(cy, len(lines) - 1))
+        cx = max(0, min(cx, len(lines[cy])))
+
+    while True:
+        clamp_cursor()
+        tw = art.term_width()
+        th = art.term_height()
+        body_w = tw - 4
+        # estimate ink rows: th - head(~4) - runes(~4) - gaps(2) - chrome(2)
+        ink_h = max(3, th - 12)
+
+        # scroll so cursor is visible
+        if cy < scroll:
+            scroll = cy
+        if cy >= scroll + ink_h:
+            scroll = cy - ink_h + 1
+        scroll = max(0, min(scroll, max(0, len(lines) - ink_h)))
+
+        body: list[str] = []
+        for i in range(scroll, min(len(lines), scroll + ink_h)):
+            if i == cy:
+                body.append(_cursor_line(lines[i], cx, body_w))
+            else:
+                body.append(art.pad_vis(_fit(lines[i], body_w), body_w))
+        # pad blank rows so the ink box stays tall
+        while len(body) < ink_h:
+            body.append(" " * body_w)
+
+        dirty_mark = " · modified" if dirty else ""
+        st = f"L{cy + 1}:{cx + 1}{dirty_mark} · {status}"
+        runes = [
+            "^s save · esc leave · ↑↓←→ move · enter newline",
+            "^a/^e line · pgup/pgdn · backspace/delete · type to write",
+        ]
+        if mode == "confirm_quit":
+            confirm = "unsaved changes — save (s) · discard (d) · cancel (esc)?"
+        else:
+            confirm = ""
+
+        paint_screen(
+            fd,
+            menu="edit",
+            file=path.name,
+            body_lines=body,
+            runes=runes,
+            status=st,
+            confirm=confirm,
+            body_title="ink",
+        )
+        status = "ready"
+
+        key = art.tui_read_key(fd)
+
+        if mode == "confirm_quit":
+            if key in ("s", "S"):
+                status = save()
+                return saved_once
+            if key in ("d", "D", "q", "Q"):
+                return saved_once
+            if key in ("esc", "n", "N"):
+                mode = "edit"
+                confirm = ""
+                status = "still editing"
+            continue
+
+        if key == "ctrl-s":
+            status = save()
+            continue
+        if key in ("esc",):
+            if dirty:
+                mode = "confirm_quit"
+            else:
+                return saved_once
+            continue
+        if key in ("ctrl-c", "ctrl-q"):
+            if dirty:
+                mode = "confirm_quit"
+            else:
+                return saved_once
+            continue
+
+        if key == "up":
+            if cy > 0:
+                cy -= 1
+                cx = min(cx, len(lines[cy]))
+        elif key == "down":
+            if cy < len(lines) - 1:
+                cy += 1
+                cx = min(cx, len(lines[cy]))
+        elif key == "left":
+            if cx > 0:
+                cx -= 1
+            elif cy > 0:
+                cy -= 1
+                cx = len(lines[cy])
+        elif key == "right":
+            if cx < len(lines[cy]):
+                cx += 1
+            elif cy < len(lines) - 1:
+                cy += 1
+                cx = 0
+        elif key in ("home", "ctrl-a"):
+            cx = 0
+        elif key in ("end", "ctrl-e"):
+            cx = len(lines[cy])
+        elif key == "pgup":
+            cy = max(0, cy - ink_h)
+            cx = min(cx, len(lines[cy]))
+        elif key == "pgdn":
+            cy = min(len(lines) - 1, cy + ink_h)
+            cx = min(cx, len(lines[cy]))
+        elif key == "enter":
+            left = lines[cy][:cx]
+            right = lines[cy][cx:]
+            lines[cy] = left
+            lines.insert(cy + 1, right)
+            cy += 1
+            cx = 0
+            dirty = True
+        elif key == "backspace":
+            if cx > 0:
+                line = lines[cy]
+                lines[cy] = line[: cx - 1] + line[cx:]
+                cx -= 1
+                dirty = True
+            elif cy > 0:
+                prev = lines[cy - 1]
+                cx = len(prev)
+                lines[cy - 1] = prev + lines[cy]
+                del lines[cy]
+                cy -= 1
+                dirty = True
+        elif key == "delete":
+            if cx < len(lines[cy]):
+                line = lines[cy]
+                lines[cy] = line[:cx] + line[cx + 1 :]
+                dirty = True
+            elif cy < len(lines) - 1:
+                lines[cy] = lines[cy] + lines[cy + 1]
+                del lines[cy + 1]
+                dirty = True
+        elif key == "tab":
+            lines[cy] = lines[cy][:cx] + "  " + lines[cy][cx:]
+            cx += 2
+            dirty = True
+        elif key == "space":
+            lines[cy] = lines[cy][:cx] + " " + lines[cy][cx:]
+            cx += 1
+            dirty = True
+        elif len(key) == 1 and key.isprintable():
+            lines[cy] = lines[cy][:cx] + key + lines[cy][cx:]
+            cx += 1
+            dirty = True
+        # ignore unknown keys
+
+
+def view_in_app(fd: int, path: Path) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines() or [""]
+    except OSError:
+        return
+    top = 0
+    while True:
+        tw = art.term_width()
+        th = art.term_height()
+        body_w = tw - 4
+        ink_h = max(3, th - 12)
+        chunk = lines[top : top + ink_h]
+        body = [art.pad_vis(_fit(ln, body_w), body_w) for ln in chunk] or [" "]
+        while len(body) < ink_h:
+            body.append(" " * body_w)
+        st = f"lines {top + 1}–{min(len(lines), top + ink_h)}/{len(lines)}"
+        paint_screen(
+            fd,
+            menu="read",
+            file=path.name,
+            body_lines=body,
+            runes=["↑↓ / pgup/pgdn scroll · e edit · q back"],
+            status=st,
+            body_title="ink",
+        )
+        key = art.tui_read_key(fd)
+        if key in ("q", "Q", "esc", "ctrl-c", "backspace", "left", "h"):
+            return
+        if key in ("e", "enter"):
+            edit_in_app(fd, path)
+            # reload after edit
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines() or [""]
+            except OSError:
+                pass
+            continue
+        if key in ("down", "j"):
+            top = min(max(0, len(lines) - ink_h), top + 1)
+        elif key in ("up", "k"):
+            top = max(0, top - 1)
+        elif key in ("pgdn", "space"):
+            top = min(max(0, len(lines) - ink_h), top + ink_h)
+        elif key == "pgup":
+            top = max(0, top - ink_h)
+        elif key in ("home", "g"):
+            top = 0
+        elif key in ("end", "G"):
+            top = max(0, len(lines) - ink_h)
+
+
+# ── main TUI ───────────────────────────────────────────────────────────
 
 def _prompt_title(fd: int) -> str | None:
-    """Cooked input for a new title. Returns None if cancelled."""
-    art.tui_suspend()  # includes force_sane_tty
+    art.tui_suspend()
     try:
         with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
             tout.write(art.paint("\n  ✦ title of the new page: ", P.PINK))
@@ -374,62 +708,7 @@ def _prompt_title(fd: int) -> str | None:
         art.tui_resume()
 
 
-def _view_note(fd: int, path: Path) -> None:
-    """Simple full-screen reader inside grimoire."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        return
-    lines = text.splitlines() or [""]
-    top = 0
-    while True:
-        tw = art.term_width()
-        th = art.term_height()
-        body_w = tw - 4
-        # chrome: head 4 + runes 4 + gaps ≈ 10
-        h = max(4, th - 12)
-        chunk = lines[top : top + h]
-        if not chunk:
-            chunk = [""]
-        rows = [art.pad_vis(_fit(ln, body_w), body_w) for ln in chunk]
-        head = art.box(
-            [_fit(path.name, body_w), _fit(f"lines {top + 1}–{min(len(lines), top + h)}/{len(lines)}", body_w)],
-            title="read",
-            width=tw,
-            body_style=(P.MUTED,),
-        )
-        body = art.box(rows, title="ink", width=tw, body_style=(P.SILVER,))
-        runes = art.box(
-            [_fit("↑↓/pg scroll · q back", body_w)],
-            title="runes",
-            width=tw,
-            body_style=(P.MUTED,),
-        )
-        frame_s = "\n".join([head, "", body, "", runes])
-        if _line_count(frame_s) > th:
-            frame_s = "\n".join(frame_s.splitlines()[:th])
-        try:
-            art.paint_frame(fd, frame_s)
-        except OSError:
-            pass
-        key = art.tui_read_key(fd)
-        if key in ("q", "Q", "esc", "ctrl-c", "backspace", "left", "h"):
-            return
-        if key in ("down", "j", "enter"):
-            top = min(max(0, len(lines) - h), top + 1)
-        elif key in ("up", "k"):
-            top = max(0, top - 1)
-        elif key == "pgdn" or key == "space":
-            top = min(max(0, len(lines) - h), top + h)
-        elif key == "pgup":
-            top = max(0, top - h)
-        elif key == "home" or key == "g":
-            top = 0
-        elif key == "end" or key == "G":
-            top = max(0, len(lines) - h)
-
-
-def run_tui() -> int:
+def run_tui(start_edit: Path | None = None) -> int:
     fd = art.tui_open_tty()
     if fd is None:
         return cmd_list()
@@ -445,6 +724,7 @@ def run_tui() -> int:
     confirm_msg = ""
     pending: Note | None = None
     stick = True
+    fd_box = [fd]
 
     def refresh() -> None:
         nonlocal all_notes, status
@@ -454,17 +734,19 @@ def run_tui() -> int:
     def visible() -> list[Note]:
         return filter_notes(all_notes, filt)
 
-    def leave_edit(path: Path) -> None:
-        """Drop TUI completely, run editor on a cooked tty, re-enter TUI."""
+    def do_edit(path: Path) -> None:
         nonlocal status
-        # Full cleanup (leave alt screen + restore termios + force_sane_tty)
+        edit_in_app(fd_box[0], path)
+        refresh()
+        status = f"closed {path.name}"
+
+    def leave_external(path: Path) -> None:
+        nonlocal status
         art.tui_cleanup()
-        print(art.paint(f"\n  ✦ opening {path.name} …\n", P.PINK))
-        sys.stdout.flush()
-        rc = edit_note(path)
+        print(art.paint(f"\n  ✦ external editor · {path.name}\n", P.PINK))
+        rc = external_edit(path)
         art.force_sane_tty()
         try:
-            # read from /dev/tty so a messy stdin doesn't block forever
             with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
                 tout.write(art.paint("  press Enter to return to grimoire… ", P.MUTED))
                 tout.flush()
@@ -477,12 +759,12 @@ def run_tui() -> int:
         art.tui_begin(new_fd, "grimoire")
         fd_box[0] = new_fd
         refresh()
-        status = f"edited {path.name}" if rc == 0 else f"editor exit {rc}"
-
-    fd_box = [fd]
+        status = f"external edit {path.name}" if rc == 0 else f"editor exit {rc}"
 
     try:
         refresh()
+        if start_edit is not None:
+            do_edit(start_edit)
         while True:
             vis = visible()
             if stick and sel_name is not None:
@@ -498,12 +780,18 @@ def run_tui() -> int:
             else:
                 sel_name = None
 
-            body = frame(vis, sel, filt, mode, status, confirm_msg, root)
+            body, runes, st = frame_pages(vis, sel, filt, mode, status, confirm_msg, root)
+            paint_screen(
+                fd_box[0],
+                menu="pages",
+                file="",
+                body_lines=body,
+                runes=runes,
+                status=st if not confirm_msg else status,
+                confirm=confirm_msg,
+                body_title="pages",
+            )
             status = ""
-            try:
-                art.paint_frame(fd_box[0], body)
-            except OSError:
-                pass
 
             key = art.tui_read_key(fd_box[0])
 
@@ -566,24 +854,31 @@ def run_tui() -> int:
                 stick = True
             elif key == "n":
                 title = _prompt_title(fd_box[0])
-                if title is None or title == "":
+                if not title:
                     status = "new page cancelled"
                 else:
                     path = create_note(title)
-                    leave_edit(path)
+                    do_edit(path)
                     stick = True
                     sel_name = path.name
             elif key in ("enter", "e", "right", "l"):
                 if not vis:
                     status = "no page"
                 else:
-                    leave_edit(vis[sel].path)
+                    do_edit(vis[sel].path)
                     stick = True
             elif key == "v":
                 if not vis:
                     status = "no page"
                 else:
-                    _view_note(fd_box[0], vis[sel].path)
+                    view_in_app(fd_box[0], vis[sel].path)
+                    refresh()
+            elif key == "E":
+                if not vis:
+                    status = "no page"
+                else:
+                    leave_external(vis[sel].path)
+                    stick = True
             elif key in ("d", "D", "delete"):
                 if not vis:
                     status = "no page"
@@ -599,6 +894,19 @@ def run_tui() -> int:
             art.tui_cleanup()
         except Exception:
             pass
+
+
+def edit_note(path: Path) -> int:
+    """CLI/API: open in-app editor if a tty is available, else external."""
+    fd = art.tui_open_tty()
+    if fd is None:
+        return external_edit(path)
+    art.tui_begin(fd, "grimoire")
+    try:
+        edit_in_app(fd, path)
+        return 0
+    finally:
+        art.tui_cleanup()
 
 
 def main(argv: list[str]) -> int:
@@ -623,7 +931,7 @@ def main(argv: list[str]) -> int:
             return 2
         path = _resolve(" ".join(rest))
         if path is None:
-            print(f"grimoire: not found", file=sys.stderr)
+            print("grimoire: not found", file=sys.stderr)
             return 1
         return edit_note(path)
     if cmd in ("show", "cat", "print"):
@@ -633,7 +941,6 @@ def main(argv: list[str]) -> int:
         return cmd_show(" ".join(rest))
     if cmd in ("tui", "ui"):
         return run_tui()
-    # bare name → edit
     path = _resolve(" ".join(argv))
     if path is not None:
         return edit_note(path)

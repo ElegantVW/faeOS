@@ -240,12 +240,18 @@ def set_ui_mode(fd: int) -> list:
         new[6][termios.VMIN] = 1
         new[6][termios.VTIME] = 0
         termios.tcsetattr(fd, termios.TCSADRAIN, new)
-    # After cbreak, explicitly re-assert OPOST|ONLCR (some platforms clear them)
+    # After cbreak, re-assert OPOST|ONLCR and kill IXON so Ctrl-S/Q reach
+    # the app (otherwise the line discipline eats them as XOFF/XON).
     try:
         cur = termios.tcgetattr(fd)
+        cur[0] &= ~termios.IXON
         cur[1] |= termios.OPOST
         if hasattr(termios, "ONLCR"):
             cur[1] |= termios.ONLCR
+        # keep ISIG off in UI mode so Ctrl-C is a key, not a signal
+        cur[3] &= ~(termios.ISIG | termios.ICANON | termios.ECHO)
+        cur[6][termios.VMIN] = 1
+        cur[6][termios.VTIME] = 0
         termios.tcsetattr(fd, termios.TCSADRAIN, cur)
     except (termios.error, OSError):
         pass
@@ -700,6 +706,14 @@ def tui_read_key(fd: int, timeout: float | None = None) -> str:
         return "ctrl-u"
     if ch == b"\x12":  # Ctrl-R
         return "ctrl-r"
+    if ch == b"\x13":  # Ctrl-S
+        return "ctrl-s"
+    if ch == b"\x17":  # Ctrl-W
+        return "ctrl-w"
+    if ch == b"\x01":  # Ctrl-A
+        return "ctrl-a"
+    if ch == b"\x05":  # Ctrl-E
+        return "ctrl-e"
     try:
         return ch.decode("utf-8")
     except UnicodeDecodeError:
