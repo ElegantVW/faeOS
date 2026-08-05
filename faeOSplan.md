@@ -45,6 +45,7 @@
 | **Hourglass** | Timer / pomodoro — independent | new | [docs/plans/hourglass.md](docs/plans/hourglass.md) |
 | **Almanac** | Calendar hub (feeds: quests + hourglass) | new | [docs/plans/almanac.md](docs/plans/almanac.md) |
 | **Bulwark** | Host protection (Aegis/Purity/Sentinel/Ward) — first-party Rust | new | [docs/plans/bulwark.md](docs/plans/bulwark.md) |
+| **Imbue** | Clipboard memory (history / re-paste) | new | [docs/plans/imbue.md](docs/plans/imbue.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -63,7 +64,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 | Package frontend | Alchemy ✅ | pacman menu: brew (install) / sip (update) / distill (clean) |
 | Task manager | The Eye ✅ | htop-like: CPU/RAM/disk/processes/kill |
 | To-dos | Quests ✅ | todo.txt-style questlog, due dates |
-| Clipboard history | Imbue | copy memory, re-paste |
+| Clipboard history | Imbue ✅ | copy memory, re-paste |
 | Screenshots | Reflection | region/window/full → gallery |
 | Calculator | Abacus ✅ | REPL calc, `abacus "2+2"` from prompt |
 | Disk usage | Vault ✅ | ncdu-like treasure map |

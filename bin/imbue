@@ -1,0 +1,1098 @@
+#!/usr/bin/env python3
+"""imbue — clipboard memory for faeOS.
+
+Remembers what you copy. Re-paste old spells. No package deps for X11
+(ctypes + libX11); also uses wl-clipboard / xclip / xsel when present.
+
+Storage:  $XDG_DATA_HOME/faeos/imbue/history.jsonl
+Override: IMBUEDIR=/path
+
+    imbue                     TUI history browser
+    imbue list [N]            recent clips
+    imbue get                 current clipboard text
+    imbue set <text>          set clipboard + store
+    imbue set -               set from stdin
+    imbue add <text>          store only
+    imbue watch               poll & remember new clips
+    imbue clear               wipe history
+    imbue backend             which bridge is active
+    imbue -h
+
+TUI: ↑↓ move · enter re-copy · y yank to stdout · d delete · / filter · c clear · q
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Imbue"
+MAX_ENTRIES = 500
+MAX_TEXT_BYTES = 256 * 1024
+POLL_SEC = 0.6
+
+
+# ── paths ──────────────────────────────────────────────────────────────
+
+
+def data_dir() -> Path:
+    env = os.environ.get("IMBUEDIR", "").strip() or os.environ.get("IMBUE_DIR", "").strip()
+    if env:
+        p = Path(env).expanduser()
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+        p = base / "faeos" / "imbue"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def history_path() -> Path:
+    return data_dir() / "history.jsonl"
+
+
+def current_path() -> Path:
+    return data_dir() / "current.txt"
+
+
+# ── history store ──────────────────────────────────────────────────────
+
+
+@dataclass
+class Clip:
+    ts: str
+    text: str
+    digest: str
+    n: int  # 1-based display index among loaded entries (newest = 1 when reversed)
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _truncate(text: str) -> str:
+    raw = text.encode("utf-8", errors="replace")
+    if len(raw) <= MAX_TEXT_BYTES:
+        return text
+    # cut on byte boundary safely
+    cut = raw[:MAX_TEXT_BYTES]
+    while cut and (cut[-1] & 0xC0) == 0x80:
+        cut = cut[:-1]
+    return cut.decode("utf-8", errors="replace") + "\n…[truncated]"
+
+
+def load_history(limit: int = MAX_ENTRIES) -> list[dict]:
+    path = history_path()
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return []
+    return rows[-limit:]
+
+
+def append_clip(text: str, *, force: bool = False) -> bool:
+    """Store text if non-empty and (force or) different from last entry."""
+    text = _truncate(text)
+    if not text:
+        return False
+    dig = _digest(text)
+    hist = load_history()
+    if not force and hist and hist[-1].get("hash") == dig:
+        return False
+    rec = {
+        "ts": _now_iso(),
+        "hash": dig,
+        "bytes": len(text.encode("utf-8", errors="replace")),
+        "text": text,
+    }
+    path = history_path()
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    # prune
+    hist = load_history(MAX_ENTRIES + 50)
+    if len(hist) > MAX_ENTRIES:
+        keep = hist[-MAX_ENTRIES:]
+        path.write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep),
+            encoding="utf-8",
+        )
+    # mirror as internal "current"
+    try:
+        current_path().write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+    return True
+
+
+def save_history(rows: list[dict]) -> None:
+    path = history_path()
+    path.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows[-MAX_ENTRIES:]),
+        encoding="utf-8",
+    )
+
+
+def clear_history() -> None:
+    path = history_path()
+    if path.exists():
+        path.write_text("", encoding="utf-8")
+
+
+def delete_entry(digest: str) -> bool:
+    hist = load_history()
+    new = [r for r in hist if r.get("hash") != digest]
+    if len(new) == len(hist):
+        return False
+    save_history(new)
+    return True
+
+
+# ── clipboard backends ─────────────────────────────────────────────────
+
+
+def _run(cmd: list[str], *, input_text: str | None = None, timeout: float = 2.0) -> str | None:
+    try:
+        r = subprocess.run(
+            cmd,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=os.environ.copy(),
+        )
+        if r.returncode != 0:
+            return None
+        return r.stdout
+    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _have(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+# —— tool backends ——
+
+
+def _tool_get() -> tuple[str | None, str]:
+    if os.environ.get("WAYLAND_DISPLAY") and _have("wl-paste"):
+        out = _run(["wl-paste", "-n", "-t", "text"])
+        if out is None:
+            out = _run(["wl-paste", "-n"])
+        if out is not None:
+            return out, "wl-paste"
+    if _have("xclip"):
+        out = _run(["xclip", "-selection", "clipboard", "-o"])
+        if out is not None:
+            return out, "xclip"
+    if _have("xsel"):
+        out = _run(["xsel", "--clipboard", "--output"])
+        if out is not None:
+            return out, "xsel"
+    return None, ""
+
+
+def _tool_set(text: str) -> str | None:
+    def _ok(cmd: list[str]) -> bool:
+        try:
+            r = subprocess.run(
+                cmd,
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            return r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            return False
+
+    if os.environ.get("WAYLAND_DISPLAY") and _have("wl-copy"):
+        if _ok(["wl-copy", "--type", "text/plain"]) or _ok(["wl-copy"]):
+            return "wl-copy"
+    if _have("xclip") and _ok(["xclip", "-selection", "clipboard"]):
+        return "xclip"
+    if _have("xsel") and _ok(["xsel", "--clipboard", "--input"]):
+        return "xsel"
+    return None
+
+
+# —— X11 ctypes backend ——
+
+_X11 = None
+_X11_err: str | None = None
+
+
+def _x11():
+    """Lazy-load libX11 bindings. Returns module-like namespace or None."""
+    global _X11, _X11_err
+    if _X11 is not None:
+        return _X11
+    if _X11_err is not None:
+        return None
+    try:
+        import ctypes
+        from ctypes import (
+            POINTER,
+            byref,
+            c_char_p,
+            c_int,
+            c_long,
+            c_ubyte,
+            c_uint,
+            c_ulong,
+            c_void_p,
+            create_string_buffer,
+        )
+
+        lib = ctypes.CDLL("libX11.so.6")
+
+        # types
+        Display = c_void_p
+        Window = c_ulong
+        Atom = c_ulong
+        Time = c_ulong
+        Bool = c_int
+
+        lib.XOpenDisplay.argtypes = [c_char_p]
+        lib.XOpenDisplay.restype = Display
+        lib.XCloseDisplay.argtypes = [Display]
+        lib.XCloseDisplay.restype = c_int
+        lib.XDefaultRootWindow.argtypes = [Display]
+        lib.XDefaultRootWindow.restype = Window
+        lib.XDefaultScreen.argtypes = [Display]
+        lib.XDefaultScreen.restype = c_int
+        lib.XRootWindow.argtypes = [Display, c_int]
+        lib.XRootWindow.restype = Window
+        lib.XInternAtom.argtypes = [Display, c_char_p, Bool]
+        lib.XInternAtom.restype = Atom
+        lib.XCreateSimpleWindow.argtypes = [
+            Display,
+            Window,
+            c_int,
+            c_int,
+            c_uint,
+            c_uint,
+            c_uint,
+            c_ulong,
+            c_ulong,
+        ]
+        lib.XCreateSimpleWindow.restype = Window
+        lib.XDestroyWindow.argtypes = [Display, Window]
+        lib.XConvertSelection.argtypes = [Display, Atom, Atom, Atom, Window, Time]
+        lib.XConvertSelection.restype = c_int
+        lib.XFlush.argtypes = [Display]
+        lib.XSync.argtypes = [Display, Bool]
+        lib.XNextEvent.argtypes = [Display, c_void_p]
+        lib.XPending.argtypes = [Display]
+        lib.XPending.restype = c_int
+        lib.XGetWindowProperty.argtypes = [
+            Display,
+            Window,
+            Atom,
+            c_long,
+            c_long,
+            Bool,
+            Atom,
+            POINTER(Atom),
+            POINTER(c_int),
+            POINTER(c_ulong),
+            POINTER(c_ulong),
+            POINTER(POINTER(c_ubyte)),
+        ]
+        lib.XGetWindowProperty.restype = c_int
+        lib.XFree.argtypes = [c_void_p]
+        lib.XSetSelectionOwner.argtypes = [Display, Atom, Window, Time]
+        lib.XGetSelectionOwner.argtypes = [Display, Atom]
+        lib.XGetSelectionOwner.restype = Window
+        lib.XChangeProperty.argtypes = [
+            Display,
+            Window,
+            Atom,
+            Atom,
+            c_int,
+            c_int,
+            c_void_p,
+            c_int,
+        ]
+        lib.XSendEvent.argtypes = [Display, Window, Bool, c_long, c_void_p]
+        lib.XSendEvent.restype = Bool
+        lib.XSelectInput.argtypes = [Display, Window, c_long]
+
+        class XSelectionEvent(ctypes.Structure):
+            _fields_ = [
+                ("type", c_int),
+                ("serial", c_ulong),
+                ("send_event", Bool),
+                ("display", Display),
+                ("requestor", Window),
+                ("selection", Atom),
+                ("target", Atom),
+                ("property", Atom),
+                ("time", Time),
+            ]
+
+        class XSelectionRequestEvent(ctypes.Structure):
+            _fields_ = [
+                ("type", c_int),
+                ("serial", c_ulong),
+                ("send_event", Bool),
+                ("display", Display),
+                ("owner", Window),
+                ("requestor", Window),
+                ("selection", Atom),
+                ("target", Atom),
+                ("property", Atom),
+                ("time", Time),
+            ]
+
+        class XEvent(ctypes.Union):
+            _fields_ = [
+                ("type", c_int),
+                ("xselection", XSelectionEvent),
+                ("xselectionrequest", XSelectionRequestEvent),
+                ("pad", c_long * 24),
+            ]
+
+        # event type constants
+        SelectionNotify = 31
+        SelectionRequest = 30
+        SelectionClear = 29
+        PropModeReplace = 0
+        CurrentTime = 0
+        XA_STRING = 31
+        NoEventMask = 0
+
+        ns = {
+            "lib": lib,
+            "Display": Display,
+            "Window": Window,
+            "Atom": Atom,
+            "XEvent": XEvent,
+            "byref": byref,
+            "c_int": c_int,
+            "c_ulong": c_ulong,
+            "c_long": c_long,
+            "c_ubyte": c_ubyte,
+            "POINTER": POINTER,
+            "create_string_buffer": create_string_buffer,
+            "SelectionNotify": SelectionNotify,
+            "SelectionRequest": SelectionRequest,
+            "SelectionClear": SelectionClear,
+            "PropModeReplace": PropModeReplace,
+            "CurrentTime": CurrentTime,
+            "XA_STRING": XA_STRING,
+            "NoEventMask": NoEventMask,
+            "ctypes": ctypes,
+        }
+        _X11 = ns
+        return _X11
+    except Exception as e:
+        _X11_err = str(e)
+        return None
+
+
+def _x11_get(selection: str = "CLIPBOARD") -> str | None:
+    x = _x11()
+    if x is None:
+        return None
+    lib = x["lib"]
+    dpy = lib.XOpenDisplay(None)
+    if not dpy:
+        return None
+    try:
+        screen = lib.XDefaultScreen(dpy)
+        root = lib.XRootWindow(dpy, screen)
+        win = lib.XCreateSimpleWindow(dpy, root, 0, 0, 1, 1, 0, 0, 0)
+        sel = lib.XInternAtom(dpy, selection.encode(), 0)
+        target = lib.XInternAtom(dpy, b"UTF8_STRING", 0)
+        prop = lib.XInternAtom(dpy, b"IMBUE_CLIP", 0)
+        if not target:
+            target = x["XA_STRING"]
+        lib.XConvertSelection(dpy, sel, target, prop, win, x["CurrentTime"])
+        lib.XFlush(dpy)
+
+        ev = x["XEvent"]()
+        deadline = time.time() + 1.2
+        got = False
+        while time.time() < deadline:
+            if lib.XPending(dpy) == 0:
+                time.sleep(0.02)
+                continue
+            lib.XNextEvent(dpy, x["byref"](ev))
+            if ev.type == x["SelectionNotify"]:
+                got = True
+                break
+        if not got or ev.xselection.property == 0:
+            # retry with XA_STRING
+            lib.XConvertSelection(dpy, sel, x["XA_STRING"], prop, win, x["CurrentTime"])
+            lib.XFlush(dpy)
+            deadline = time.time() + 0.8
+            got = False
+            while time.time() < deadline:
+                if lib.XPending(dpy) == 0:
+                    time.sleep(0.02)
+                    continue
+                lib.XNextEvent(dpy, x["byref"](ev))
+                if ev.type == x["SelectionNotify"]:
+                    got = True
+                    break
+            if not got or ev.xselection.property == 0:
+                return None
+
+        actual_type = x["Atom"]()
+        actual_format = x["c_int"]()
+        nitems = x["c_ulong"]()
+        bytes_after = x["c_ulong"]()
+        data_ptr = x["POINTER"](x["c_ubyte"])()
+        status = lib.XGetWindowProperty(
+            dpy,
+            win,
+            prop,
+            0,
+            1024 * 256,  # longs
+            0,
+            0,  # AnyPropertyType
+            x["byref"](actual_type),
+            x["byref"](actual_format),
+            x["byref"](nitems),
+            x["byref"](bytes_after),
+            x["byref"](data_ptr),
+        )
+        if status != 0 or not data_ptr:
+            return None
+        n = nitems.value
+        if actual_format.value == 8:
+            raw = bytes(bytearray(data_ptr[i] for i in range(n)))
+        else:
+            raw = b""
+        lib.XFree(data_ptr)
+        lib.XDestroyWindow(dpy, win)
+        if not raw:
+            return None
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    finally:
+        try:
+            lib.XCloseDisplay(dpy)
+        except Exception:
+            pass
+
+
+def _x11_set_holder(text: str, hold_sec: float = 30.0) -> bool:
+    """Own CLIPBOARD+PRIMARY and serve SelectionRequest for hold_sec.
+
+    Runs in the current process (call from a forked child).
+    """
+    x = _x11()
+    if x is None:
+        return False
+    lib = x["lib"]
+    dpy = lib.XOpenDisplay(None)
+    if not dpy:
+        return False
+    try:
+        import ctypes
+
+        screen = lib.XDefaultScreen(dpy)
+        root = lib.XRootWindow(dpy, screen)
+        win = lib.XCreateSimpleWindow(dpy, root, 0, 0, 1, 1, 0, 0, 0)
+        clip = lib.XInternAtom(dpy, b"CLIPBOARD", 0)
+        primary = lib.XInternAtom(dpy, b"PRIMARY", 0)
+        utf8 = lib.XInternAtom(dpy, b"UTF8_STRING", 0)
+        targets = lib.XInternAtom(dpy, b"TARGETS", 0)
+        text_atom = lib.XInternAtom(dpy, b"TEXT", 0)
+        if not utf8:
+            utf8 = x["XA_STRING"]
+
+        lib.XSetSelectionOwner(dpy, clip, win, x["CurrentTime"])
+        lib.XSetSelectionOwner(dpy, primary, win, x["CurrentTime"])
+        lib.XFlush(dpy)
+
+        if lib.XGetSelectionOwner(dpy, clip) != win:
+            return False
+
+        payload = text.encode("utf-8", errors="replace")
+        buf = ctypes.create_string_buffer(payload)
+        # atom list for TARGETS
+        Atom = x["Atom"]
+        target_list = (Atom * 4)(targets, utf8, x["XA_STRING"], text_atom)
+
+        deadline = time.time() + hold_sec
+        ev = x["XEvent"]()
+        while time.time() < deadline:
+            if lib.XPending(dpy) == 0:
+                time.sleep(0.02)
+                continue
+            lib.XNextEvent(dpy, x["byref"](ev))
+            if ev.type == x["SelectionClear"]:
+                break
+            if ev.type != x["SelectionRequest"]:
+                continue
+            req = ev.xselectionrequest
+            prop = req.property if req.property else req.target
+            ok = True
+            if req.target == targets:
+                lib.XChangeProperty(
+                    dpy,
+                    req.requestor,
+                    prop,
+                    4,  # XA_ATOM
+                    32,
+                    x["PropModeReplace"],
+                    ctypes.cast(target_list, ctypes.c_void_p),
+                    4,
+                )
+            elif req.target in (utf8, x["XA_STRING"], text_atom):
+                typ = utf8 if req.target == utf8 else x["XA_STRING"]
+                lib.XChangeProperty(
+                    dpy,
+                    req.requestor,
+                    prop,
+                    typ,
+                    8,
+                    x["PropModeReplace"],
+                    ctypes.cast(buf, ctypes.c_void_p),
+                    len(payload),
+                )
+            else:
+                prop = 0  # refuse
+                ok = False
+                del ok
+            # SelectionNotify
+            notify = x["XEvent"]()
+            notify.type = x["SelectionNotify"]
+            notify.xselection.display = dpy
+            notify.xselection.requestor = req.requestor
+            notify.xselection.selection = req.selection
+            notify.xselection.target = req.target
+            notify.xselection.property = prop
+            notify.xselection.time = req.time
+            lib.XSendEvent(dpy, req.requestor, 0, x["NoEventMask"], x["byref"](notify))
+            lib.XFlush(dpy)
+        lib.XDestroyWindow(dpy, win)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            lib.XCloseDisplay(dpy)
+        except Exception:
+            pass
+
+
+def _x11_set(text: str) -> bool:
+    """Fork a short-lived holder so the parent can return immediately."""
+    if _x11() is None:
+        return False
+    # Test we can open display first
+    x = _x11()
+    lib = x["lib"]
+    dpy = lib.XOpenDisplay(None)
+    if not dpy:
+        return False
+    lib.XCloseDisplay(dpy)
+
+    pid = os.fork()
+    if pid == 0:
+        # child: detach from tty noise
+        try:
+            os.setsid()
+        except OSError:
+            pass
+        # close stdio
+        try:
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 0)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+            if devnull > 2:
+                os.close(devnull)
+        except OSError:
+            pass
+        try:
+            _x11_set_holder(text, hold_sec=60.0)
+        except Exception:
+            pass
+        os._exit(0)
+    # parent: brief wait so first pastees work, then return
+    time.sleep(0.05)
+    return True
+
+
+def clipboard_get() -> tuple[str | None, str]:
+    """Return (text, backend_name)."""
+    text, name = _tool_get()
+    if text is not None:
+        return text, name
+    # X11
+    if os.environ.get("DISPLAY"):
+        for sel in ("CLIPBOARD", "PRIMARY"):
+            t = _x11_get(sel)
+            if t is not None:
+                return t, f"x11:{sel.lower()}"
+    # internal board
+    p = current_path()
+    if p.exists():
+        try:
+            return p.read_text(encoding="utf-8"), "internal"
+        except OSError:
+            pass
+    return None, "none"
+
+
+def clipboard_set(text: str) -> str:
+    """Set system clipboard; return backend name used."""
+    name = _tool_set(text)
+    if name:
+        try:
+            current_path().write_text(text, encoding="utf-8")
+        except OSError:
+            pass
+        return name
+    if os.environ.get("DISPLAY") and _x11_set(text):
+        try:
+            current_path().write_text(text, encoding="utf-8")
+        except OSError:
+            pass
+        return "x11"
+    # internal only
+    try:
+        current_path().write_text(text, encoding="utf-8")
+        return "internal"
+    except OSError:
+        return "none"
+
+
+def backend_report() -> str:
+    lines = []
+    lines.append(f"DISPLAY={os.environ.get('DISPLAY') or '(unset)'}")
+    lines.append(f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY') or '(unset)'}")
+    for tool in ("wl-paste", "wl-copy", "xclip", "xsel"):
+        lines.append(f"  {tool}: {'yes' if _have(tool) else 'no'}")
+    x = _x11()
+    lines.append(f"  libX11 ctypes: {'yes' if x else f'no ({_X11_err})'}")
+    text, name = clipboard_get()
+    preview = ""
+    if text is not None:
+        one = text.replace("\n", "↵ ")[:60]
+        preview = f"  preview: {one!r}"
+    lines.append(f"active get: {name}")
+    if preview:
+        lines.append(preview)
+    return "\n".join(lines)
+
+
+# ── display helpers ────────────────────────────────────────────────────
+
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+def _preview_line(text: str, width: int) -> str:
+    one = text.replace("\r\n", "\n").replace("\r", "\n")
+    one = one.replace("\n", " ↵ ").replace("\t", " ")
+    one = " ".join(one.split())  # collapse runs of space
+    return _fit(one or "(empty)", width)
+
+
+def _age(ts: str) -> str:
+    try:
+        t = datetime.fromisoformat(ts)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc).astimezone()
+        sec = int((now - t).total_seconds())
+    except Exception:
+        return "?"
+    if sec < 0:
+        sec = 0
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m"
+    if sec < 86400:
+        return f"{sec // 3600}h"
+    return f"{sec // 86400}d"
+
+
+def history_as_clips(limit: int = MAX_ENTRIES) -> list[Clip]:
+    rows = load_history(limit)
+    clips: list[Clip] = []
+    # newest first for UI
+    for i, r in enumerate(reversed(rows)):
+        text = r.get("text", "")
+        dig = r.get("hash") or _digest(text)
+        clips.append(Clip(ts=r.get("ts", ""), text=text, digest=dig, n=i + 1))
+    return clips
+
+
+# ── CLI commands ───────────────────────────────────────────────────────
+
+
+def cmd_list(n: int = 20) -> int:
+    clips = history_as_clips()[: max(1, n)]
+    print(f"# {NAME}  {history_path()}  ({len(clips)} shown)")
+    for c in clips:
+        print(f"{c.n:3}  {_age(c.ts):>4}  {_preview_line(c.text, 70)}")
+    return 0
+
+
+def cmd_get() -> int:
+    text, _ = clipboard_get()
+    if text is None:
+        print("imbue: clipboard empty", file=sys.stderr)
+        return 1
+    sys.stdout.write(text)
+    if text and not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+def cmd_set(text: str, *, store: bool = True) -> int:
+    text = text if text is not None else ""
+    backend = clipboard_set(text)
+    if store:
+        append_clip(text)
+    print(f"imbue: set via {backend} ({len(text)} chars)", file=sys.stderr)
+    return 0 if backend != "none" else 1
+
+
+def cmd_add(text: str) -> int:
+    if append_clip(text, force=True):
+        print(f"imbue: stored ({len(text)} chars)", file=sys.stderr)
+        return 0
+    print("imbue: nothing to store", file=sys.stderr)
+    return 1
+
+
+def cmd_watch(interval: float = POLL_SEC) -> int:
+    print(f"imbue watch · every {interval:.1f}s · Ctrl-C to stop", file=sys.stderr)
+    last = None
+    # seed last so we don't re-store current on start unless new
+    cur, be = clipboard_get()
+    if cur is not None:
+        last = _digest(cur)
+        print(f"  backend={be}  watching…", file=sys.stderr)
+    try:
+        while True:
+            text, be = clipboard_get()
+            if text is not None:
+                dig = _digest(text)
+                if dig != last:
+                    if append_clip(text):
+                        one = _preview_line(text, 50)
+                        print(f"  + [{be}] {one}", file=sys.stderr)
+                    last = dig
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nimbue: watch stopped", file=sys.stderr)
+        return 0
+
+
+def cmd_clear() -> int:
+    clear_history()
+    print("imbue: history cleared", file=sys.stderr)
+    return 0
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return cmd_list()
+
+    art.tui_begin(fd, "imbue")
+    sel = 0
+    filt = ""
+    mode = "nav"  # nav | filter | confirm_clear | confirm_del
+    status = ""
+    flash = ""
+    pending_digest: str | None = None
+
+    try:
+        while True:
+            clips = history_as_clips()
+            if filt:
+                toks = filt.lower().split()
+                clips = [c for c in clips if all(t in c.text.lower() for t in toks)]
+            if sel >= len(clips):
+                sel = max(0, len(clips) - 1)
+
+            tw = art.term_width()
+            th = art.term_height()
+            body_w = tw - 4
+
+            _, be = clipboard_get()
+            st = flash or status or f"{len(clips)} memories · bridge {be}"
+            if mode == "filter":
+                st = f"filter: {filt}_"
+            head_lines = [_fit(st, body_w)]
+            if mode == "confirm_clear":
+                head_lines.append(art.paint(_fit("wipe all memories?  y / n", body_w), P.WARN))
+            if mode == "confirm_del":
+                head_lines.append(art.paint(_fit("forget this clip?  y / n", body_w), P.WARN))
+
+            head = art.box(head_lines, title=f"{NAME} ✦ memory", width=tw, body_style=(P.MUTED,))
+            runes = art.box(
+                [
+                    _fit("↑↓ move · enter re-copy · y yank+quit · d forget", body_w),
+                    _fit("/ filter · c clear all · r refresh · q leave", body_w),
+                ],
+                title="Runes",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+
+            # preview of selected
+            preview_rows: list[str] = []
+            if clips:
+                raw = clips[sel].text
+                for line in raw.splitlines()[:6] or [""]:
+                    preview_rows.append(art.pad_vis(_fit(line, body_w), body_w))
+                if raw.count("\n") >= 6:
+                    preview_rows.append(art.paint(_fit("…", body_w), P.MUTED))
+            else:
+                preview_rows = [art.pad_vis(_fit("(no memories yet — copy something, or imbue set …)", body_w), body_w)]
+            while len(preview_rows) < 3:
+                preview_rows.append(" " * body_w)
+            prev_box = art.box(preview_rows[:6], title="glimpse", width=tw, body_style=(P.SILVER,))
+
+            used = _line_count(head) + _line_count(runes) + _line_count(prev_box) + 4
+            avail = max(3, th - used)
+
+            rows: list[str] = []
+            if not clips:
+                rows = [art.pad_vis(_fit("(empty — imbue watch, or copy text)", body_w), body_w)]
+            else:
+                start = max(0, min(sel - avail // 2, max(0, len(clips) - avail)))
+                end = min(len(clips), start + avail)
+                for i in range(start, end):
+                    c = clips[i]
+                    mark = "✦" if i == sel else " "
+                    left = f" {mark} {_age(c.ts):>4}  "
+                    rest_w = body_w - art.vis_len(left)
+                    line = left + _preview_line(c.text, max(4, rest_w))
+                    line = art.pad_vis(_fit(line, body_w), body_w)
+                    if i == sel:
+                        rows.append(art.paint(line, P.PINK))
+                    else:
+                        rows.append(line)
+            body = art.box(rows or [" "], title="vial", width=tw, body_style=(P.SILVER,))
+
+            frame = "\n".join([head, "", body, "", prev_box, "", runes])
+            if _line_count(frame) > th:
+                frame = "\n".join(frame.splitlines()[:th])
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                pass
+            flash = ""
+            status = ""
+
+            key = art.tui_read_key(fd)
+
+            if mode == "confirm_clear":
+                if key in ("y", "Y"):
+                    clear_history()
+                    mode = "nav"
+                    flash = "memories wiped"
+                    sel = 0
+                elif key in ("n", "N", "esc", "q"):
+                    mode = "nav"
+                    flash = "kept"
+                continue
+
+            if mode == "confirm_del":
+                if key in ("y", "Y") and pending_digest:
+                    delete_entry(pending_digest)
+                    mode = "nav"
+                    pending_digest = None
+                    flash = "forgotten"
+                elif key in ("n", "N", "esc", "q"):
+                    mode = "nav"
+                    pending_digest = None
+                    flash = "kept"
+                continue
+
+            if mode == "filter":
+                if key in ("esc", "enter"):
+                    mode = "nav"
+                elif key == "backspace":
+                    filt = filt[:-1]
+                elif key in ("clear", "ctrl-u"):
+                    filt = ""
+                elif key == "space":
+                    filt += " "
+                elif len(key) == 1 and key.isprintable():
+                    filt += key
+                continue
+
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "up":
+                sel = max(0, sel - 1)
+            elif key == "down":
+                sel = min(max(0, len(clips) - 1), sel + 1)
+            elif key == "home":
+                sel = 0
+            elif key == "end":
+                sel = max(0, len(clips) - 1)
+            elif key == "pgup":
+                sel = max(0, sel - avail)
+            elif key == "pgdn":
+                sel = min(max(0, len(clips) - 1), sel + avail)
+            elif key in ("enter", "right"):
+                if clips:
+                    be = clipboard_set(clips[sel].text)
+                    flash = f"re-copied via {be}"
+            elif key in ("y", "Y"):
+                if clips:
+                    art.tui_cleanup()
+                    sys.stdout.write(clips[sel].text)
+                    if not clips[sel].text.endswith("\n"):
+                        sys.stdout.write("\n")
+                    return 0
+            elif key in ("d", "D", "delete"):
+                if clips:
+                    pending_digest = clips[sel].digest
+                    mode = "confirm_del"
+            elif key == "/":
+                mode = "filter"
+            elif key in ("c", "C"):
+                mode = "confirm_clear"
+            elif key in ("r", "R"):
+                # pull current clipboard into history
+                text, be = clipboard_get()
+                if text is not None and append_clip(text):
+                    flash = f"captured from {be}"
+                    sel = 0
+                else:
+                    flash = f"no new text ({be})"
+            elif key == "g":
+                text, be = clipboard_get()
+                if text is not None:
+                    flash = f"now: {_preview_line(text, 40)} [{be}]"
+                else:
+                    flash = "clipboard empty"
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+# ── main ───────────────────────────────────────────────────────────────
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        return run_tui()
+
+    cmd = argv[0]
+    rest = argv[1:]
+
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if cmd in ("tui", "ui"):
+        return run_tui()
+    if cmd == "list":
+        n = 20
+        if rest:
+            try:
+                n = int(rest[0])
+            except ValueError:
+                pass
+        return cmd_list(n)
+    if cmd == "get":
+        return cmd_get()
+    if cmd == "set":
+        if not rest:
+            print("usage: imbue set <text> | imbue set -", file=sys.stderr)
+            return 2
+        if rest[0] == "-" and len(rest) == 1:
+            text = sys.stdin.read()
+        else:
+            text = " ".join(rest)
+        return cmd_set(text)
+    if cmd == "add":
+        if not rest:
+            print("usage: imbue add <text>", file=sys.stderr)
+            return 2
+        if rest[0] == "-" and len(rest) == 1:
+            text = sys.stdin.read()
+        else:
+            text = " ".join(rest)
+        return cmd_add(text)
+    if cmd == "watch":
+        interval = POLL_SEC
+        if rest:
+            try:
+                interval = float(rest[0])
+            except ValueError:
+                pass
+        return cmd_watch(interval)
+    if cmd == "clear":
+        return cmd_clear()
+    if cmd == "backend":
+        print(backend_report())
+        return 0
+    # unknown → treat whole argv as set text for convenience? no, show help
+    print(f"imbue: unknown command {cmd!r} (try imbue -h)", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    # ignore SIGCHLD zombies from x11 holder children
+    try:
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    except Exception:
+        pass
+    sys.exit(main(sys.argv[1:]))
