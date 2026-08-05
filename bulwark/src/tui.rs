@@ -138,7 +138,8 @@ pub fn run() -> Result<()> {
         match screen {
             Screen::Home => match key {
                 Key::Char('q') | Key::Ctrl('c') => break,
-                Key::Esc => break,
+                // bare Esc does not quit home (avoids CSI mis-parse exiting the app)
+                Key::Esc => flash = "Press q to leave · ↑↓ to move".into(),
                 Key::Up | Key::Char('k') => {
                     sel = sel.saturating_sub(1);
                 }
@@ -933,36 +934,13 @@ impl Term {
         if n == 0 {
             return Ok(Key::Esc);
         }
-        match b0[0] {
-            b'\n' | b'\r' => return Ok(Key::Enter),
-            b'\x03' => return Ok(Key::Ctrl('c')),
-            b'\x1b' => {
-                // CSI / SS3 arrows — wait a bit then drain available bytes
-                if !wait_stdin(Duration::from_millis(80)) {
-                    return Ok(Key::Esc);
-                }
-                let mut rest = [0u8; 16];
-                let n = io::stdin().read(&mut rest).unwrap_or(0);
-                if n == 0 {
-                    return Ok(Key::Esc);
-                }
-                // forms: [A  [B  [C  [D  OA OB OC OD  [1~ [4~ [5~ [6~
-                let s = &rest[..n];
-                return Ok(match s {
-                    [b'[', b'A', ..] | [b'O', b'A', ..] => Key::Up,
-                    [b'[', b'B', ..] | [b'O', b'B', ..] => Key::Down,
-                    [b'[', b'C', ..] | [b'O', b'C', ..] => Key::Right,
-                    [b'[', b'D', ..] | [b'O', b'D', ..] => Key::Left,
-                    [b'[', b'H', ..] | [b'O', b'H', ..] | [b'[', b'1', b'~', ..] => Key::Home,
-                    [b'[', b'F', ..] | [b'O', b'F', ..] | [b'[', b'4', b'~', ..] => Key::End,
-                    [b'[', b'5', b'~', ..] => Key::PgUp,
-                    [b'[', b'6', b'~', ..] => Key::PgDn,
-                    _ => Key::Esc,
-                });
-            }
-            c if c.is_ascii() => return Ok(Key::Char(c as char)),
-            _ => return Ok(Key::Char(' ')),
-        }
+        Ok(match b0[0] {
+            b'\n' | b'\r' => Key::Enter,
+            b'\x03' => Key::Ctrl('c'),
+            b'\x1b' => parse_escape_sequence(),
+            c if c.is_ascii() => Key::Char(c as char),
+            _ => Key::Char(' '),
+        })
     }
 
     pub fn restore(&mut self) -> Result<()> {
@@ -985,5 +963,61 @@ fn wait_stdin(timeout: Duration) -> bool {
         };
         let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
         libc::poll(&mut pfd, 1, ms) > 0
+    }
+}
+
+/// Read CSI/SS3 after an ESC byte. Collects bytes for up to ~100ms.
+fn parse_escape_sequence() -> Key {
+    let mut seq: Vec<u8> = Vec::with_capacity(8);
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < deadline {
+        let remain = deadline.saturating_duration_since(std::time::Instant::now());
+        if !wait_stdin(remain.min(Duration::from_millis(20))) {
+            if seq.is_empty() {
+                return Key::Esc;
+            }
+            break;
+        }
+        let mut b = [0u8; 1];
+        match io::stdin().read(&mut b) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                seq.push(b[0]);
+                // CSI final byte, or SS3 single letter after O
+                if seq.len() == 1 && (seq[0] == b'[' || seq[0] == b'O') {
+                    continue;
+                }
+                if seq.len() >= 2 {
+                    let last = *seq.last().unwrap();
+                    // SS3: O + letter
+                    if seq[0] == b'O' && last.is_ascii_alphabetic() {
+                        break;
+                    }
+                    // CSI: final byte 0x40-0x7E
+                    if seq[0] == b'[' && (0x40..=0x7e).contains(&last) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if seq.is_empty() {
+        return Key::Esc;
+    }
+    match seq.as_slice() {
+        [b'[', b'A'] | [b'O', b'A'] => Key::Up,
+        [b'[', b'B'] | [b'O', b'B'] => Key::Down,
+        [b'[', b'C'] | [b'O', b'C'] => Key::Right,
+        [b'[', b'D'] | [b'O', b'D'] => Key::Left,
+        [b'[', b'H'] | [b'O', b'H'] | [b'[', b'1', b'~'] => Key::Home,
+        [b'[', b'F'] | [b'O', b'F'] | [b'[', b'4', b'~'] => Key::End,
+        [b'[', b'5', b'~'] => Key::PgUp,
+        [b'[', b'6', b'~'] => Key::PgDn,
+        // some terminals send 1;1A style — take last letter
+        s if s.first() == Some(&b'[') && s.last() == Some(&b'A') => Key::Up,
+        s if s.first() == Some(&b'[') && s.last() == Some(&b'B') => Key::Down,
+        s if s.first() == Some(&b'[') && s.last() == Some(&b'C') => Key::Right,
+        s if s.first() == Some(&b'[') && s.last() == Some(&b'D') => Key::Left,
+        _ => Key::Esc,
     }
 }
