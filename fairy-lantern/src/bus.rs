@@ -1,7 +1,9 @@
-//! GBA memory map (simplified waitstates).
+//! GBA memory map (simplified waitstates) + battery-backed cart save.
 
+use crate::battery::{self, FlashChip, SaveType};
 use crate::cart::Cart;
 use crate::dma;
+use std::path::PathBuf;
 
 pub const EWRAM_SIZE: usize = 256 * 1024;
 pub const IWRAM_SIZE: usize = 32 * 1024;
@@ -20,7 +22,12 @@ pub struct Bus {
     pub vram: Vec<u8>,
     pub oam: Vec<u8>,
     pub rom: Vec<u8>,
+    /// SRAM mirror (also used when SaveType::Sram)
     pub sram: Vec<u8>,
+    pub flash: Option<FlashChip>,
+    pub save_type: SaveType,
+    pub save_path: Option<PathBuf>,
+    pub save_dirty: bool,
     /// KEYINPUT active-low bits (0 = pressed)
     pub keyinput: u16,
     /// Timer reload shadow (synced from Emu.timers on write)
@@ -29,6 +36,8 @@ pub struct Bus {
 
 impl Bus {
     pub fn new(cart: &Cart, bios: Option<Vec<u8>>) -> Self {
+        let save_type = battery::detect(&cart.data);
+        let size = save_type.size().max(64 * 1024);
         let mut b = Self {
             bios: bios.unwrap_or_else(|| vec![0; BIOS_SIZE]),
             ewram: vec![0; EWRAM_SIZE],
@@ -38,13 +47,70 @@ impl Bus {
             vram: vec![0; VRAM_SIZE],
             oam: vec![0; OAM_SIZE],
             rom: cart.data.clone(),
-            sram: vec![0xFF; 64 * 1024],
+            sram: vec![0xFF; size],
+            flash: match save_type {
+                SaveType::Flash64 => Some(FlashChip::new(64 * 1024)),
+                SaveType::Flash128 => Some(FlashChip::new(128 * 1024)),
+                _ => None,
+            },
+            save_type,
+            save_path: None,
+            save_dirty: false,
             keyinput: 0x03FF,
             timer_reload: [0; 4],
         };
         b.write16_raw(0x0400_0130, 0x03FF);
         b.write16_raw(0x0400_0000, 0x0080);
         b
+    }
+
+    /// Attach a .sav path and load battery contents.
+    pub fn load_battery(&mut self, sav: PathBuf) {
+        let size = self.save_type.size().max(1);
+        if self.save_type == SaveType::None {
+            self.save_path = Some(sav);
+            return;
+        }
+        let data = battery::load_sav(&sav, size);
+        match self.save_type {
+            SaveType::Flash64 | SaveType::Flash128 => {
+                if let Some(ref mut f) = self.flash {
+                    let n = data.len().min(f.data.len());
+                    f.data[..n].copy_from_slice(&data[..n]);
+                }
+            }
+            SaveType::Sram(_) => {
+                let n = data.len().min(self.sram.len());
+                self.sram[..n].copy_from_slice(&data[..n]);
+            }
+            SaveType::None => {}
+        }
+        self.save_path = Some(sav);
+        self.save_dirty = false;
+    }
+
+    /// Flush dirty battery to disk.
+    pub fn flush_battery(&mut self) -> anyhow::Result<()> {
+        if !self.save_dirty {
+            return Ok(());
+        }
+        let Some(ref path) = self.save_path else {
+            return Ok(());
+        };
+        let data: &[u8] = match self.save_type {
+            SaveType::Flash64 | SaveType::Flash128 => {
+                if let Some(ref f) = self.flash {
+                    &f.data
+                } else {
+                    &self.sram
+                }
+            }
+            SaveType::Sram(n) => &self.sram[..n.min(self.sram.len())],
+            SaveType::None => return Ok(()),
+        };
+        battery::save_sav(path, data)?;
+        self.save_dirty = false;
+        Ok(())
     }
 
     pub fn read8(&self, addr: u32) -> u8 {
@@ -75,9 +141,21 @@ impl Bus {
                 let off = (a as usize) & 0x01FF_FFFF;
                 self.rom.get(off).copied().unwrap_or(0)
             }
-            0x0E | 0x0F => self.sram[(a as usize) & 0xFFFF],
+            0x0E | 0x0F => self.read_save(a),
             _ => 0,
         }
+    }
+
+    fn read_save(&self, addr: u32) -> u8 {
+        if let Some(ref flash) = self.flash {
+            return flash.read(addr);
+        }
+        let idx = if self.sram.len().is_power_of_two() {
+            (addr as usize) & (self.sram.len() - 1)
+        } else {
+            (addr as usize) % self.sram.len().max(1)
+        };
+        self.sram.get(idx).copied().unwrap_or(0xFF)
     }
 
     pub fn write8(&mut self, addr: u32, val: u8) {
@@ -88,15 +166,34 @@ impl Bus {
             0x04 => {
                 let i = (a as usize) & (IO_SIZE - 1);
                 if i < self.io.len() {
-                    // 16-bit side effects go through write16; byte path still stores
                     self.io[i] = val;
                 }
             }
             0x05 => self.pal[(a as usize) & (PAL_SIZE - 1)] = val,
             0x06 => self.vram[vram_index(a)] = val,
             0x07 => self.oam[(a as usize) & (OAM_SIZE - 1)] = val,
-            0x0E | 0x0F => self.sram[(a as usize) & 0xFFFF] = val,
+            0x0E | 0x0F => self.write_save(a, val),
             _ => {}
+        }
+    }
+
+    fn write_save(&mut self, addr: u32, val: u8) {
+        if let Some(ref mut flash) = self.flash {
+            if flash.write(addr, val) {
+                self.save_dirty = true;
+            }
+            return;
+        }
+        let idx = if self.sram.len().is_power_of_two() {
+            (addr as usize) & (self.sram.len() - 1)
+        } else {
+            (addr as usize) % self.sram.len().max(1)
+        };
+        if let Some(slot) = self.sram.get_mut(idx) {
+            if *slot != val {
+                *slot = val;
+                self.save_dirty = true;
+            }
         }
     }
 
@@ -105,7 +202,6 @@ impl Bus {
         u16::from_le_bytes([self.read8(a), self.read8(a.wrapping_add(1))])
     }
 
-    /// Write without IO side effects (used by PPU/timer internals).
     pub fn write16_raw(&mut self, addr: u32, val: u16) {
         let a = addr & !1;
         let b = val.to_le_bytes();
@@ -121,16 +217,13 @@ impl Bus {
 
     pub fn write16(&mut self, addr: u32, val: u16) {
         let a = addr & !1;
-        // IO side effects
         if (a >> 24) == 0x04 {
             match a {
-                // IF — write 1 to clear
                 0x0400_0202 => {
                     let cur = self.read16(0x0400_0202);
                     self.write16_raw(a, cur & !val);
                     return;
                 }
-                // Timer reloads
                 0x0400_0100 | 0x0400_0104 | 0x0400_0108 | 0x0400_010C => {
                     let idx = ((a - 0x0400_0100) / 4) as usize;
                     if idx < 4 {
@@ -139,7 +232,6 @@ impl Bus {
                     self.write16_raw(a, val);
                     return;
                 }
-                // DMA CNT_H
                 0x0400_00BA | 0x0400_00C6 | 0x0400_00D2 | 0x0400_00DE => {
                     self.write16_raw(a, val);
                     let ch = match a {
@@ -172,7 +264,6 @@ impl Bus {
     pub fn write32(&mut self, addr: u32, val: u32) {
         let a = addr & !3;
         let b = val.to_le_bytes();
-        // route through write16 for side effects on halfwords
         self.write16(a, u16::from_le_bytes([b[0], b[1]]));
         self.write16(a.wrapping_add(2), u16::from_le_bytes([b[2], b[3]]));
     }
@@ -193,9 +284,7 @@ impl Bus {
         self.write16_raw(0x0400_0004, v);
     }
 
-    /// Set keypad from emulator UI (bits 0=pressed active-low mask already).
     pub fn set_keys_pressed(&mut self, pressed_mask: u16) {
-        // pressed_mask: bit set = button pressed
         self.keyinput = (!pressed_mask) & 0x03FF;
     }
 }

@@ -1,7 +1,8 @@
 //! Interactive window — light the lantern and play.
 
 use crate::emu::Emu;
-use crate::ppu::{self, render};
+use crate::ppu;
+use crate::savestate;
 use anyhow::{bail, Result};
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 use std::time::{Duration, Instant};
@@ -36,22 +37,62 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
     let mut fb = vec![0u32; ppu::WIDTH * ppu::HEIGHT];
     let frame_budget = Duration::from_nanos(1_000_000_000 / 60);
     let mut paused = false;
+    let mut status = String::new();
 
     println!("✦ Fairy Lantern lit — {title}");
-    println!("  arrows/WASD move · Z/X = A/B · Enter Start · P pause · Esc snuff");
+    println!("  arrows/WASD · Z/X A/B · Enter Start · P pause · Esc snuff");
+    println!("  F5 savestate · F7 loadstate · battery autosaves to .sav");
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let t0 = Instant::now();
 
         if window.is_key_pressed(Key::P, KeyRepeat::No) {
             paused = !paused;
+            status = if paused {
+                "paused".into()
+            } else {
+                "resumed".into()
+            };
+        }
+
+        // Savestate
+        if window.is_key_pressed(Key::F5, KeyRepeat::No) {
+            if let Some(path) = emu.state_path() {
+                match savestate::save(emu, &path) {
+                    Ok(()) => {
+                        status = format!("state saved → {}", path.display());
+                        eprintln!("  {status}");
+                    }
+                    Err(e) => {
+                        status = format!("state save failed: {e}");
+                        eprintln!("  {status}");
+                    }
+                }
+            } else {
+                status = "no savestate for built-in fable".into();
+            }
+        }
+        if window.is_key_pressed(Key::F7, KeyRepeat::No) {
+            if let Some(path) = emu.state_path() {
+                match savestate::load(emu, &path) {
+                    Ok(()) => {
+                        status = format!("state loaded ← {}", path.display());
+                        eprintln!("  {status}");
+                    }
+                    Err(e) => {
+                        status = format!("state load failed: {e}");
+                        eprintln!("  {status}");
+                    }
+                }
+            } else {
+                status = "no savestate path".into();
+            }
         }
 
         let keys = poll_keys(&window);
         emu.bus.set_keys_pressed(keys);
 
         if !paused {
-            // run one frame worth of cycles
             let mut guard = 0u32;
             while !emu.step_cycles(1) {
                 guard += 1;
@@ -61,13 +102,19 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             }
         }
 
-        // convert BGR555 → 0xRRGGBB for minifb
         for (i, &p) in emu.ppu.frame.iter().enumerate().take(fb.len()) {
             let r = ((p & 0x1F) as u32) << 3;
             let g = (((p >> 5) & 0x1F) as u32) << 3;
             let b = (((p >> 10) & 0x1F) as u32) << 3;
             fb[i] = (r << 16) | (g << 8) | b;
         }
+
+        let win_title = if status.is_empty() {
+            format!("Fairy Lantern — {title}")
+        } else {
+            format!("Fairy Lantern — {title} · {status}")
+        };
+        window.set_title(&win_title);
 
         window
             .update_with_buffer(&fb, ppu::WIDTH, ppu::HEIGHT)
@@ -79,8 +126,8 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
         }
     }
 
-    println!("  lantern snuffed.");
-    let _ = render::frame_to_rgb; // keep import used if needed
+    emu.flush_battery();
+    println!("  lantern snuffed (battery flushed).");
     Ok(())
 }
 

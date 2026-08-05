@@ -62,6 +62,8 @@ impl Cpsr {
         }
     }
 
+    // used by savestate
+
     pub fn set_nz(&mut self, result: u32) {
         self.n = (result as i32) < 0;
         self.z = result == 0;

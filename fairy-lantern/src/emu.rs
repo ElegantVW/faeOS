@@ -1,5 +1,6 @@
-//! Fairy Lantern core — CPU + bus + PPU + timers + IRQ.
+//! Fairy Lantern core — CPU + bus + PPU + timers + IRQ + battery.
 
+use crate::battery;
 use crate::bus::Bus;
 use crate::cart::Cart;
 use crate::cpu::Cpu;
@@ -7,7 +8,7 @@ use crate::irq;
 use crate::ppu::Ppu;
 use crate::timers::{self, Timers};
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct Emu {
     pub cpu: Cpu,
@@ -15,6 +16,8 @@ pub struct Emu {
     pub ppu: Ppu,
     pub timers: Timers,
     pub cart_title: String,
+    pub rom_path: Option<PathBuf>,
+    frames_since_flush: u32,
 }
 
 impl Emu {
@@ -33,16 +36,46 @@ impl Emu {
             ppu: Ppu::new(),
             timers: Timers::new(),
             cart_title: cart.title.clone(),
+            rom_path: None,
+            frames_since_flush: 0,
         }
     }
 
     pub fn from_path(path: &Path, bios_path: Option<&Path>) -> Result<Self> {
         let cart = Cart::load(path)?;
-        Ok(Self::new(&cart, load_bios(bios_path)))
+        let mut emu = Self::new(&cart, load_bios(bios_path));
+        emu.attach_rom_path(path);
+        Ok(emu)
     }
 
     pub fn from_cart(cart: Cart, bios_path: Option<&Path>) -> Self {
         Self::new(&cart, load_bios(bios_path))
+    }
+
+    /// Wire battery .sav next to the ROM (or under data dir).
+    pub fn attach_rom_path(&mut self, path: &Path) {
+        self.rom_path = Some(path.to_path_buf());
+        let sav = battery::sav_path_for_rom(path);
+        self.bus.load_battery(sav);
+        eprintln!(
+            "  battery: {} → {}",
+            self.bus.save_type.label(),
+            self.bus
+                .save_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(none)".into())
+        );
+    }
+
+    pub fn flush_battery(&mut self) {
+        if let Err(e) = self.bus.flush_battery() {
+            eprintln!("fairy-lantern: battery save failed: {e:#}");
+        }
+    }
+
+    pub fn state_path(&self) -> Option<PathBuf> {
+        self.rom_path.as_ref().map(|p| battery::state_path_for_rom(p))
     }
 
     /// Step a few CPU cycles; returns true if a video frame completed.
@@ -57,6 +90,12 @@ impl Emu {
             self.bus.timer_reload = self.timers.reload;
             if self.ppu.step(&mut self.bus, c) {
                 frame = true;
+                self.frames_since_flush += 1;
+                // autosave battery every ~2s of game time
+                if self.frames_since_flush >= 120 && self.bus.save_dirty {
+                    self.flush_battery();
+                    self.frames_since_flush = 0;
+                }
             }
             irq::check(&mut self.cpu, &mut self.bus);
             left = left.saturating_sub(c);
@@ -76,6 +115,7 @@ impl Emu {
                 break;
             }
         }
+        self.flush_battery();
         frames
     }
 }

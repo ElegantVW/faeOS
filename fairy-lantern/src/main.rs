@@ -1,5 +1,6 @@
 //! Fairy Lantern — light a fable; play a pocket world (GBA).
 
+mod battery;
 mod bus;
 mod cart;
 mod cpu;
@@ -10,6 +11,7 @@ mod irq;
 mod play;
 mod ppu;
 mod recents;
+mod savestate;
 mod timers;
 mod tui;
 mod video;
@@ -197,6 +199,7 @@ fn play_rom(rom: &PathBuf, bios: Option<&PathBuf>) -> Result<()> {
         eprintln!("fairy-lantern: could not save recents ({e})");
     }
     let mut emu = Emu::from_cart(cart, bios.map(|p| p.as_path()));
+    emu.attach_rom_path(rom);
     let title = if emu.cart_title.is_empty() {
         rom.file_name()
             .and_then(|s| s.to_str())
@@ -334,6 +337,30 @@ fn run_self_tests() -> usize {
         emu.bus.write16(0x0600_0000, 0x001F);
         ppu::render::render_scanline(&emu.bus, 0, &mut emu.ppu.frame);
         assert_eq!(emu.ppu.frame[0] & 0x1F, 0x1F);
+        passed += 1;
+    }
+
+    {
+        let mut rom = vec![0u8; 0x400];
+        rom[0x100..0x106].copy_from_slice(b"SRAM_V");
+        assert!(matches!(battery::detect(&rom), battery::SaveType::Sram(_)));
+        rom = vec![0u8; 0x400];
+        rom[0x100..0x108].copy_from_slice(b"FLASH_V ");
+        assert!(matches!(battery::detect(&rom), battery::SaveType::Flash64 | battery::SaveType::Flash128) || matches!(battery::detect(&rom), battery::SaveType::Flash64));
+        // round-trip sav
+        let cart = Cart { data: { let mut r=vec![0u8;0x400]; r[0x100..0x106].copy_from_slice(b"SRAM_V"); r }, title:"b".into(), game_code:"B".into(), maker:"00".into(), path:"m".into() };
+        let mut emu = Emu::new(&cart, None);
+        let sav = std::env::temp_dir().join("fairy-bat-test.sav");
+        let _ = std::fs::remove_file(&sav);
+        emu.bus.load_battery(sav.clone());
+        emu.bus.write8(0x0E00_0000, 0x42);
+        assert!(emu.bus.save_dirty);
+        emu.flush_battery();
+        let data = std::fs::read(&sav).expect("sav written");
+        assert_eq!(data[0], 0x42);
+        let mut emu2 = Emu::new(&cart, None);
+        emu2.bus.load_battery(sav);
+        assert_eq!(emu2.bus.read8(0x0E00_0000), 0x42);
         passed += 1;
     }
 

@@ -33,13 +33,16 @@ fairy info / test / run …
 - [x] PPU Mode 3/4 + VBlank flag/IRQ raise
 - [x] **Interactive window** (`minifb`) — `fairy spark` / `play`
 - [x] **Built-in SPARK fable** — Mode 3 pixel you steer
-- [x] **Home TUI** on bare `fairy` — Last, SPARK, roms/, recents, Open path
+- [x] **Home TUI** on bare `fairy` — Last, SPARK, roms/, recents; **new ROMs via Spellbook** (`--pick`, arrow keys) — never type a path
+- [x] **Battery saves** — detect SRAM/FLASH from ROM tags; `.sav` next to ROM; autosave dirty + flush on exit
+- [x] **Savestates** — F5 save / F7 load (`.flst` under data dir)
 - [x] Self-tests (`fairy test`)
 - [ ] Mode 0 tiles + sprites (commercial ROMs)
-- [ ] Saves / fuller BIOS HLE
+- [ ] Full EEPROM bit-bang / fuller BIOS HLE
 
 ## Data
-`$XDG_DATA_HOME/faeos/fairy-lantern/` · `last.txt` · `recents.txt` · `roms/`  
+`$XDG_DATA_HOME/faeos/fairy-lantern/` · `last.txt` · `recents.txt` · `roms/` · `saves/` · `states/`  
+Battery: `<rom>.sav` beside the cart when possible.  
 env: `FAIRY_LANTERN_ROMS`, `FAIRY_LANTERN_BIOS`, `FAIRY_LANTERN_DIR`
 
 ## Build

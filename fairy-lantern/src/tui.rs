@@ -1,17 +1,20 @@
 //! Home TUI — bare `fairy` / `fairy-lantern` entry.
+//! New fables are picked via Spellbook (arrow keys), never typed paths.
 
 use crate::cart::Cart;
 use crate::recents;
-use anyhow::{bail, Result};
-use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use anyhow::{bail, Context, Result};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Clone, Debug)]
 enum Item {
     Last(PathBuf),
     Spark,
     Browse(PathBuf),
-    OpenPath,
+    /// Open Spellbook file manager to pick a .gba
+    FromSpellbook,
     Recent(PathBuf),
 }
 
@@ -54,54 +57,41 @@ pub fn run_home() -> Result<Choice> {
             }
             Key::Home => sel = 0,
             Key::End => sel = items.len().saturating_sub(1),
-            Key::Enter | Key::Right => {
-                match act_item(&items[sel], &mut term)? {
-                    Some(c) => {
-                        term.restore()?;
-                        return Ok(c);
-                    }
-                    None => {
-                        items = build_items();
-                        if sel >= items.len() {
-                            sel = items.len().saturating_sub(1);
-                        }
-                    }
+            Key::Enter | Key::Right => match act_item(&items[sel], &mut term)? {
+                Some(c) => {
+                    term.restore()?;
+                    return Ok(c);
                 }
-            }
+                None => {
+                    items = build_items();
+                    if sel >= items.len() {
+                        sel = items.len().saturating_sub(1);
+                    }
+                    // flash may be set via static? use return of act
+                }
+            },
             Key::Char('l') | Key::Char('L') => {
                 if let Some(p) = recents::last_rom() {
                     term.restore()?;
                     return Ok(Choice::Rom(p));
                 }
-                flash = "no last fable yet — open one first".into();
+                flash = "no last fable yet — pick one from Spellbook".into();
             }
             Key::Char('s') | Key::Char('S') => {
                 term.restore()?;
                 return Ok(Choice::Spark);
             }
-            Key::Char('o') | Key::Char('O') => {
-                term.restore_soft()?;
-                match prompt_path()? {
-                    Some(p) if p.is_file() => {
+            Key::Char('o') | Key::Char('O') | Key::Char('b') | Key::Char('B') => {
+                // open Spellbook picker (arrow-key file manager)
+                match pick_via_spellbook(&mut term)? {
+                    Some(p) => {
                         term.restore()?;
                         return Ok(Choice::Rom(p));
                     }
-                    Some(_) => {
-                        term.re_raw()?;
-                        flash = "not a file".into();
-                    }
                     None => {
-                        term.re_raw()?;
-                        flash = "cancelled".into();
+                        flash = "no fable chosen (or not a .gba)".into();
+                        items = build_items();
                     }
-                }
-            }
-            Key::Char('b') | Key::Char('B') => {
-                // jump to first browse item
-                if let Some(i) = items.iter().position(|x| matches!(x, Item::Browse(_))) {
-                    sel = i;
-                } else {
-                    flash = "no .gba in roms dir yet".into();
                 }
             }
             Key::Char(c @ '1'..='9') => {
@@ -131,27 +121,89 @@ fn act_item(item: &Item, term: &mut RawTerm) -> Result<Option<Choice>> {
     match item {
         Item::Last(p) | Item::Recent(p) | Item::Browse(p) => Ok(Some(Choice::Rom(p.clone()))),
         Item::Spark => Ok(Some(Choice::Spark)),
-        Item::OpenPath => {
-            term.restore_soft()?;
-            let r = match prompt_path()? {
-                Some(p) if p.is_file() => Ok(Some(Choice::Rom(p))),
-                Some(_) => {
-                    term.re_raw()?;
-                    Ok(None)
-                }
-                None => {
-                    term.re_raw()?;
-                    Ok(None)
-                }
-            };
-            if matches!(r, Ok(None)) {
-                // stay in tui
-            } else if matches!(r, Ok(Some(_))) {
-                // caller restores fully
-            }
-            r
+        Item::FromSpellbook => match pick_via_spellbook(term)? {
+            Some(p) => Ok(Some(Choice::Rom(p))),
+            None => Ok(None),
+        },
+    }
+}
+
+/// Leave our TUI, run Spellbook --pick with arrow keys, return a .gba path.
+fn pick_via_spellbook(term: &mut RawTerm) -> Result<Option<PathBuf>> {
+    term.restore_soft()?;
+
+    let out = std::env::temp_dir().join(format!(
+        "fairy-pick-{}.path",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&out);
+
+    let start = recents::roms_dir();
+    let start = if start.is_dir() {
+        start
+    } else {
+        recents::data_dir()
+    };
+    // Prefer home if roms empty — still start in roms (created empty)
+    let start = if start.is_dir() {
+        start
+    } else {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+    };
+
+    let spellbook = which_spellbook();
+    let status = Command::new(&spellbook)
+        .arg("--pick")
+        .arg("--output")
+        .arg(&out)
+        .arg(&start)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .with_context(|| format!("run {} (is spellbook on PATH?)", spellbook.display()))?;
+
+    term.re_raw()?;
+
+    if !status.success() && !out.is_file() {
+        return Ok(None);
+    }
+    let text = match std::fs::read_to_string(&out) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let _ = std::fs::remove_file(&out);
+    let p = PathBuf::from(text.trim());
+    if !p.is_file() {
+        return Ok(None);
+    }
+    // only light .gba fables
+    let ok = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gba"))
+        .unwrap_or(false);
+    if !ok {
+        return Ok(None);
+    }
+    Ok(Some(p))
+}
+
+fn which_spellbook() -> PathBuf {
+    if let Ok(p) = std::env::var("SPELLBOOK") {
+        return PathBuf::from(p);
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    for c in [
+        home.join("bin/spellbook"),
+        home.join("faeos/bin/spellbook"),
+        PathBuf::from("spellbook"),
+    ] {
+        if c.as_os_str() == "spellbook" || c.is_file() {
+            return c;
         }
     }
+    PathBuf::from("spellbook")
 }
 
 fn build_items() -> Vec<Item> {
@@ -160,10 +212,10 @@ fn build_items() -> Vec<Item> {
         items.push(Item::Last(last));
     }
     items.push(Item::Spark);
+    items.push(Item::FromSpellbook);
 
     let roms = recents::list_roms_dir();
     for p in roms.iter().take(8) {
-        // avoid duplicating last at top of browse if same
         if items.iter().any(|i| match i {
             Item::Last(x) | Item::Recent(x) => x == p,
             _ => false,
@@ -186,17 +238,14 @@ fn build_items() -> Vec<Item> {
         }
     }
 
-    items.push(Item::OpenPath);
     items
 }
 
 fn label(item: &Item) -> String {
     match item {
-        Item::Last(p) => {
-            let name = file_label(p);
-            format!("Last     ·  {name}")
-        }
+        Item::Last(p) => format!("Last     ·  {}", file_label(p)),
         Item::Spark => "SPARK    ·  built-in fable (always works)".into(),
+        Item::FromSpellbook => "Spellbook ·  open file manager, pick a .gba".into(),
         Item::Browse(p) => {
             let name = file_label(p);
             let title = Cart::load(p)
@@ -212,11 +261,10 @@ fn label(item: &Item) -> String {
             format!("Roms     ·  {title}")
         }
         Item::Recent(p) => format!("Recent   ·  {}", file_label(p)),
-        Item::OpenPath => "Open…    ·  type a path to a .gba".into(),
     }
 }
 
-fn file_label(p: &std::path::Path) -> String {
+fn file_label(p: &Path) -> String {
     p.file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("?")
@@ -246,7 +294,7 @@ fn draw(items: &[Item], sel: usize, flash: &str) -> String {
     lines.push("│                                                            │".into());
     lines.push("╰────────────────────────────────────────────────────────────╯".into());
     lines.push("╭─ ✦ Runes ✦ ────────────────────────────────────────────────╮".into());
-    lines.push("│ ↑↓ move · enter light · l last · s spark · o path · q quit │".into());
+    lines.push("│ ↑↓ move · enter · l last · s spark · o spellbook · q quit  │".into());
     lines.push("╰────────────────────────────────────────────────────────────╯".into());
     lines.join("\n")
 }
@@ -255,37 +303,17 @@ fn pad_fit(s: &str, width: usize) -> String {
     let mut out = String::new();
     let mut w = 0;
     for ch in s.chars() {
-        let cw = if ch == '\t' { 1 } else { 1 };
-        if w + cw > width {
+        if w + 1 > width {
             break;
         }
         out.push(ch);
-        w += cw;
+        w += 1;
     }
     while w < width {
         out.push(' ');
         w += 1;
     }
     out
-}
-
-fn prompt_path() -> Result<Option<PathBuf>> {
-    print!("\n  ✦ path to .gba (empty cancel): ");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    let line = line.trim();
-    if line.is_empty() {
-        return Ok(None);
-    }
-    let p = PathBuf::from(line.replace('~', &std::env::var("HOME").unwrap_or_default()));
-    // expand ~ already rough
-    let p = if line.starts_with("~/") {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(&line[2..])
-    } else {
-        p
-    };
-    Ok(Some(p))
 }
 
 // ── raw terminal ──────────────────────────────────────────────
