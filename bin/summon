@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""summon — the quick launcher. dmenu-style command menu over PATH.
+
+Type to filter, arrows to pick, Enter to cast. Three flavours:
+
+    summon            → picker; Enter prints the command (shell: print -z)
+    summon -x         → picker; Enter runs the command right here
+    summon -x nano    → no TUI: resolve + run the first match immediately
+    summon --refresh  → rescan PATH (cache lives 6h)
+    summon --list     → dump cached commands to stdout (one per line)
+
+Cache: ~/.cache/pixie/summon.list  (scanned from $PATH, deduped by name).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Summon"
+CACHE_FILE = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "pixie" / "summon.list"
+TTL = 6 * 3600  # 6h
+
+
+# ── command discovery ──────────────────────────────────────────────────
+
+def scan_path() -> list[tuple[str, str]]:
+    """(name, dir) pairs; first PATH hit wins; sorted + deduped by name."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for d in os.environ.get("PATH", "").split(":"):
+        if not d:
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name.startswith(".") or "\n" in name or "\t" in name or name in seen:
+                continue
+            p = Path(d) / name
+            if not p.is_file():
+                continue
+            try:
+                if not os.access(p, os.X_OK):
+                    continue
+            except OSError:
+                continue
+            seen.add(name)
+            out.append((name, d))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def read_cache() -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    try:
+        for line in CACHE_FILE.read_text().splitlines():
+            if "\t" in line:
+                name, path = line.split("\t", 1)
+                entries.append((name, path))
+    except OSError:
+        pass
+    return entries
+
+
+def write_cache(entries: list[tuple[str, str]]) -> None:
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_FILE.write_text("\n".join(f"{n}\t{p}" for n, p in entries) + "\n")
+    except OSError:
+        pass
+
+
+def cache_age() -> float:
+    try:
+        return time.time() - CACHE_FILE.stat().st_mtime
+    except OSError:
+        return float("inf")
+
+
+def entries() -> list[tuple[str, str]]:
+    if cache_age() > TTL:
+        write_cache(scan_path())
+    return read_cache()
+
+
+# ── filtering ──────────────────────────────────────────────────────────
+
+def match(q: str, name: str, path: str) -> int | None:
+    """0 = exact name, 1 = name starts with, 2 = all tokens in name,
+    3 = all tokens in path, else None (no match)."""
+    q = q.strip().lower()
+    if not q:
+        return 0
+    n, p = name.lower(), path.lower()
+    if n == q:
+        return 0
+    if n.startswith(q):
+        return 1
+    toks = q.split()
+    if all(t in n for t in toks):
+        return 2
+    if all(t in p for t in toks):
+        return 3
+    return None
+
+
+def filter_entries(entries: list[tuple[str, str]], q: str) -> list[tuple[str, str]]:
+    scored = []
+    for name, path in entries:
+        score = match(q, name, path)
+        if score is not None:
+            scored.append((score, name, path))
+    scored.sort(key=lambda t: (t[0], t[1]))
+    return [(name, path) for _, name, path in scored]
+
+
+# ── TUI picker ─────────────────────────────────────────────────────────
+
+def picker_frame(visible: list[tuple[str, str]], sel: int, filt: str, status: str = "") -> str:
+    tw = art.term_width()
+    th = art.term_height()
+    head = art.box(
+        [
+            "pick a spell → Enter casts it · ↑↓ move · type to filter",
+            f"filter: {filt}_",
+            f"showing {len(visible)} · {status}" if status else f"showing {len(visible)}",
+        ],
+        title=NAME.upper(),
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+    h = max(8, th - 13)
+    if not visible:
+        rows = ["(no matches — backspace to clear filter)"]
+    else:
+        sel = max(0, min(sel, len(visible) - 1))
+        start = max(0, min(sel - h // 2, max(0, len(visible) - h)))
+        end = min(len(visible), start + h)
+        rows = []
+        body_w = tw - 4
+        for i in range(start, end):
+            name, path = visible[i]
+            mark = "✦" if i == sel else " "
+            line = f" {mark} {name:<22} {path}"
+            if art.vis_len(line) > body_w:
+                line = line[: body_w - 3] + "…"
+            line = art.pad_vis(line, body_w)
+            rows.append(art.paint(line, P.PINK) if i == sel else line)
+    body = art.box(rows, title="spells", width=tw, body_style=(P.SILVER,))
+    runes = art.box(
+        ["up/dn move · type filter · Backspace erases · Ctrl-U clears · PgUp/PgDn",
+         "Enter cast · Esc / q leave"],
+        title="runes",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+    return "\n".join([head, "", body, "", runes])
+
+
+def run_picker(run_now: bool, initial: str = "") -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        for name, _ in entries():
+            print(name)
+        return 0
+
+    art.tui_begin(fd, "summon")
+
+    catalog = entries()
+    filt = initial
+    sel = 0
+    status = ""
+
+    try:
+        while True:
+            visible = filter_entries(catalog, filt)
+            if sel >= len(visible):
+                sel = max(0, len(visible) - 1)
+            frame = picker_frame(visible, sel, filt, status)
+            status = ""
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                art.tty_write(fd, art.clear_screen() + frame + "\n")
+
+            key = art.tui_read_key(fd)
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 1
+            if key in ("up", "k"):
+                sel = max(0, sel - 1)
+            elif key in ("down", "j"):
+                sel = min(max(0, len(visible) - 1), sel + 1)
+            elif key == "pgup":
+                sel = max(0, sel - 8)
+            elif key == "pgdn":
+                sel = min(max(0, len(visible) - 1), sel + 8)
+            elif key == "home":
+                sel = 0
+            elif key == "end":
+                sel = max(0, len(visible) - 1)
+            elif key == "enter":
+                if not visible:
+                    status = "(nothing to cast)"
+                    continue
+                name, path = visible[sel]
+                art.tui_cleanup()
+                if run_now:
+                    try:
+                        os.execvpe(name, [name], os.environ)
+                    except OSError as e:
+                        print(f"summon: {e}", file=sys.stderr)
+                        return 1
+                    return 1
+                print(name)
+                return 0
+            elif key == "backspace":
+                filt = filt[:-1]
+                sel = 0
+            elif key == "clear":
+                filt = ""
+                sel = 0
+            elif key == "delete":
+                pass
+            elif len(key) == 1 and key.isprintable():
+                filt += key
+                sel = 0
+            else:
+                status = f"(key: {key!r})"
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+# ── argv ──────────────────────────────────────────────────────────────
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    first = argv.pop(0) if argv else ""
+    if first in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if first == "--refresh":
+        write_cache(scan_path())
+        for name, _ in read_cache():
+            print(name)
+        return 0
+    if first in ("-l", "--list"):
+        for name, _ in entries():
+            print(name)
+        return 0
+
+    run_now = first in ("-x", "--exec")
+    rest = argv
+
+    if run_now and rest:
+        hits = filter_entries(entries(), rest[0])
+        if not hits:
+            print(f"summon: no command matches '{rest[0]}'", file=sys.stderr)
+            return 1
+        name, path = hits[0]
+        try:
+            os.execvpe(name, [name] + rest, os.environ)
+        except OSError as e:
+            print(f"summon: {e}", file=sys.stderr)
+            return 1
+
+    # picker: bare (prints) / -x (runs) / bare <query> (pre-filtered prints)
+    return run_picker(run_now, initial=rest[0] if rest else "")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

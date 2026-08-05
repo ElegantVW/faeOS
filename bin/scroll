@@ -135,6 +135,9 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
         [
             ("scroll", "This menu"),
             ("scroll list", "Static board (no pick)"),
+            ("summon", "Quick launcher (dmenu-style, type to run)"),
+            ("summon -x <query>", "Launch first match directly"),
+            ("summon --refresh", "Rescan PATH cache"),
             ("termfix", "Reset TTY + line-edit after glitches"),
             ("tick status", "Tick + grace state"),
             ("tick on 10", "Idle clear every 10s"),

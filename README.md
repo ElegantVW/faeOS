@@ -27,6 +27,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | `scry` / Shift-Tab | Command + output history (visions) |
 | `zen` | Fullscreen browser break (X one-shot / VT) |
 | `scroll` | Themed command directory (interactive help picker) |
+| `summon` / `summon -x <query>` | Quick launcher (type-to-run over PATH, dmenu-style) |
 | `spellbook` | File-manager TUI (j/k move, ? help, n/d/r/e dialogs) |
 | `tick` / `termfix` | Screen tick + TTY line-edit recovery |
 
