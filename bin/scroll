@@ -147,6 +147,8 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("alchemy brew <pkg>", "Install a package (sudo)"),
             ("grimoire", "Grimoire — markdown notes (pages)"),
             ("grimoire new <title>", "Create a new note + open editor"),
+            ("abacus", "Abacus — calculator REPL"),
+            ('abacus "2+2"', "One-shot evaluate"),
             ("termfix", "Reset TTY + line-edit after glitches"),
             ("tick status", "Tick + grace state"),
             ("tick on 10", "Idle clear every 10s"),

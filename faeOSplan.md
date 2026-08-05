@@ -40,6 +40,7 @@
 | **Vault** | Disk map (recursive sizes, ncdu-style) | new | [docs/plans/vault.md](docs/plans/vault.md) |
 | **Alchemy** | Package cauldron (pacman brew/sip/distill) | new | [docs/plans/alchemy.md](docs/plans/alchemy.md) |
 | **Grimoire** | Markdown notes (`~/notes`) | new | [docs/plans/grimoire.md](docs/plans/grimoire.md) |
+| **Abacus** | Calculator (safe eval REPL) | new | [docs/plans/abacus.md](docs/plans/abacus.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -60,7 +61,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 | To-dos | Quests | todo.txt-style questlog, due dates |
 | Clipboard history | Imbue | copy memory, re-paste |
 | Screenshots | Reflection | region/window/full → gallery |
-| Calculator | Abacus | REPL calc, `abacus "2+2"` from prompt |
+| Calculator | Abacus ✅ | REPL calc, `abacus "2+2"` from prompt |
 | Disk usage | Vault ✅ | ncdu-like treasure map |
 | Timer/pomodoro | Hourglass | countdowns, alarms, break (links to Zen) |
 | Password manager | Crypt | pass-based, gpg vault |
@@ -109,6 +110,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-05 (abacus)** — **Abacus v1: safe calculator.** AST-only arithmetic (+ − * / // % ** ^, unary, sqrt/sin/cos/log/pi/e…). TUI tape + history ↑↓ under `╭─ ✦ Abacus ✦ calc ✦ ─╮` + Runes; one-shot `abacus "2+2"`. Tier-1 Abacus marked done · [docs/plans/abacus.md](docs/plans/abacus.md).
 - **2026-08-05 (grimoire)** — **Grimoire v1: markdown notes.** Pages in `~/notes` (or `$GRIMOIRE_DIR`): TUI list by mtime, filter, new/edit via `$EDITOR`/`nano`, in-app view, burn (delete) with y/n. CLI: `list` `new` `edit` `show`. Height-budgeted. Registered scroll + [docs/plans/grimoire.md](docs/plans/grimoire.md); Tier-1 Grimoire marked done.
 - **2026-08-05 (alchemy progress)** — **Alchemy sip no longer looks hung.** Privileged runs: `sudo -v` on the real tty first, then stream `sudo -n pacman` with a Siren-style panel — phase name, █░ fill (package n/m, download %, or phase ladder), **elapsed clock that ticks every 250ms even when pacman is silent**, last line + short log tail. Pulse marquee while waiting. Covers brew/pour/sip/distill.
 - **2026-08-05 (alchemy)** — **Alchemy v1: pacman cauldron.** TUI: local installed list + search view (tab), filter/query (`/`), brew (`i`/enter) / pour (`d`) / sip (`u` = -Syu) / distill (`c` = -Sc) each with y/n then drop to tty for `sudo pacman` (password ok) and re-enter. CLI: `list` `search` `brew` `pour` `sip` `distill`. Height-budgeted layout. Registered scroll + [docs/plans/alchemy.md](docs/plans/alchemy.md); Tier-1 Alchemy marked done.

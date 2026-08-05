@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""abacus — calculator for faeOS.
+
+Safe arithmetic REPL with a framed TUI, or one-shot from the shell.
+
+    abacus                 interactive TUI
+    abacus "2+2"           print result and exit
+    abacus -h
+
+TUI:
+  type an expression · enter evaluate · ↑↓ history
+  c / ^u clear · q / esc leave
+"""
+
+from __future__ import annotations
+
+import ast
+import math
+import operator
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Abacus"
+
+# ── safe evaluator ─────────────────────────────────────────────────────
+
+_BIN = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_UNARY = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+_FUNCS = {
+    "abs": abs,
+    "round": round,
+    "min": min,
+    "max": max,
+    "sqrt": math.sqrt,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "log": math.log,
+    "log10": math.log10,
+    "log2": math.log2,
+    "exp": math.exp,
+    "floor": math.floor,
+    "ceil": math.ceil,
+    "pi": math.pi,
+    "e": math.e,
+    "tau": math.tau,
+}
+
+
+def _eval_node(node: ast.AST) -> float | int:
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    # py<3.8 style Num kept for safety
+    if isinstance(node, ast.Num):  # type: ignore[attr-defined]
+        return node.n  # type: ignore[attr-defined]
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
+        return _UNARY[type(node.op)](_eval_node(node.operand))
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN:
+        left = _eval_node(node.left)
+        right = _eval_node(node.right)
+        if isinstance(node.op, ast.Pow) and (abs(left) > 1e6 or abs(right) > 1000):
+            raise ValueError("power too large")
+        return _BIN[type(node.op)](left, right)
+    if isinstance(node, ast.Name):
+        if node.id in _FUNCS and not callable(_FUNCS[node.id]):
+            return _FUNCS[node.id]  # type: ignore[return-value]
+        raise ValueError(f"unknown name {node.id!r}")
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS:
+            raise ValueError("unknown function")
+        fn = _FUNCS[node.func.id]
+        if not callable(fn):
+            raise ValueError(f"{node.func.id} is not a function")
+        if node.keywords:
+            raise ValueError("no keyword args")
+        args = [_eval_node(a) for a in node.args]
+        return fn(*args)
+    raise ValueError("unsupported expression")
+
+
+def evaluate(expr: str) -> str:
+    expr = expr.strip().replace("^", "**")
+    if not expr:
+        return ""
+    try:
+        tree = ast.parse(expr, mode="eval")
+        val = _eval_node(tree)
+        if isinstance(val, float):
+            if val == int(val) and abs(val) < 1e15:
+                return str(int(val))
+            return f"{val:.12g}"
+        return str(val)
+    except ZeroDivisionError:
+        return "⊥ divide by zero"
+    except Exception as e:
+        return f"⊥ {e}"
+
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        print("abacus: need a tty (or: abacus \"1+1\")", file=sys.stderr)
+        return 1
+
+    art.tui_begin(fd, "abacus")
+    buf = ""
+    history: list[tuple[str, str]] = []  # (expr, result)
+    hist_idx = -1  # -1 = live buffer
+    draft = ""
+    status = "type an expression"
+
+    try:
+        while True:
+            tw = art.term_width()
+            th = art.term_height()
+            body_w = tw - 4
+            title = f"{NAME} ✦ calc"
+
+            head = art.box(
+                [_fit(status, body_w), _fit(f"✦ {buf}_", body_w)],
+                title=title,
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+            runes = art.box(
+                [
+                    _fit("type · enter evaluate · ↑↓ history · c/^u clear", body_w),
+                    _fit("q / esc leave · ^ ** power · pi e sqrt sin cos…", body_w),
+                ],
+                title="Runes",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+            head_h = _line_count(head)
+            runes_h = _line_count(runes)
+            avail = max(2, th - head_h - runes_h - 2 - 2)
+
+            rows: list[str] = []
+            if not history:
+                rows = [art.pad_vis(_fit("(no beads yet — try 2+2)", body_w), body_w)]
+            else:
+                # show last results, newest at bottom
+                view = history[-(avail):]
+                for expr, res in view:
+                    line = f"  {expr}  →  {res}"
+                    if res.startswith("⊥"):
+                        rows.append(art.paint(art.pad_vis(_fit(line, body_w), body_w), P.WARN))
+                    else:
+                        rows.append(art.pad_vis(_fit(line, body_w), body_w))
+            while len(rows) < avail:
+                rows.insert(0, " " * body_w)
+
+            body = art.box(rows, title="tape", width=tw, body_style=(P.SILVER,))
+            frame = "\n".join([head, "", body, "", runes])
+            if _line_count(frame) > th:
+                frame = "\n".join(frame.splitlines()[:th])
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                pass
+
+            key = art.tui_read_key(fd)
+            status = "type an expression"
+
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "enter":
+                expr = buf.strip()
+                if not expr:
+                    continue
+                res = evaluate(expr)
+                history.append((expr, res))
+                buf = ""
+                hist_idx = -1
+                draft = ""
+                status = res if not res.startswith("⊥") else res
+            elif key == "up":
+                if not history:
+                    continue
+                if hist_idx == -1:
+                    draft = buf
+                    hist_idx = len(history) - 1
+                else:
+                    hist_idx = max(0, hist_idx - 1)
+                buf = history[hist_idx][0]
+            elif key == "down":
+                if hist_idx == -1:
+                    continue
+                if hist_idx >= len(history) - 1:
+                    hist_idx = -1
+                    buf = draft
+                else:
+                    hist_idx += 1
+                    buf = history[hist_idx][0]
+            elif key == "backspace":
+                buf = buf[:-1]
+                hist_idx = -1
+            elif key in ("clear", "ctrl-u"):
+                buf = ""
+                hist_idx = -1
+                draft = ""
+            elif key == "C" and not buf:
+                # capital C on empty input wipes the tape
+                history.clear()
+                status = "tape cleared"
+            elif key == "space":
+                buf += " "
+                hist_idx = -1
+            elif len(key) == 1 and key.isprintable():
+                buf += key
+                hist_idx = -1
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    if not argv:
+        return run_tui()
+    if argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if argv[0] in ("tui", "ui", "repl"):
+        return run_tui()
+    expr = " ".join(argv)
+    # strip wrapping quotes if shell left them
+    if len(expr) >= 2 and expr[0] == expr[-1] == '"':
+        expr = expr[1:-1]
+    res = evaluate(expr)
+    print(res)
+    return 0 if not res.startswith("⊥") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
