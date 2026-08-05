@@ -61,7 +61,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         let imm = (imm << 8) >> 8;
         let offset = (imm * 4) as u32;
         // PC already advanced by 4; ARM says offset from PC+8 = (PC_after_fetch)+4
-        // r15 already advanced to next insn (PC+4 from original)
+        // r15 already advanced to next insn (A+4). Branch target uses A+8 = r15+4.
         let target = cpu.r[15].wrapping_add(4).wrapping_add(offset);
         if link {
             // LR = address of next instruction (already in r15 after fetch advance)
@@ -73,9 +73,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
 
     // SWI
     if (op & 0x0F00_0000) == 0x0F00_0000 {
-        // HLE: ignore comment field; bios_hle later
-        let _comment = op & 0x00FF_FFFF;
-        // Soft stub: treat as NOP for homebrew that shouldn't hit SWI yet
+        crate::bios_hle::swi_arm(cpu, bus, op);
         return 3;
     }
 

@@ -32,6 +32,9 @@ pub struct Bus {
     pub keyinput: u16,
     /// Timer reload shadow (synced from Emu.timers on write)
     pub timer_reload: [u16; 4],
+    /// BIOS IntrWait / Halt: run until these IF bits appear (or VBlank)
+    pub halt_wait: bool,
+    pub intr_wait_mask: u16,
 }
 
 impl Bus {
@@ -58,6 +61,8 @@ impl Bus {
             save_dirty: false,
             keyinput: 0x03FF,
             timer_reload: [0; 4],
+            halt_wait: false,
+            intr_wait_mask: 0,
         };
         b.write16_raw(0x0400_0130, 0x03FF);
         b.write16_raw(0x0400_0000, 0x0080);

@@ -43,14 +43,17 @@ impl Cpu {
         self.r[15] = pc;
     }
 
-    /// PC as seen by ARM data-processing (PC+8).
+    /// PC as seen by ARM data-processing / LDR [PC, …].
+    ///
+    /// After fetch we already advanced R15 to next insn (A+4). Architectural
+    /// PC for the insn at A is A+8, so return R15+4.
     pub fn pc_arm_read(&self) -> u32 {
-        self.r[15].wrapping_add(8)
+        self.r[15].wrapping_add(4)
     }
 
-    /// PC as seen by Thumb (PC+4).
+    /// PC as seen by Thumb (A+4). After fetch R15=A+2 → return R15+2.
     pub fn pc_thumb_read(&self) -> u32 {
-        self.r[15].wrapping_add(4)
+        self.r[15].wrapping_add(2)
     }
 
     pub fn step(&mut self, bus: &mut Bus) -> u32 {

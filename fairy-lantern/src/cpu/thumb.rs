@@ -16,6 +16,7 @@ pub fn step(cpu: &mut Cpu, bus: &mut Bus) -> u32 {
 fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     // Software interrupt
     if (op & 0xFF00) == 0xDF00 {
+        crate::bios_hle::swi_thumb(cpu, bus, op);
         return 3;
     }
 

@@ -1,6 +1,7 @@
 //! Fairy Lantern — light a fable; play a pocket world (GBA).
 
 mod battery;
+mod bios_hle;
 mod bus;
 mod cart;
 mod cpu;
@@ -57,6 +58,12 @@ enum Commands {
     Info { rom: PathBuf },
     /// Self-tests
     Test,
+    /// Diagnose a ROM (PC path + DISPCNT)
+    Diagnose {
+        rom: std::path::PathBuf,
+        #[arg(long, default_value_t = 50000)]
+        steps: u64,
+    },
     /// Debug spark ROM stepping
     DebugSpark {
         #[arg(long, default_value_t = 50)]
@@ -112,6 +119,9 @@ fn real_main() -> Result<()> {
         }
         Some(Commands::DebugSpark { steps }) => {
             debug_spark(steps);
+        }
+        Some(Commands::Diagnose { rom, steps }) => {
+            diagnose_rom(&rom, steps)?;
         }
         Some(Commands::Test) => {
             let n = run_self_tests();
@@ -236,6 +246,60 @@ fn run_rom(
     println!("  frame → {}", dump_path.display());
     if present && !video::present_terminal(&emu.ppu.frame) {
         println!("  (chafa unavailable)");
+    }
+    Ok(())
+}
+
+
+fn diagnose_rom(rom: &PathBuf, max_steps: u64) -> Result<()> {
+    let cart = Cart::load(rom)?;
+    cart::print_info(&cart);
+    let mut emu = Emu::from_cart(cart, None);
+    emu.attach_rom_path(rom);
+    let mut last_valid = emu.cpu.pc();
+    let mut invalid_at = None;
+    for step in 0..max_steps {
+        let pc = emu.cpu.pc();
+        let valid = (pc < 0x4000)
+            || (0x0200_0000..0x0204_0000).contains(&pc)
+            || (0x0300_0000..0x0300_8000).contains(&pc)
+            || (0x0800_0000..0x0E00_0000).contains(&pc);
+        if !valid {
+            invalid_at = Some((step, pc, last_valid, emu.cpu.r, emu.cpu.cpsr.thumb, emu.bus.dispcnt()));
+            break;
+        }
+        last_valid = pc;
+        let c = if emu.bus.halt_wait {
+            // honor halt
+            if emu.step_cycles(64) {}
+            continue;
+        } else {
+            emu.cpu.step(&mut emu.bus)
+        };
+        emu.timers.reload = emu.bus.timer_reload;
+        crate::timers::step(&mut emu.timers, &mut emu.bus, c);
+        emu.bus.timer_reload = emu.timers.reload;
+        emu.ppu.step(&mut emu.bus, c);
+        crate::irq::check(&mut emu.cpu, &mut emu.bus);
+        if step < 40 || step >= 70 {
+            let op = if emu.cpu.cpsr.thumb {
+                emu.bus.read16(pc) as u32
+            } else {
+                emu.bus.read32(pc)
+            };
+            println!(
+                "{:6} pc={:08X} op={:08X} thumb={} r0={:08X} r1={:08X} r14={:08X} sp={:08X} dispcnt={:04X}",
+                step, pc, op, emu.cpu.cpsr.thumb, emu.cpu.r[0], emu.cpu.r[1], emu.cpu.r[14],
+                emu.cpu.r[13], emu.bus.dispcnt()
+            );
+        }
+    }
+    if let Some((step, pc, last, r, thumb, dc)) = invalid_at {
+        println!("INVALID at step {step}: pc={pc:08X} last_valid={last:08X} thumb={thumb} dispcnt={dc:04X}");
+        println!("  r0-7  {:08X?}", &r[0..8]);
+        println!("  r8-15 {:08X?}", &r[8..16]);
+    } else {
+        println!("survived {max_steps} steps pc={:08X} dispcnt={:04X}", emu.cpu.pc(), emu.bus.dispcnt());
     }
     Ok(())
 }

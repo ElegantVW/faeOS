@@ -58,6 +58,7 @@ impl Ppu {
 
             if entering_vblank {
                 crate::irq::raise(bus, crate::irq::IRQ_VBLANK);
+                // also set IE-aware games: ensure IF VBlank bit is set for IntrWait
             }
         }
         self.frame_ready

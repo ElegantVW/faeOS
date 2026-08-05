@@ -83,6 +83,33 @@ impl Emu {
         let mut left = min_cycles.max(1);
         let mut frame = false;
         while left > 0 {
+            // BIOS Halt / IntrWait: burn cycles on PPU until VBlank/IF match
+            if self.bus.halt_wait {
+                let c = 64u32;
+                self.timers.reload = self.bus.timer_reload;
+                timers::step(&mut self.timers, &mut self.bus, c);
+                self.bus.timer_reload = self.timers.reload;
+                if self.ppu.step(&mut self.bus, c) {
+                    frame = true;
+                    self.frames_since_flush += 1;
+                }
+                let if_ = self.bus.read16(0x0400_0202);
+                let mask = if self.bus.intr_wait_mask == 0 {
+                    1
+                } else {
+                    self.bus.intr_wait_mask
+                };
+                if if_ & mask != 0 {
+                    // clear waited bits (like BIOS)
+                    self.bus
+                        .write16_raw(0x0400_0202, if_ & !mask);
+                    self.bus.halt_wait = false;
+                    self.bus.intr_wait_mask = 0;
+                }
+                left = left.saturating_sub(c);
+                continue;
+            }
+
             let c = self.cpu.step(&mut self.bus);
             // sync reloads from bus IO side-effects
             self.timers.reload = self.bus.timer_reload;
