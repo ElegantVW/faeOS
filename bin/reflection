@@ -1,0 +1,1002 @@
+#!/usr/bin/env python3
+"""reflection — screenshots & gallery for faeOS.
+
+Capture the glass (full · window · region), then wander the gallery.
+Backends: ImageMagick import, scrot/maim/grim, or pure X11 grab.
+
+Storage:  $XDG_DATA_HOME/faeos/reflection/shots/
+Override: REFLECTION_DIR=/path
+
+    reflection                  TUI gallery
+    reflection full             capture whole desktop
+    reflection window           focused window
+    reflection region           drag a rectangle
+    reflection list [N]         recent shots
+    reflection last             path of newest
+    reflection open [path]      preview (chafa / open)
+    reflection backend          which tools are live
+    reflection -h
+
+TUI: ↑↓ move · enter open · f full · w window · r region
+     d delete · o open external · y path to stdout · q leave
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Reflection"
+MAX_INDEX = 500
+
+
+# ── paths ──────────────────────────────────────────────────────────────
+
+
+def data_dir() -> Path:
+    env = (
+        os.environ.get("REFLECTION_DIR", "").strip()
+        or os.environ.get("REFLECTIONDIR", "").strip()
+    )
+    if env:
+        p = Path(env).expanduser()
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+        p = base / "faeos" / "reflection"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def shots_dir() -> Path:
+    p = data_dir() / "shots"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def index_path() -> Path:
+    return data_dir() / "index.jsonl"
+
+
+# ── index ──────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Shot:
+    path: Path
+    mode: str
+    ts: str
+    bytes: int
+    width: int
+    height: int
+    n: int = 0  # 1-based newest-first
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _stamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _image_size(path: Path) -> tuple[int, int]:
+    """PNG IHDR or identify(1); returns (w,h) or (0,0)."""
+    try:
+        raw = path.read_bytes()[:32]
+        if raw[:8] == b"\x89PNG\r\n\x1a\n" and len(raw) >= 24:
+            w, h = struct.unpack(">II", raw[16:24])
+            return int(w), int(h)
+    except OSError:
+        pass
+    # JPEG SOF — skip for simplicity; try identify
+    if shutil.which("identify"):
+        try:
+            r = subprocess.run(
+                ["identify", "-format", "%w %h", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if r.returncode == 0:
+                parts = r.stdout.strip().split()
+                if len(parts) >= 2:
+                    return int(parts[0]), int(parts[1])
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+    try:
+        from PIL import Image
+
+        with Image.open(path) as im:
+            return im.size
+    except Exception:
+        return 0, 0
+
+
+def load_index(limit: int = MAX_INDEX) -> list[dict]:
+    path = index_path()
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return []
+    return rows[-limit:]
+
+
+def append_index(rec: dict) -> None:
+    path = index_path()
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    rows = load_index(MAX_INDEX + 50)
+    if len(rows) > MAX_INDEX:
+        path.write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows[-MAX_INDEX:]),
+            encoding="utf-8",
+        )
+
+
+def register_shot(path: Path, mode: str) -> Shot:
+    path = path.resolve()
+    w, h = _image_size(path)
+    try:
+        nbytes = path.stat().st_size
+    except OSError:
+        nbytes = 0
+    rec = {
+        "ts": _now_iso(),
+        "mode": mode,
+        "path": str(path),
+        "bytes": nbytes,
+        "width": w,
+        "height": h,
+    }
+    append_index(rec)
+    return Shot(path=path, mode=mode, ts=rec["ts"], bytes=nbytes, width=w, height=h)
+
+
+def delete_shot_record(path: Path) -> bool:
+    rows = load_index()
+    sp = str(path.resolve())
+    new = [r for r in rows if r.get("path") != sp and Path(r.get("path", "")).name != path.name]
+    if len(new) == len(rows):
+        # still try unlink
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    index_path().write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in new),
+        encoding="utf-8",
+    )
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return True
+
+
+def list_shots(limit: int = MAX_INDEX) -> list[Shot]:
+    """Newest first. Prefer index; also pick up loose files in shots/."""
+    seen: set[str] = set()
+    out: list[Shot] = []
+    for r in reversed(load_index(limit * 2)):
+        p = Path(r.get("path", ""))
+        if not p.is_file():
+            continue
+        key = str(p.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            Shot(
+                path=p,
+                mode=r.get("mode", "?"),
+                ts=r.get("ts", ""),
+                bytes=int(r.get("bytes") or 0),
+                width=int(r.get("width") or 0),
+                height=int(r.get("height") or 0),
+            )
+        )
+        if len(out) >= limit:
+            break
+    # orphan files
+    if len(out) < limit:
+        try:
+            files = sorted(shots_dir().glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            files = []
+        for p in files:
+            key = str(p.resolve())
+            if key in seen:
+                continue
+            w, h = _image_size(p)
+            try:
+                nbytes = p.stat().st_size
+                mtime = datetime.fromtimestamp(p.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+            except OSError:
+                nbytes, mtime = 0, ""
+            out.append(Shot(path=p, mode="?", ts=mtime, bytes=nbytes, width=w, height=h))
+            if len(out) >= limit:
+                break
+    for i, s in enumerate(out):
+        s.n = i + 1
+    return out
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+
+def _have(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def _run(cmd: list[str], *, timeout: float = 120.0) -> tuple[int, str, str]:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+    except FileNotFoundError:
+        return 127, "", "not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+
+
+def _dest(mode: str, ext: str = "png") -> Path:
+    return shots_dir() / f"{_stamp()}-{mode}.{ext}"
+
+
+def _age(ts: str) -> str:
+    try:
+        t = datetime.fromisoformat(ts)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc).astimezone()
+        sec = max(0, int((now - t).total_seconds()))
+    except Exception:
+        return "?"
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m"
+    if sec < 86400:
+        return f"{sec // 3600}h"
+    return f"{sec // 86400}d"
+
+
+def _fmt_bytes(n: int) -> str:
+    if n < 1024:
+        return f"{n}B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.0f}K"
+    return f"{n / (1024 * 1024):.1f}M"
+
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+# ── capture backends ───────────────────────────────────────────────────
+
+
+def _import_bin() -> list[str] | None:
+    if _have("import"):
+        return ["import"]
+    if _have("magick"):
+        return ["magick", "import"]
+    return None
+
+
+def _active_window_id() -> str | None:
+    """Hex window id from EWMH, e.g. 0x120000e."""
+    if not _have("xprop"):
+        return None
+    rc, out, _ = _run(["xprop", "-root", "_NET_ACTIVE_WINDOW"], timeout=2)
+    if rc != 0:
+        return None
+    # _NET_ACTIVE_WINDOW(WINDOW): window id # 0x120000e
+    for tok in out.replace(",", " ").split():
+        if tok.startswith("0x") or tok.startswith("0X"):
+            if tok.lower() in ("0x0", "0x00"):
+                return None
+            return tok
+    return None
+
+
+def capture_full() -> tuple[Path | None, str]:
+    dest = _dest("full")
+    # grim (wayland)
+    if os.environ.get("WAYLAND_DISPLAY") and _have("grim"):
+        rc, _, err = _run(["grim", str(dest)])
+        if rc == 0 and dest.is_file():
+            return dest, "grim"
+    # scrot
+    if _have("scrot"):
+        rc, _, err = _run(["scrot", str(dest)])
+        if rc == 0 and dest.is_file():
+            return dest, "scrot"
+    # maim
+    if _have("maim"):
+        rc, _, err = _run(["maim", str(dest)])
+        if rc == 0 and dest.is_file():
+            return dest, "maim"
+    # ImageMagick
+    imp = _import_bin()
+    if imp:
+        rc, _, err = _run(imp + ["-window", "root", str(dest)])
+        if rc == 0 and dest.is_file():
+            return dest, "import"
+    # pure X11
+    if os.environ.get("DISPLAY"):
+        if _x11_grab_root(dest):
+            return dest, "x11"
+    return None, err if "err" in dir() else "no capture backend"
+
+
+def capture_window(win_id: str | None = None) -> tuple[Path | None, str]:
+    dest = _dest("window")
+    wid = win_id or _active_window_id()
+    # maim -i
+    if _have("maim") and wid:
+        # maim wants decimal id sometimes
+        try:
+            dec = str(int(wid, 16)) if wid.startswith("0x") else wid
+        except ValueError:
+            dec = wid
+        rc, _, err = _run(["maim", "-i", dec, str(dest)])
+        if rc == 0 and dest.is_file():
+            return dest, "maim"
+    # import -window
+    imp = _import_bin()
+    if imp and wid:
+        rc, _, err = _run(imp + ["-window", wid, str(dest)])
+        if rc == 0 and dest.is_file():
+            return dest, "import"
+    # scrot -u focused
+    if _have("scrot"):
+        rc, _, err = _run(["scrot", "-u", str(dest)])
+        if rc == 0 and dest.is_file():
+            return dest, "scrot"
+    # interactive click-window with import
+    if imp:
+        print("reflection: click a window…", file=sys.stderr)
+        rc, _, err = _run(imp + [str(dest)], timeout=300)
+        if rc == 0 and dest.is_file():
+            return dest, "import-click"
+    return None, "no window capture (need import/scrot/maim + DISPLAY)"
+
+
+def capture_region() -> tuple[Path | None, str]:
+    dest = _dest("region")
+    # grim + slurp
+    if os.environ.get("WAYLAND_DISPLAY") and _have("grim") and _have("slurp"):
+        rc, geo, err = _run(["slurp"], timeout=300)
+        if rc == 0 and geo.strip():
+            rc2, _, err2 = _run(["grim", "-g", geo.strip(), str(dest)])
+            if rc2 == 0 and dest.is_file():
+                return dest, "grim+slurp"
+    # maim -s
+    if _have("maim"):
+        print("reflection: drag a region…", file=sys.stderr)
+        rc, _, err = _run(["maim", "-s", str(dest)], timeout=300)
+        if rc == 0 and dest.is_file():
+            return dest, "maim"
+    # scrot -s
+    if _have("scrot"):
+        print("reflection: select a region…", file=sys.stderr)
+        rc, _, err = _run(["scrot", "-s", str(dest)], timeout=300)
+        if rc == 0 and dest.is_file():
+            return dest, "scrot"
+    # ImageMagick interactive
+    imp = _import_bin()
+    if imp:
+        print("reflection: drag a rectangle, release to capture…", file=sys.stderr)
+        rc, _, err = _run(imp + [str(dest)], timeout=300)
+        if rc == 0 and dest.is_file():
+            return dest, "import"
+    return None, "no region capture (need import/maim/scrot/grim+slurp)"
+
+
+def _x11_grab_root(dest: Path) -> bool:
+    """Full-screen grab via libX11 + Pillow (or raw PPM)."""
+    try:
+        import ctypes
+        from ctypes import POINTER, byref, c_char_p, c_int, c_uint, c_ulong, c_void_p
+    except ImportError:
+        return False
+    try:
+        lib = ctypes.CDLL("libX11.so.6")
+    except OSError:
+        return False
+
+    lib.XOpenDisplay.argtypes = [c_char_p]
+    lib.XOpenDisplay.restype = c_void_p
+    lib.XCloseDisplay.argtypes = [c_void_p]
+    lib.XDefaultScreen.argtypes = [c_void_p]
+    lib.XDefaultScreen.restype = c_int
+    lib.XRootWindow.argtypes = [c_void_p, c_int]
+    lib.XRootWindow.restype = c_ulong
+    lib.XDisplayWidth.argtypes = [c_void_p, c_int]
+    lib.XDisplayWidth.restype = c_int
+    lib.XDisplayHeight.argtypes = [c_void_p, c_int]
+    lib.XDisplayHeight.restype = c_int
+    lib.XGetImage.argtypes = [c_void_p, c_ulong, c_int, c_int, c_uint, c_uint, c_ulong, c_int]
+    lib.XGetImage.restype = c_void_p
+    lib.XDestroyImage.argtypes = [c_void_p]
+
+    # XImage layout (partial)
+    class XImage(ctypes.Structure):
+        _fields_ = [
+            ("width", c_int),
+            ("height", c_int),
+            ("xoffset", c_int),
+            ("format", c_int),
+            ("data", ctypes.c_char_p),
+            ("byte_order", c_int),
+            ("bitmap_unit", c_int),
+            ("bitmap_bit_order", c_int),
+            ("bitmap_pad", c_int),
+            ("depth", c_int),
+            ("bytes_per_line", c_int),
+            ("bits_per_pixel", c_int),
+            ("red_mask", c_ulong),
+            ("green_mask", c_ulong),
+            ("blue_mask", c_ulong),
+        ]
+
+    dpy = lib.XOpenDisplay(None)
+    if not dpy:
+        return False
+    try:
+        screen = lib.XDefaultScreen(dpy)
+        root = lib.XRootWindow(dpy, screen)
+        w = lib.XDisplayWidth(dpy, screen)
+        h = lib.XDisplayHeight(dpy, screen)
+        AllPlanes = c_ulong(~0)
+        ZPixmap = 2
+        img_p = lib.XGetImage(dpy, root, 0, 0, w, h, AllPlanes, ZPixmap)
+        if not img_p:
+            return False
+        img = ctypes.cast(img_p, POINTER(XImage)).contents
+        bpl = img.bytes_per_line
+        bpp = img.bits_per_pixel
+        depth = img.depth
+        # copy pixel data
+        nbytes = bpl * h
+        buf = ctypes.string_at(img.data, nbytes)
+        lib.XDestroyImage(img_p)
+
+        # convert BGRA/RGB to PNG via Pillow, else PPM
+        try:
+            from PIL import Image
+
+            if bpp == 32:
+                # typically BGRA on little-endian X
+                im = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", bpl, 1)
+            elif bpp == 24:
+                im = Image.frombuffer("RGB", (w, h), buf, "raw", "BGR", bpl, 1)
+            else:
+                raise ValueError(f"unsupported bpp {bpp}")
+            im.save(dest, "PNG")
+            return dest.is_file()
+        except Exception:
+            # PPM fallback
+            ppm = dest.with_suffix(".ppm")
+            # only 32bpp BGRA → RGB
+            if bpp != 32:
+                return False
+            rows = []
+            for y in range(h):
+                row = buf[y * bpl : y * bpl + w * 4]
+                rgb = bytearray()
+                for i in range(0, len(row), 4):
+                    b, g, r = row[i], row[i + 1], row[i + 2]
+                    rgb.extend((r, g, b))
+                rows.append(bytes(rgb))
+            with ppm.open("wb") as f:
+                f.write(f"P6\n{w} {h}\n255\n".encode())
+                f.write(b"".join(rows))
+            # try convert to png
+            if _have("convert") or _have("magick"):
+                conv = ["magick", str(ppm), str(dest)] if _have("magick") else ["convert", str(ppm), str(dest)]
+                rc, _, _ = _run(conv, timeout=30)
+                try:
+                    ppm.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return rc == 0 and dest.is_file()
+            # keep ppm as dest rename
+            dest.unlink(missing_ok=True)
+            ppm.rename(dest.with_suffix(".ppm"))
+            return True
+    except Exception:
+        return False
+    finally:
+        try:
+            lib.XCloseDisplay(dpy)
+        except Exception:
+            pass
+
+
+def do_capture(mode: str) -> tuple[Shot | None, str]:
+    mode = mode.lower()
+    if mode in ("full", "screen", "desktop"):
+        path, be = capture_full()
+        label = "full"
+    elif mode in ("window", "win", "w"):
+        path, be = capture_window()
+        label = "window"
+    elif mode in ("region", "area", "sel", "r"):
+        path, be = capture_region()
+        label = "region"
+    else:
+        return None, f"unknown mode {mode!r}"
+    if path is None:
+        return None, be
+    shot = register_shot(path, label)
+    return shot, be
+
+
+def backend_report() -> str:
+    lines = [
+        f"DISPLAY={os.environ.get('DISPLAY') or '(unset)'}",
+        f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY') or '(unset)'}",
+    ]
+    for t in ("import", "magick", "scrot", "maim", "grim", "slurp", "chafa", "xprop", "convert"):
+        lines.append(f"  {t}: {'yes' if _have(t) else 'no'}")
+    try:
+        import ctypes
+
+        ctypes.CDLL("libX11.so.6")
+        lines.append("  libX11: yes")
+    except Exception as e:
+        lines.append(f"  libX11: no ({e})")
+    try:
+        from PIL import Image  # noqa: F401
+
+        lines.append("  Pillow: yes")
+    except Exception:
+        lines.append("  Pillow: no")
+    lines.append(f"  shots dir: {shots_dir()}")
+    return "\n".join(lines)
+
+
+# ── preview / open ─────────────────────────────────────────────────────
+
+
+def preview_chafa(path: Path, cols: int, rows: int) -> list[str]:
+    if not _have("chafa") or not path.is_file():
+        return []
+    # size as WxH cells
+    size = f"{max(8, cols)}x{max(4, rows)}"
+    try:
+        r = subprocess.run(
+            [
+                "chafa",
+                f"--size={size}",
+                "--animate=off",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if r.returncode != 0:
+            return []
+        lines = r.stdout.splitlines()
+        return lines[:rows]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def open_external(path: Path) -> str:
+    """Open with xdg-open / kitty / feh / etc. Returns status."""
+    if not path.is_file():
+        return "missing"
+    for cmd in (
+        ["xdg-open", str(path)],
+        ["kitty", "+kitten", "icat", str(path)],
+        ["feh", str(path)],
+        ["imv", str(path)],
+    ):
+        if not _have(cmd[0]):
+            continue
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return cmd[0]
+        except OSError:
+            continue
+    return "no viewer"
+
+
+# ── CLI ────────────────────────────────────────────────────────────────
+
+
+def cmd_list(n: int = 20) -> int:
+    shots = list_shots(n)
+    print(f"# {NAME}  {shots_dir()}  ({len(shots)})")
+    for s in shots:
+        dim = f"{s.width}×{s.height}" if s.width else "?"
+        print(
+            f"{s.n:3}  {_age(s.ts):>4}  {s.mode:<7}  {_fmt_bytes(s.bytes):>6}  {dim:<11}  {s.path.name}"
+        )
+    return 0
+
+
+def cmd_last() -> int:
+    shots = list_shots(1)
+    if not shots:
+        print("reflection: no shots yet", file=sys.stderr)
+        return 1
+    print(shots[0].path)
+    return 0
+
+
+def cmd_capture(mode: str) -> int:
+    shot, be = do_capture(mode)
+    if shot is None:
+        print(f"reflection: capture failed — {be}", file=sys.stderr)
+        return 1
+    print(shot.path)
+    print(
+        f"reflection: {shot.mode} via {be} · {shot.width}×{shot.height} · {_fmt_bytes(shot.bytes)}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def cmd_open(path: Path | None = None) -> int:
+    if path is None:
+        shots = list_shots(1)
+        if not shots:
+            print("reflection: no shots", file=sys.stderr)
+            return 1
+        path = shots[0].path
+    path = Path(path).expanduser()
+    if not path.is_file():
+        print(f"reflection: not found: {path}", file=sys.stderr)
+        return 1
+    # if stdout is tty, try chafa
+    if sys.stdout.isatty() and _have("chafa"):
+        cols = shutil.get_terminal_size((80, 24)).columns
+        rows = max(8, shutil.get_terminal_size((80, 24)).lines - 4)
+        lines = preview_chafa(path, cols, rows)
+        if lines:
+            print("\n".join(lines))
+            print(f"\n{path}")
+            return 0
+    be = open_external(path)
+    print(f"reflection: opened with {be}: {path}", file=sys.stderr)
+    return 0 if be != "no viewer" and be != "missing" else 1
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return cmd_list()
+
+    art.tui_begin(fd, "reflection")
+    sel = 0
+    flash = ""
+    mode = "nav"  # nav | confirm_del
+    pending: Shot | None = None
+    # rebuild list each paint
+    try:
+        while True:
+            shots = list_shots()
+            if sel >= len(shots):
+                sel = max(0, len(shots) - 1)
+
+            tw = art.term_width()
+            th = art.term_height()
+            body_w = tw - 4
+
+            st = flash or f"{len(shots)} mirrors · {shots_dir().name}/"
+            head_lines = [_fit(st, body_w)]
+            if mode == "confirm_del" and pending:
+                head_lines.append(
+                    art.paint(
+                        _fit(f"shatter this mirror?  y / n  ·  {pending.path.name}", body_w),
+                        P.WARN,
+                    )
+                )
+            head = art.box(
+                head_lines,
+                title=f"{NAME} ✦ gallery",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+            runes = art.box(
+                [
+                    _fit("↑↓ move · enter open · f full · w window · r region", body_w),
+                    _fit("d delete · o external · y path · q leave", body_w),
+                ],
+                title="Runes",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+
+            # preview pane
+            prev_h = max(6, min(14, th // 3))
+            prev_rows: list[str] = []
+            if shots:
+                s = shots[sel]
+                chafa_lines = preview_chafa(s.path, body_w, prev_h - 1)
+                if chafa_lines:
+                    for line in chafa_lines:
+                        # chafa already has ANSI; pad carefully
+                        prev_rows.append(line[: tw * 4])  # keep ansi, soft cap
+                else:
+                    dim = f"{s.width}×{s.height}" if s.width else "?"
+                    prev_rows = [
+                        art.pad_vis(_fit(f"{s.path.name}", body_w), body_w),
+                        art.pad_vis(_fit(f"{dim} · {_fmt_bytes(s.bytes)} · {s.mode}", body_w), body_w),
+                        art.pad_vis(_fit(str(s.path), body_w), body_w),
+                    ]
+            else:
+                prev_rows = [
+                    art.pad_vis(
+                        _fit("(no mirrors yet — f full · w window · r region)", body_w),
+                        body_w,
+                    )
+                ]
+            while len(prev_rows) < 3:
+                prev_rows.append(" " * min(body_w, 1))
+            prev_box = art.box(
+                prev_rows[:prev_h],
+                title="looking glass",
+                width=tw,
+                body_style=(P.SILVER,),
+            )
+
+            used = _line_count(head) + _line_count(runes) + _line_count(prev_box) + 4
+            avail = max(3, th - used)
+
+            rows: list[str] = []
+            if not shots:
+                rows = [art.pad_vis(_fit("(empty gallery)", body_w), body_w)]
+            else:
+                start = max(0, min(sel - avail // 2, max(0, len(shots) - avail)))
+                end = min(len(shots), start + avail)
+                for i in range(start, end):
+                    s = shots[i]
+                    mark = "✦" if i == sel else " "
+                    dim = f"{s.width}×{s.height}" if s.width else "?"
+                    left = f" {mark} {_age(s.ts):>4}  {s.mode:<6}  "
+                    rest = f"{dim}  {s.path.name}"
+                    line = left + _fit(rest, max(4, body_w - art.vis_len(left)))
+                    line = art.pad_vis(_fit(line, body_w), body_w)
+                    if i == sel:
+                        rows.append(art.paint(line, P.PINK))
+                    else:
+                        rows.append(line)
+            body = art.box(rows or [" "], title="mirrors", width=tw, body_style=(P.SILVER,))
+
+            frame = "\n".join([head, "", body, "", prev_box, "", runes])
+            if _line_count(frame) > th:
+                frame = "\n".join(frame.splitlines()[:th])
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                pass
+            flash = ""
+
+            key = art.tui_read_key(fd)
+
+            if mode == "confirm_del":
+                if key in ("y", "Y") and pending:
+                    delete_shot_record(pending.path)
+                    mode = "nav"
+                    pending = None
+                    flash = "mirror shattered"
+                elif key in ("n", "N", "esc", "q"):
+                    mode = "nav"
+                    pending = None
+                    flash = "kept"
+                continue
+
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "up":
+                sel = max(0, sel - 1)
+            elif key == "down":
+                sel = min(max(0, len(shots) - 1), sel + 1)
+            elif key == "home":
+                sel = 0
+            elif key == "end":
+                sel = max(0, len(shots) - 1)
+            elif key == "pgup":
+                sel = max(0, sel - avail)
+            elif key == "pgdn":
+                sel = min(max(0, len(shots) - 1), sel + avail)
+            elif key in ("enter", "right", " "):
+                if shots:
+                    # enlarge chafa in a one-shot suspend view
+                    art.tui_suspend()
+                    try:
+                        with open("/dev/tty", "w") as tout:
+                            tout.write("\033[2J\033[H")
+                            cols = shutil.get_terminal_size((80, 24)).columns
+                            rows_n = max(10, shutil.get_terminal_size((80, 24)).lines - 3)
+                            lines = preview_chafa(shots[sel].path, cols, rows_n)
+                            if lines:
+                                tout.write("\n".join(lines) + "\n")
+                            tout.write(
+                                art.paint(
+                                    f"\n  {shots[sel].path}  ·  any key to return\n",
+                                    P.MUTED,
+                                )
+                            )
+                            tout.flush()
+                        with open("/dev/tty", "r") as tin:
+                            # one key
+                            term_fd = tin.fileno()
+                            import termios
+                            import tty
+
+                            old = termios.tcgetattr(term_fd)
+                            try:
+                                tty.setcbreak(term_fd)
+                                os.read(term_fd, 1)
+                            finally:
+                                termios.tcsetattr(term_fd, termios.TCSADRAIN, old)
+                    except (OSError, EOFError):
+                        pass
+                    finally:
+                        art.tui_resume()
+            elif key in ("f", "F"):
+                art.tui_suspend()
+                try:
+                    shot, be = do_capture("full")
+                finally:
+                    art.tui_resume()
+                if shot:
+                    flash = f"full via {be} · {shot.path.name}"
+                    sel = 0
+                else:
+                    flash = f"full failed — {be}"
+            elif key in ("w", "W"):
+                art.tui_suspend()
+                try:
+                    with open("/dev/tty", "w") as tout:
+                        tout.write(art.paint("\n  capturing window…\n", P.PINK))
+                        tout.flush()
+                    shot, be = do_capture("window")
+                finally:
+                    art.tui_resume()
+                if shot:
+                    flash = f"window via {be} · {shot.path.name}"
+                    sel = 0
+                else:
+                    flash = f"window failed — {be}"
+            elif key in ("r", "R"):
+                art.tui_suspend()
+                try:
+                    with open("/dev/tty", "w") as tout:
+                        tout.write(
+                            art.paint(
+                                "\n  drag a rectangle on the screen…\n",
+                                P.PINK,
+                            )
+                        )
+                        tout.flush()
+                    shot, be = do_capture("region")
+                finally:
+                    art.tui_resume()
+                if shot:
+                    flash = f"region via {be} · {shot.path.name}"
+                    sel = 0
+                else:
+                    flash = f"region failed — {be}"
+            elif key in ("d", "D", "delete"):
+                if shots:
+                    pending = shots[sel]
+                    mode = "confirm_del"
+            elif key in ("o", "O"):
+                if shots:
+                    be = open_external(shots[sel].path)
+                    flash = f"opened with {be}"
+            elif key in ("y", "Y"):
+                if shots:
+                    art.tui_cleanup()
+                    print(shots[sel].path)
+                    return 0
+            elif key == "g":
+                # refresh / re-read
+                flash = "gallery refreshed"
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+# ── main ───────────────────────────────────────────────────────────────
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        return run_tui()
+
+    cmd = argv[0]
+    rest = argv[1:]
+
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if cmd in ("tui", "ui", "gallery"):
+        return run_tui()
+    if cmd == "list":
+        n = 20
+        if rest:
+            try:
+                n = int(rest[0])
+            except ValueError:
+                pass
+        return cmd_list(n)
+    if cmd == "last":
+        return cmd_last()
+    if cmd in ("full", "screen", "desktop"):
+        return cmd_capture("full")
+    if cmd in ("window", "win"):
+        return cmd_capture("window")
+    if cmd in ("region", "area", "sel"):
+        return cmd_capture("region")
+    if cmd == "open":
+        p = Path(rest[0]).expanduser() if rest else None
+        return cmd_open(p)
+    if cmd == "backend":
+        print(backend_report())
+        return 0
+    if cmd == "capture" and rest:
+        return cmd_capture(rest[0])
+    print(f"reflection: unknown command {cmd!r} (try reflection -h)", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

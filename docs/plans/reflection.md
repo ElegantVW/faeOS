@@ -1,0 +1,30 @@
+# Reflection — screenshots & gallery
+
+**Role:** Capture the screen (full · window · region) and keep a pink-framed gallery of past mirrors. The looking-glass for faeOS.
+
+**Status:** new (v1)
+
+## Current
+- `reflection` — TUI gallery (↑↓ · enter open · f full · w window · r region · d delete · o open external)
+- `reflection full` — full desktop → gallery
+- `reflection window` — focused window (or pick)
+- `reflection region` — drag a rectangle (ImageMagick import)
+- `reflection list [N]` — recent paths
+- `reflection last` — path of newest shot
+- `reflection open [path]` — chafa / xdg-open / kitty
+- `reflection backend` — which capture tools are live
+
+## Capture backends (first that works)
+1. **ImageMagick** `import` / `magick import` (full, window, interactive region)
+2. `scrot` / `maim` / `grim` when present
+3. Pure **ctypes + libX11** full-screen grab (PNG via Pillow if available, else ppm)
+
+## Storage
+`$XDG_DATA_HOME/faeos/reflection/shots/`  
+Names: `YYYYMMDD-HHMMSS-mode.png`  
+Index: `index.jsonl` (path, mode, ts, bytes, size)
+
+## Next
+- [ ] Delay countdown (`reflection full -d 3`)
+- [ ] Copy path / image to Imbue
+- [ ] Animated region highlight (optional)
