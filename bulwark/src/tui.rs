@@ -475,48 +475,63 @@ fn keep_aegis() {
 // ── home / detail drawers ─────────────────────────────────────────────
 
 fn draw_home(p: &Posture, sel: usize, flash: &str) -> String {
+    // Compact status (always fit) + full menu (always fit).
     let mut lines: Vec<String> = Vec::new();
-    lines.push("How safe is this computer?".into());
-    lines.push(String::new());
-    lines.push(format!("        {}", p.mood.banner()));
-    lines.push(String::new());
-    // compact status rows (one line each)
-    lines.push(format!(
-        "  Aegis     {}  {}",
-        dim("front-door lock"),
-        p.aegis_line
-    ));
-    lines.push(format!(
-        "  Purity    {}  {}",
-        dim("file photo"),
-        p.purity_line
-    ));
-    lines.push(format!(
-        "  Ward      {}  {}",
-        dim("sneaky search"),
-        p.ward_line
-    ));
-    lines.push(format!(
-        "  Sentinel  {}  {}",
-        dim("open windows"),
-        p.sentinel_line
-    ));
-    lines.push(String::new());
+    lines.push(format!("{}  ·  {}", p.mood.banner(), "How safe is this computer?"));
+    lines.push(format!("  Aegis     {DIM}lock{RESET}     {}", p.aegis_line));
+    lines.push(format!("  Purity    {DIM}photo{RESET}    {}", p.purity_line));
+    lines.push(format!("  Ward      {DIM}search{RESET}   {}", p.ward_line));
+    lines.push(format!("  Sentinel  {DIM}windows{RESET}  {}", p.sentinel_line));
     if !flash.is_empty() {
         lines.push(format!("{OK}  {flash}{RESET}"));
-        lines.push(String::new());
     }
-    lines.push("What do you want to do?  (↑↓ move · enter choose)".into());
-    lines.push(String::new());
+    lines.push("Choose (↑↓ · enter):".into());
     for (i, item) in HOME_MENU.iter().enumerate() {
         lines.push(menu_line(i, sel, item));
     }
-    page(
+    // Force enough rows: don't clip the menu — page() will size to content when short
+    page_prefer_full(
         "Bulwark ✦ home",
         words::plain_name("Bulwark"),
         &lines,
         "↑↓ move · enter choose · 1-7 jump · ? help · q leave",
     )
+}
+
+/// Like page(), but if content is short enough for the terminal, show all of it
+/// (never drop the bottom menu rows on the home screen).
+fn page_prefer_full(title: &str, subtitle: &str, lines: &[String], runes: &str) -> String {
+    let mut body = Vec::new();
+    if !subtitle.is_empty() {
+        body.push(format!("{DIM}{subtitle}{RESET}"));
+    }
+    body.extend(lines.iter().cloned());
+    render_simple_prefer_full(title, &body, &[runes])
+}
+
+fn render_simple_prefer_full(title: &str, body: &[String], runes: &[&str]) -> String {
+    let (cols, rows) = term_size();
+    let width = (cols.saturating_sub(1)).clamp(44, 100);
+    let rune_lines: Vec<String> = runes.iter().map(|s| (*s).to_string()).collect();
+    let runes_h = 2 + rune_lines.len();
+    let gap = 1;
+    let main_chrome = 2;
+    let avail = rows.saturating_sub(runes_h + gap + main_chrome).max(4);
+
+    // Prefer showing the *end* of the body (menu) if we must clip — status can go first.
+    let clipped: Vec<String> = if body.len() <= avail {
+        body.to_vec()
+    } else {
+        // keep last `avail` lines so menu remains
+        body[body.len() - avail..].to_vec()
+    };
+
+    let mut out = String::from("\x1b[H\x1b[2J\x1b[?7l");
+    out.push_str(&box_frame(title, &clipped, width, true));
+    out.push('\n');
+    out.push_str(&box_frame("Runes", &rune_lines, width, true));
+    out.push_str("\x1b[?7h");
+    out
 }
 
 fn draw_purity(sel: usize, flash: &str) -> String {
