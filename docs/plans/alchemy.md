@@ -8,7 +8,7 @@
 - `alchemy` — TUI on shared `fae_termart` layer; hold `alchemy`
 - **Views:** local (installed, `pacman -Q`) · search (repos, `pacman -Ss`) — `tab` switches
 - **Keys:** ↑↓ · `/` filter (local) or query (search; enter runs search) · `i`/enter brew · `d` pour (`-Rns`) · `u` sip (`-Syu`) · `c` distill (`-Sc`) · `r` refresh · `q`
-- Confirm y/n for brew/pour/sip/distill, then leave alt-screen so `sudo` can prompt; Enter returns to TUI
+- Confirm y/n for brew/pour/sip/distill, then leave alt-screen: `sudo -v` (password), then live **phase + elapsed bar** (Siren-style █░) while pacman streams; Enter returns to TUI
 - CLI: `alchemy list [q]` · `search <q>` · `brew <pkg…>` · `pour <pkg…>` · `sip` · `distill`
 - Height-budgeted cauldron list (same lessons as Eye/Vault)
 

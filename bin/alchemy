@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / "bin"))
@@ -43,6 +45,56 @@ from fae_termart import Palette as P
 NAME = "Alchemy"
 PACMAN = shutil.which("pacman") or "pacman"
 SUDO = shutil.which("sudo") or "sudo"
+
+# Ordered cauldron phases (pacman -Syu order). Only advance forward.
+_PHASES: list[tuple[str, tuple[str, ...]]] = [
+    ("awaiting sudo", ("password for", "[sudo]")),
+    ("syncing databases", (
+        "synchronizing package databases",
+        "downloading package databases",
+        ".db...",
+        ".db.sig",
+    )),
+    ("resolving", (
+        "starting full system upgrade",
+        "resolving dependencies",
+        "looking for conflicting packages",
+        "packages (",
+    )),
+    ("downloading", (
+        "downloading packages",
+        "retrieving packages",
+        "mib/s",
+        "kib/s",
+    )),
+    ("checking", (
+        "checking keyring",
+        "checking package integrity",
+        "loading package files",
+        "checking for file conflicts",
+        "checking available disk space",
+    )),
+    ("applying", (
+        "processing package changes",
+        "upgrading ",
+        "installing ",
+        "removing ",
+        "reinstalling ",
+        "downgrading ",
+    )),
+    ("hooks", (
+        "running post-transaction hooks",
+        "arming ",
+        "reloading ",
+    )),
+    ("done", (
+        "transaction completed",
+        "nothing to do",
+        "there is nothing to do",
+    )),
+]
+_PKG_FRAC_RE = re.compile(r"\((\d+)/(\d+)\)")
+_PCT_RE = re.compile(r"(\d{1,3})%")
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -161,43 +213,286 @@ def filter_pkgs(pkgs: list[Pkg], filt: str) -> list[Pkg]:
     return out
 
 
-# ── privileged actions (leave TUI, talk to the real tty) ───────────────
+# ── privileged actions (streamed + progress bar) ───────────────────────
 
-def _pacman_root(args: list[str], *, noconfirm: bool = True) -> int:
-    """Run sudo pacman … on the controlling tty. Returns exit code."""
-    cmd = [SUDO, PACMAN, *args]
-    if noconfirm and "--noconfirm" not in args:
-        cmd.append("--noconfirm")
+def _fmt_elapsed(secs: float) -> str:
+    s = max(0, int(secs))
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _siren_bar(pct: float, width: int) -> str:
+    """Siren-style fill bar: █░░░░ at 0–100%."""
+    pct = max(0.0, min(1.0, pct))
+    width = max(8, width)
+    filled = int(round(width * pct))
+    filled = max(0, min(width, filled))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _pulse_bar(elapsed: float, width: int) -> str:
+    """Indeterminate marquee when we only know time is passing."""
+    width = max(8, width)
+    # 3-block cursor sweeps the bar
+    pos = int(elapsed * 4) % max(1, width)
+    cells = ["░"] * width
+    for i in range(3):
+        cells[(pos + i) % width] = "█"
+    return "".join(cells)
+
+
+@dataclass
+class _BrewProgress:
+    """Live state parsed from pacman/sudo output."""
+    phase: str = "starting"
+    phase_idx: int = 0
+    pkg_i: int = 0
+    pkg_n: int = 0
+    last_pct: int | None = None
+    last_line: str = ""
+    log: list[str] = field(default_factory=list)
+    started: float = field(default_factory=time.monotonic)
+
+    def note_line(self, line: str) -> None:
+        line = line.replace("\r", "").strip()
+        if not line:
+            return
+        # strip spinner noise / CSI
+        line = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", line)
+        line = line.strip()
+        if not line:
+            return
+        self.last_line = line
+        self.log.append(line)
+        if len(self.log) > 8:
+            self.log = self.log[-8:]
+
+        low = line.lower()
+        # package fraction (3/15)
+        m = _PKG_FRAC_RE.search(line)
+        if m:
+            self.pkg_i = int(m.group(1))
+            self.pkg_n = int(m.group(2))
+        # download percent
+        mp = _PCT_RE.search(line)
+        if mp:
+            try:
+                self.last_pct = max(0, min(100, int(mp.group(1))))
+            except ValueError:
+                pass
+        # phase ladder (only move forward)
+        for idx, (name, needles) in enumerate(_PHASES):
+            if any(n in low for n in needles):
+                if idx >= self.phase_idx:
+                    self.phase_idx = idx
+                    self.phase = name
+                break
+
+    def fraction(self) -> tuple[float, str]:
+        """Return (0..1 fill, label for the bar right side)."""
+        # Prefer package counter during apply
+        if self.pkg_n > 0 and self.phase in ("applying", "hooks", "done", "checking"):
+            frac = self.pkg_i / max(1, self.pkg_n)
+            return frac, f"{self.pkg_i}/{self.pkg_n} pkgs"
+        if self.pkg_n > 0 and self.phase == "applying":
+            return self.pkg_i / self.pkg_n, f"{self.pkg_i}/{self.pkg_n} pkgs"
+        # Download / db percent only while still in those phases
+        if self.last_pct is not None and self.phase in ("downloading", "syncing databases"):
+            return self.last_pct / 100.0, f"{self.last_pct}%"
+        # Phase ladder (smooth steps across the cauldron)
+        n = max(1, len(_PHASES) - 1)
+        frac = self.phase_idx / n
+        if self.pkg_n > 0:
+            # blend package progress into applying step
+            step = 1.0 / n
+            base = self.phase_idx / n
+            if self.phase == "applying":
+                frac = base + step * (self.pkg_i / self.pkg_n)
+                return min(1.0, frac), f"{self.pkg_i}/{self.pkg_n} pkgs"
+        return frac, self.phase
+
+
+def _progress_panel(title: str, prog: _BrewProgress, *, width: int | None = None) -> str:
+    tw = width or min(72, art.term_width())
+    body_w = tw - 4
+    elapsed = time.monotonic() - prog.started
+    frac, label = prog.fraction()
+    bar_w = max(10, body_w - 18)
+    # Known progress → solid fill; early/silent phase → pulse (still moving)
+    if prog.pkg_n > 0 or prog.last_pct is not None:
+        bar = _siren_bar(frac, bar_w)
+    elif prog.phase_idx <= 0:
+        bar = _pulse_bar(elapsed, bar_w)
+    else:
+        bar = _siren_bar(frac, bar_w)
+    lines = [
+        _fit(f"phase  {prog.phase}", body_w),
+        _fit(f" {bar}  {label}", body_w),
+        _fit(f"elapsed  {_fmt_elapsed(elapsed)}", body_w),
+        _fit(f"last  {prog.last_line or '…'}", body_w),
+    ]
+    if prog.log:
+        lines.append(_fit("─" * min(body_w, 24), body_w))
+        for ln in prog.log[-4:]:
+            lines.append(art.paint(_fit(f"  {ln}", body_w), P.MUTED))
+    return art.box(lines, title=title, width=tw, body_style=(P.SILVER,))
+
+
+def _draw_progress(title: str, prog: _BrewProgress) -> None:
+    """Repaint progress block on the controlling tty (home + clear)."""
+    panel = _progress_panel(f"{NAME} · {title}", prog)
+    sys.stdout.write("\033[H\033[2J")
+    sys.stdout.write(panel)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def _pacman_root(args: list[str], *, noconfirm: bool = True, action: str = "pacman") -> int:
+    """Run sudo pacman with a live phase/elapsed bar (Siren-inspired).
+
+    1. `sudo -v` on the real tty (password if needed — never looks hung).
+    2. Stream `sudo -n pacman …` output and paint a phase/elapsed bar so long
+       -Syu / downloads never feel frozen.
+    """
+    pac_args = list(args)
+    if noconfirm and "--noconfirm" not in pac_args:
+        pac_args.append("--noconfirm")
+
     print()
-    print(art.paint(f"  ✦ alchemy runs: {' '.join(cmd)}", P.PINK))
+    print(art.paint(f"  ✦ alchemy prepares: sudo pacman {' '.join(pac_args)}", P.PINK))
+    print(art.paint("  unlock sudo if asked, then the cauldron bar takes over", P.MUTED))
     print()
+
+    # Cache credentials on the real tty first (interactive password works here).
     try:
-        p = subprocess.run(cmd)
-        return int(p.returncode)
+        auth = subprocess.run([SUDO, "-v"])
+        if auth.returncode != 0:
+            print(art.paint("  ✦ sudo unlock failed — aborting", P.ERR))
+            return int(auth.returncode)
+    except FileNotFoundError:
+        print(f"alchemy: missing {SUDO}", file=sys.stderr)
+        return 127
+
+    # Non-interactive sudo from here; we own the display.
+    cmd = [SUDO, "-n", PACMAN, *pac_args]
+    prog = _BrewProgress(phase="starting")
+    prog.note_line("cauldron is warm…")
+    _draw_progress(action, prog)
+
+    # Pipe stdout/stderr (merged). stdin from /dev/null — no prompts left.
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "LC_ALL": "C", "PATH": os.environ.get("PATH", "")},
+            bufsize=0,
+        )
     except FileNotFoundError:
         print(f"alchemy: missing {cmd[0]}", file=sys.stderr)
         return 127
+
+    assert proc.stdout is not None
+    buf = b""
+    last_draw = 0.0
+    try:
+        fd = proc.stdout.fileno()
+        while True:
+            now = time.monotonic()
+            # Always tick the elapsed/pulse bar — even when pacman is silent
+            if now - last_draw >= 0.25:
+                _draw_progress(action, prog)
+                last_draw = now
+
+            if proc.poll() is not None:
+                # drain
+                while True:
+                    r, _, _ = select.select([fd], [], [], 0.05)
+                    if not r:
+                        break
+                    chunk = os.read(fd, 4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                break
+
+            r, _, _ = select.select([fd], [], [], 0.25)
+            if not r:
+                continue
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                if proc.poll() is not None:
+                    break
+                continue
+            buf += chunk
+            # pacman download meters use \r; treat both as line ends
+            while True:
+                nl = buf.find(b"\n")
+                cr = buf.find(b"\r")
+                if nl < 0 and cr < 0:
+                    break
+                if nl < 0:
+                    idx = cr
+                elif cr < 0:
+                    idx = nl
+                else:
+                    idx = min(cr, nl)
+                line = buf[:idx]
+                buf = buf[idx + 1 :]
+                text = line.decode("utf-8", errors="replace")
+                prog.note_line(text)
+                _draw_progress(action, prog)
+                last_draw = time.monotonic()
+            if buf and (b"%" in buf or len(buf) > 80):
+                prog.note_line(buf.decode("utf-8", errors="replace"))
+    finally:
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+
+    rc = proc.wait()
+    if rc == 0:
+        prog.phase = "done"
+        prog.phase_idx = len(_PHASES) - 1
+        prog.note_line("transaction finished")
+    _draw_progress(action, prog)
+    elapsed = _fmt_elapsed(time.monotonic() - prog.started)
+    if rc == 0:
+        print(art.paint(f"\n  ✦ {action} complete · {elapsed}", P.OK))
+    else:
+        print(art.paint(f"\n  ✦ {action} failed (exit {rc}) · {elapsed}", P.ERR))
+        if rc == 1:
+            print(art.paint("  tip: if sudo expired mid-run, try again", P.MUTED))
+    return int(rc)
 
 
 def brew_pkgs(names: list[str]) -> int:
     if not names:
         return 1
-    return _pacman_root(["-S", "--needed", *names])
+    return _pacman_root(["-S", "--needed", *names], action="brew")
 
 
 def pour_pkgs(names: list[str]) -> int:
     if not names:
         return 1
-    return _pacman_root(["-Rns", *names])
+    return _pacman_root(["-Rns", *names], action="pour")
 
 
 def sip() -> int:
-    return _pacman_root(["-Syu"])
+    return _pacman_root(["-Syu"], action="sip")
 
 
 def distill() -> int:
     # -Sc: clean uninstalled package cache (safer than -Scc)
-    return _pacman_root(["-Sc"])
+    return _pacman_root(["-Sc"], action="distill")
 
 
 # ── one-shot ───────────────────────────────────────────────────────────
