@@ -38,6 +38,7 @@
 | **Summon** | Quick launcher (type-to-run over PATH, dmenu-style) | stable | [docs/plans/summon.md](docs/plans/summon.md) |
 | **The Eye** | Process watcher (CPU/RSS/kill) | new | [docs/plans/eye.md](docs/plans/eye.md) |
 | **Vault** | Disk map (recursive sizes, ncdu-style) | new | [docs/plans/vault.md](docs/plans/vault.md) |
+| **Alchemy** | Package cauldron (pacman brew/sip/distill) | new | [docs/plans/alchemy.md](docs/plans/alchemy.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -53,7 +54,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 |-----|----------|------|
 | Quick launcher | Summon ✅ | dmenu-style: type a command → run |
 | Notes | Grimoire | markdown notes, pages, tags |
-| Package frontend | Alchemy | pacman menu: brew (install) / sip (update) / distill (clean) |
+| Package frontend | Alchemy ✅ | pacman menu: brew (install) / sip (update) / distill (clean) |
 | Task manager | The Eye ✅ | htop-like: CPU/RAM/disk/processes/kill |
 | To-dos | Quests | todo.txt-style questlog, due dates |
 | Clipboard history | Imbue | copy memory, re-paste |
@@ -107,6 +108,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-05 (alchemy)** — **Alchemy v1: pacman cauldron.** TUI: local installed list + search view (tab), filter/query (`/`), brew (`i`/enter) / pour (`d`) / sip (`u` = -Syu) / distill (`c` = -Sc) each with y/n then drop to tty for `sudo pacman` (password ok) and re-enter. CLI: `list` `search` `brew` `pour` `sip` `distill`. Height-budgeted layout. Registered scroll + [docs/plans/alchemy.md](docs/plans/alchemy.md); Tier-1 Alchemy marked done.
 - **2026-08-05 (vault delete)** — **Vault: delete with confirm.** `d` on a row → yellow confirm `delete dir|file name (size)? y/n`; `y` unlinks files/links or `shutil.rmtree` dirs (no symlink follow into trees); refuses `/` and `$HOME`; invalidates scan cache + rescans; `n`/esc cancels. Runes + plan updated.
 - **2026-08-05 (vault)** — **Vault v1: disk treasure map.** ncdu-style TUI: recursive dir sizes (no symlink follow), % of parent, dive/parent, sort size↔name, filter, hidden toggle, rescan, FS free/used bar. Scan cache by mtime; progress “weighing i/n”; partial mark on timeout. Height-budgeted layout (eye lessons). One-shot `vault list [N] [path]`. Distinct from Spellbook (browse/CRUD/pick vs weigh trees). Registered scroll + [docs/plans/vault.md](docs/plans/vault.md); Tier-1 Vault marked done.
 - **2026-08-05 (the eye)** — **The Eye v1: process & system watcher.** Live TUI over `/proc`: system header (load · mem bar · avail), process table (PID · CPU% · RSS · state · cmdline), sort cpu/mem/pid/name (`s` or `1234`, `r` reverse), `/` filter mode, space pause, `k`/`K` SIGTERM/SIGKILL with y/n confirm (refuses self). Sticky selection by pid across refreshes; CPU% from jiffie deltas. One-shot: `eye list [N]`. Shared `fae_termart` layer. Registered scroll SYSTEM + [docs/plans/eye.md](docs/plans/eye.md); Tier-1 The Eye marked done.

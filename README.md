@@ -30,6 +30,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | `summon` / `summon -x <query>` | Quick launcher (type-to-run over PATH, dmenu-style) |
 | `eye` / `eye list 15` | The Eye — process watcher (CPU · RSS · kill); one-shot table |
 | `vault` / `vault list ~` | Vault — disk map (recursive sizes); dive toward heavy dirs |
+| `alchemy` / `brew` / `sip` / `distill` | Alchemy — pacman UI: search, install, upgrade, clean cache |
 | `spellbook` | File-manager TUI (j/k move, ? help, n/d/r/e dialogs) |
 | `tick` / `termfix` | Screen tick + TTY line-edit recovery |
 
@@ -45,6 +46,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | **Magpie** | Private web search |
 | **The Eye** | Processes / CPU / RAM |
 | **Vault** | Disk usage map |
+| **Alchemy** | Packages (pacman) |
 
 Prompt: framed pink status box (user · mood · music · RAM/CPU/HDD/temp) + `>`.
 

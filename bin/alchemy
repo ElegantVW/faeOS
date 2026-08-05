@@ -1,0 +1,668 @@
+#!/usr/bin/env python3
+"""alchemy — pacman cauldron for faeOS.
+
+Browse installed potions, search the repos, brew / sip / distill.
+
+    alchemy                 interactive TUI
+    alchemy list [q]        installed packages (stdout)
+    alchemy search <q>      repo search (stdout)
+    alchemy brew <pkg…>     install (sudo pacman -S)
+    alchemy pour <pkg…>     remove  (sudo pacman -Rns)  # un-brew
+    alchemy sip             full upgrade (sudo pacman -Syu)
+    alchemy distill         clean package cache (sudo pacman -Sc)
+    alchemy -h
+
+TUI keys:
+  ↑↓ / PgUp PgDn     move
+  tab                local (installed) ↔ search (repos)
+  /                  filter (local) or query (search; enter runs search)
+  i / enter          brew selected (search) or reinstall (local) — y/n
+  d                  pour/remove selected — y/n
+  u                  sip (system upgrade) — y/n
+  c                  distill (cache clean) — y/n
+  r                  refresh list
+  q / esc            leave
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Alchemy"
+PACMAN = shutil.which("pacman") or "pacman"
+SUDO = shutil.which("sudo") or "sudo"
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+def _run(cmd: list[str], *, timeout: float | None = 120) -> tuple[int, str, str]:
+    try:
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        return p.returncode, p.stdout or "", p.stderr or ""
+    except FileNotFoundError:
+        return 127, "", f"not found: {cmd[0]}"
+    except subprocess.TimeoutExpired:
+        return 124, "", "timed out"
+
+
+# ── packages ───────────────────────────────────────────────────────────
+
+@dataclass
+class Pkg:
+    name: str
+    version: str = ""
+    repo: str = ""
+    desc: str = ""
+    installed: bool = False
+
+
+def list_installed() -> list[Pkg]:
+    rc, out, err = _run([PACMAN, "-Q"])
+    if rc != 0:
+        return []
+    pkgs: list[Pkg] = []
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        name = parts[0]
+        ver = parts[1] if len(parts) > 1 else ""
+        pkgs.append(Pkg(name=name, version=ver, installed=True))
+    pkgs.sort(key=lambda p: p.name.lower())
+    return pkgs
+
+
+def search_repos(query: str, limit: int = 200) -> list[Pkg]:
+    q = query.strip()
+    if not q:
+        return []
+    rc, out, err = _run([PACMAN, "-Ss", q], timeout=60)
+    # pacman returns 1 when no results
+    pkgs: list[Pkg] = []
+    lines = out.splitlines()
+    i = 0
+    # format: repo/name version [installed]
+    #         description
+    hdr_re = re.compile(
+        r"^([a-z0-9\-_+]+)/([a-zA-Z0-9@._+\-]+)\s+(\S+)(?:\s+(\[installed[^\]]*\]))?"
+    )
+    while i < len(lines):
+        m = hdr_re.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        repo, name, ver, inst = m.group(1), m.group(2), m.group(3), m.group(4)
+        desc = ""
+        if i + 1 < len(lines) and lines[i + 1].startswith("    "):
+            desc = lines[i + 1].strip()
+            i += 2
+        else:
+            i += 1
+        pkgs.append(
+            Pkg(
+                name=name,
+                version=ver,
+                repo=repo,
+                desc=desc,
+                installed=bool(inst),
+            )
+        )
+        if len(pkgs) >= limit:
+            break
+    return pkgs
+
+
+def filter_pkgs(pkgs: list[Pkg], filt: str) -> list[Pkg]:
+    q = filt.strip().lower()
+    if not q:
+        return list(pkgs)
+    toks = q.split()
+    out = []
+    for p in pkgs:
+        hay = f"{p.name} {p.desc} {p.repo} {p.version}".lower()
+        if all(t in hay for t in toks):
+            out.append(p)
+    return out
+
+
+# ── privileged actions (leave TUI, talk to the real tty) ───────────────
+
+def _pacman_root(args: list[str], *, noconfirm: bool = True) -> int:
+    """Run sudo pacman … on the controlling tty. Returns exit code."""
+    cmd = [SUDO, PACMAN, *args]
+    if noconfirm and "--noconfirm" not in args:
+        cmd.append("--noconfirm")
+    print()
+    print(art.paint(f"  ✦ alchemy runs: {' '.join(cmd)}", P.PINK))
+    print()
+    try:
+        p = subprocess.run(cmd)
+        return int(p.returncode)
+    except FileNotFoundError:
+        print(f"alchemy: missing {cmd[0]}", file=sys.stderr)
+        return 127
+
+
+def brew_pkgs(names: list[str]) -> int:
+    if not names:
+        return 1
+    return _pacman_root(["-S", "--needed", *names])
+
+
+def pour_pkgs(names: list[str]) -> int:
+    if not names:
+        return 1
+    return _pacman_root(["-Rns", *names])
+
+
+def sip() -> int:
+    return _pacman_root(["-Syu"])
+
+
+def distill() -> int:
+    # -Sc: clean uninstalled package cache (safer than -Scc)
+    return _pacman_root(["-Sc"])
+
+
+# ── one-shot ───────────────────────────────────────────────────────────
+
+def cmd_list(filt: str = "") -> int:
+    pkgs = filter_pkgs(list_installed(), filt)
+    print(f"# {NAME}  {len(pkgs)} installed")
+    for p in pkgs:
+        print(f"{p.name:32} {p.version}")
+    return 0
+
+
+def cmd_search(query: str) -> int:
+    pkgs = search_repos(query)
+    print(f"# {NAME} search  {query!r}  → {len(pkgs)}")
+    for p in pkgs:
+        mark = " ✓" if p.installed else ""
+        print(f"{p.repo}/{p.name} {p.version}{mark}")
+        if p.desc:
+            print(f"    {p.desc}")
+    return 0 if pkgs else 1
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+def frame(
+    view: str,  # local | search
+    visible: list[Pkg],
+    sel: int,
+    filt: str,
+    mode: str,
+    status: str,
+    confirm: str,
+    n_local: int,
+) -> str:
+    tw = art.term_width()
+    th = art.term_height()
+    body_w = tw - 4
+    view_label = "local (installed)" if view == "local" else "search (repos)"
+    head_lines = [
+        _fit(f"view {view_label} · tab to switch · {len(visible)} shown"
+             + (f" / {n_local} installed" if view == "local" else ""), body_w),
+        _fit(
+            f"filter: {filt}_" if mode == "filter"
+            else (
+                f"query: {filt}_  (enter to search)" if mode == "query"
+                else (
+                    f"filter: {filt}" if filt and view == "local"
+                    else (f"query: {filt}" if filt and view == "search"
+                          else ("filter: —  (/ )" if view == "local" else "query: —  (/ then enter)"))
+                )
+            ),
+            body_w,
+        ),
+        _fit(f"mode {mode}", body_w),
+    ]
+    if status:
+        head_lines.append(_fit(status, body_w))
+    if confirm:
+        head_lines.append(art.paint(_fit(art.strip_ansi(confirm), body_w), P.WARN))
+    head = art.box(head_lines, title=NAME.upper(), width=tw, body_style=(P.MUTED,))
+
+    runes = art.box(
+        [
+            _fit("↑↓ move · tab view · / filter|query · enter/i brew · d pour", body_w),
+            _fit("u sip (upgrade) · c distill (clean) · r refresh · q leave", body_w),
+        ],
+        title="runes",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+
+    def rows_for(h: int) -> list[str]:
+        if not visible:
+            msg = "(no packages — / to filter or search, r refresh)"
+            return [_fit(msg, body_w)]
+        if h <= 0:
+            return [_fit("(clipped — taller terminal helps)", body_w)]
+        s = max(0, min(sel, len(visible) - 1))
+        start = max(0, min(s - h // 2, max(0, len(visible) - h)))
+        end = min(len(visible), start + h)
+        if view == "local":
+            hdr = f" {'':1} {'NAME':<28} {'VERSION'}"
+        else:
+            hdr = f" {'':1} {'REPO/NAME':<32} {'VER':<12} I"
+        out = [art.paint(art.pad_vis(_fit(hdr, body_w), body_w), P.PINK_DIM)]
+        for i in range(start, end):
+            p = visible[i]
+            mark = "✦" if i == s else " "
+            if view == "local":
+                line = f" {mark} {p.name:<28} {p.version}"
+            else:
+                inst = "✓" if p.installed else " "
+                label = f"{p.repo}/{p.name}"
+                line = f" {mark} {label:<32} {p.version:<12} {inst}"
+                if p.desc and art.vis_len(line) < body_w - 8:
+                    # desc only if room — usually not; keep separate feel via status
+                    pass
+            line = art.pad_vis(_fit(line, body_w), body_w)
+            if i == s:
+                out.append(art.paint(line, P.PINK))
+            elif p.installed and view == "search":
+                out.append(art.paint(line, P.OK))
+            else:
+                out.append(line)
+        # selected description footer line inside list when search
+        if view == "search" and visible:
+            p = visible[max(0, min(sel, len(visible) - 1))]
+            if p.desc:
+                out.append(art.paint(art.pad_vis(_fit(f"  · {p.desc}", body_w), body_w), P.MUTED))
+        return out
+
+    def assemble(h: int, with_runes: bool) -> str:
+        body = art.box(rows_for(h), title="cauldron", width=tw, body_style=(P.SILVER,))
+        parts = [head, "", body]
+        if with_runes:
+            parts += ["", runes]
+        return "\n".join(parts)
+
+    head_h = _line_count(head)
+    runes_h = _line_count(runes)
+
+    def max_h(with_runes: bool) -> int:
+        g = 2 if with_runes else 1
+        r = runes_h if with_runes else 0
+        extra = 1 if view == "search" else 0  # desc line
+        return th - head_h - g - 2 - r - 1 - extra
+
+    h = max(0, max_h(True))
+    frame_s = assemble(h, True)
+    while _line_count(frame_s) > th and h > 0:
+        h -= 1
+        frame_s = assemble(h, True)
+    if _line_count(frame_s) > th:
+        h = max(0, max_h(False))
+        frame_s = assemble(h, False)
+        while _line_count(frame_s) > th and h > 0:
+            h -= 1
+            frame_s = assemble(h, False)
+    if _line_count(frame_s) > th:
+        frame_s = "\n".join(frame_s.splitlines()[:th])
+    return frame_s
+
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return cmd_list()
+
+    art.tui_begin(fd, "alchemy")
+
+    view = "local"  # local | search
+    local_pkgs: list[Pkg] = []
+    search_pkgs: list[Pkg] = []
+    filt = ""
+    mode = "nav"  # nav | filter | query | confirm
+    sel = 0
+    sel_name: str | None = None
+    status = ""
+    confirm_msg = ""
+    pending_action: str | None = None  # brew | pour | sip | distill
+    pending_names: list[str] = []
+    stick = True
+
+    def current_list() -> list[Pkg]:
+        if view == "local":
+            return filter_pkgs(local_pkgs, filt)
+        return search_pkgs  # already result of last search; filt is the query string
+
+    def refresh_local() -> None:
+        nonlocal local_pkgs, status
+        local_pkgs = list_installed()
+        status = f"loaded {len(local_pkgs)} installed"
+
+    def do_search() -> None:
+        nonlocal search_pkgs, status, view
+        q = filt.strip()
+        if not q:
+            status = "type a query first (/)"
+            return
+        status = f"searching {q!r}…"
+        body = frame(view, [], sel, filt, mode, status, "", len(local_pkgs))
+        try:
+            art.paint_frame(fd_box[0], body)
+        except OSError:
+            pass
+        search_pkgs = search_repos(q)
+        view = "search"
+        status = f"found {len(search_pkgs)} for {q!r}"
+
+    def leave_for_root(action: str, names: list[str]) -> tuple[int, int | None]:
+        """Drop TUI, run privileged pacman on the real tty, re-enter.
+
+        Returns (exit_code, new_tty_fd or None if TUI cannot resume).
+        """
+        art.tui_cleanup()
+        print()
+        print(art.box(
+            [f"alchemy · {action}", "sudo may ask for your password"],
+            title=NAME.upper(),
+            width=min(60, art.term_width()),
+        ))
+        if action == "sip":
+            rc = sip()
+        elif action == "distill":
+            rc = distill()
+        elif action == "brew":
+            rc = brew_pkgs(names)
+        elif action == "pour":
+            rc = pour_pkgs(names)
+        else:
+            rc = 1
+        print()
+        try:
+            input(art.paint("  press Enter to return to alchemy… ", P.MUTED))
+        except EOFError:
+            pass
+        new_fd = art.tui_open_tty()
+        if new_fd is None:
+            return rc, None
+        art.tui_begin(new_fd, "alchemy")
+        return rc, new_fd
+
+    fd_box = [fd]
+
+    def paint() -> list[Pkg]:
+        nonlocal sel, sel_name, stick
+        visible = current_list()
+        if stick and sel_name is not None:
+            for i, p in enumerate(visible):
+                if p.name == sel_name:
+                    sel = i
+                    break
+        stick = False
+        if sel >= len(visible):
+            sel = max(0, len(visible) - 1)
+        if visible:
+            sel_name = visible[sel].name
+        else:
+            sel_name = None
+        body = frame(
+            view, visible, sel, filt, mode, status, confirm_msg, len(local_pkgs),
+        )
+        try:
+            art.paint_frame(fd_box[0], body)
+        except OSError:
+            try:
+                art.tty_write(fd_box[0], art.clear_screen() + body + "\n")
+            except OSError:
+                pass
+        return visible
+
+    try:
+        refresh_local()
+        while True:
+            visible = paint()
+            status = ""
+
+            key = art.tui_read_key(fd_box[0])
+
+            # ── confirm ──
+            if mode == "confirm":
+                if key in ("y", "Y"):
+                    action = pending_action or ""
+                    names = list(pending_names)
+                    mode = "nav"
+                    confirm_msg = ""
+                    pending_action = None
+                    pending_names = []
+                    rc, new_fd = leave_for_root(action, names)
+                    if new_fd is None:
+                        return rc
+                    fd_box[0] = new_fd
+                    refresh_local()
+                    if view == "search" and filt.strip():
+                        do_search()
+                    stick = True
+                    status = f"{action} finished (exit {rc})"
+                elif key in ("n", "N", "esc", "q"):
+                    mode = "nav"
+                    confirm_msg = ""
+                    pending_action = None
+                    pending_names = []
+                    status = "cancelled"
+                continue
+
+            # ── filter (local) ──
+            if mode == "filter":
+                if key in ("esc",):
+                    mode = "nav"
+                    stick = True
+                elif key == "enter":
+                    mode = "nav"
+                    stick = True
+                elif key == "backspace":
+                    filt = filt[:-1]
+                    stick = True
+                elif key in ("clear", "ctrl-u"):
+                    filt = ""
+                    stick = True
+                elif key == "space":
+                    filt += " "
+                    stick = True
+                elif len(key) == 1 and key.isprintable():
+                    filt += key
+                    stick = True
+                continue
+
+            # ── query (search) ──
+            if mode == "query":
+                if key == "esc":
+                    mode = "nav"
+                elif key == "enter":
+                    mode = "nav"
+                    do_search()
+                    sel = 0
+                    sel_name = None
+                    stick = True
+                elif key == "backspace":
+                    filt = filt[:-1]
+                elif key in ("clear", "ctrl-u"):
+                    filt = ""
+                elif key == "space":
+                    filt += " "
+                elif len(key) == 1 and key.isprintable():
+                    filt += key
+                continue
+
+            # ── nav ──
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "up":
+                sel = max(0, sel - 1)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "down":
+                sel = min(max(0, len(visible) - 1), sel + 1)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "pgup":
+                sel = max(0, sel - 10)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "pgdn":
+                sel = min(max(0, len(visible) - 1), sel + 10)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "home":
+                sel = 0
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "end":
+                sel = max(0, len(visible) - 1)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "tab":
+                if view == "local":
+                    view = "search"
+                    if not search_pkgs and filt.strip():
+                        do_search()
+                    status = "search view"
+                else:
+                    view = "local"
+                    status = "local view"
+                sel = 0
+                sel_name = None
+                stick = True
+            elif key == "/":
+                if view == "local":
+                    mode = "filter"
+                else:
+                    mode = "query"
+            elif key == "r":
+                if view == "local":
+                    refresh_local()
+                    stick = True
+                elif filt.strip():
+                    do_search()
+                    stick = True
+                else:
+                    status = "nothing to refresh"
+            elif key == "u":
+                mode = "confirm"
+                pending_action = "sip"
+                pending_names = []
+                confirm_msg = "sip — full system upgrade (pacman -Syu)?  y / n"
+            elif key == "c":
+                mode = "confirm"
+                pending_action = "distill"
+                pending_names = []
+                confirm_msg = "distill — clean package cache (pacman -Sc)?  y / n"
+            elif key in ("i", "enter"):
+                if not visible:
+                    status = "nothing selected"
+                else:
+                    p = visible[sel]
+                    mode = "confirm"
+                    pending_action = "brew"
+                    pending_names = [p.name]
+                    if p.installed:
+                        confirm_msg = f"re-brew {p.name} {p.version}?  y / n"
+                    else:
+                        confirm_msg = f"brew {p.repo + '/' if p.repo else ''}{p.name} {p.version}?  y / n"
+            elif key in ("d", "D", "delete"):
+                if not visible:
+                    status = "nothing selected"
+                else:
+                    p = visible[sel]
+                    if view == "search" and not p.installed:
+                        status = f"{p.name} is not installed"
+                    else:
+                        mode = "confirm"
+                        pending_action = "pour"
+                        pending_names = [p.name]
+                        confirm_msg = f"pour out {p.name} (pacman -Rns)?  y / n"
+            elif key in ("clear", "ctrl-u"):
+                filt = ""
+                stick = True
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+# ── argv ───────────────────────────────────────────────────────────────
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    if not argv or argv[0] in ("tui", "ui"):
+        return run_tui()
+    cmd = argv[0]
+    rest = argv[1:]
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if cmd in ("list", "ls", "local"):
+        return cmd_list(" ".join(rest))
+    if cmd in ("search", "ss", "find"):
+        if not rest:
+            print("alchemy search <query>", file=sys.stderr)
+            return 2
+        return cmd_search(" ".join(rest))
+    if cmd in ("brew", "install", "S"):
+        if not rest:
+            print("alchemy brew <pkg…>", file=sys.stderr)
+            return 2
+        return brew_pkgs(rest)
+    if cmd in ("pour", "remove", "R", "unbrew"):
+        if not rest:
+            print("alchemy pour <pkg…>", file=sys.stderr)
+            return 2
+        return pour_pkgs(rest)
+    if cmd in ("sip", "upgrade", "Syu", "update"):
+        return sip()
+    if cmd in ("distill", "clean", "Sc"):
+        return distill()
+    # bare query → search one-shot
+    if cmd.startswith("-"):
+        print(f"alchemy: unknown option {cmd}", file=sys.stderr)
+        return 2
+    # alchemy <pkg-like> → search
+    return cmd_search(" ".join(argv))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
