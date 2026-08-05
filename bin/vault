@@ -1,0 +1,664 @@
+#!/usr/bin/env python3
+"""vault — disk treasure map for faeOS (ncdu-style).
+
+Weigh directories by recursive size. Dive toward the heavy chests.
+Spellbook browses files; Vault finds what's eating the disk.
+
+    vault                 open at $HOME
+    vault <path>          open at path
+    vault list [path]     one-shot table (stdout)
+    vault -h              this help
+
+Keys:
+  ↑↓ / PgUp PgDn          move
+  enter / → / l           dive into directory
+  h / ← / backspace       parent
+  s                       sort size ↔ name
+  r                       reverse order
+  R                       rescan this directory
+  /                       filter
+  .                       toggle hidden
+  q / esc                 leave
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Vault"
+
+
+# ── formatting ─────────────────────────────────────────────────────────
+
+def fmt_bytes(n: int | float) -> str:
+    v = float(max(0, n))
+    for unit, div in (("T", 1024**4), ("G", 1024**3), ("M", 1024**2), ("K", 1024.0), ("B", 1.0)):
+        if v >= div or unit == "B":
+            x = v / div
+            if unit == "B":
+                return f"{int(x)}B"
+            if x >= 100:
+                return f"{x:.0f}{unit}"
+            if x >= 10:
+                return f"{x:.1f}{unit}"
+            return f"{x:.2f}{unit}" if unit in ("T", "G") else f"{x:.1f}{unit}"
+    return "0B"
+
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+# ── filesystem ─────────────────────────────────────────────────────────
+
+def fs_info(path: Path) -> tuple[int, int, int]:
+    """(total, used, free) bytes for the filesystem containing path."""
+    try:
+        st = os.statvfs(path)
+        total = st.f_frsize * st.f_blocks
+        free = st.f_frsize * st.f_bavail
+        used = max(0, total - free)
+        return total, used, free
+    except OSError:
+        return 0, 0, 0
+
+
+def tree_bytes(path: Path, *, deadline: float | None = None) -> tuple[int, int, bool]:
+    """Recursive size of path. Returns (bytes, file_count, timed_out).
+
+    Does not follow symlinks. Skips unreadable entries.
+    """
+    total = 0
+    count = 0
+    timed_out = False
+    stack = [path]
+    # avoid hardlink double-count within one tree
+    seen: set[tuple[int, int]] = set()
+
+    while stack:
+        if deadline is not None and time.monotonic() > deadline:
+            timed_out = True
+            break
+        cur = stack.pop()
+        try:
+            st = cur.lstat()
+        except OSError:
+            continue
+        key = (st.st_dev, st.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        mode = st.st_mode
+        if stat.S_ISLNK(mode):
+            continue
+        if stat.S_ISREG(mode):
+            total += st.st_size
+            count += 1
+            continue
+        if not stat.S_ISDIR(mode):
+            total += getattr(st, "st_size", 0) or 0
+            count += 1
+            continue
+        # directory: add dir entry size lightly, then children
+        total += st.st_size
+        try:
+            with os.scandir(cur) as it:
+                for ent in it:
+                    if deadline is not None and time.monotonic() > deadline:
+                        timed_out = True
+                        break
+                    try:
+                        stack.append(Path(ent.path))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        if timed_out:
+            break
+    return total, count, timed_out
+
+
+@dataclass
+class Entry:
+    name: str
+    path: Path
+    kind: str  # dir | file | link | other
+    size: int
+    partial: bool = False  # scan timed out / incomplete
+    nfiles: int = 0
+
+
+# cache: resolved path str → (mtime_ns or 0, entries, total_bytes)
+_CACHE: dict[str, tuple[int, list[Entry], int]] = {}
+
+
+def _dir_mtime(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def scan_dir(
+    path: Path,
+    *,
+    show_hidden: bool = False,
+    timeout_s: float = 120.0,
+    progress=None,
+) -> tuple[list[Entry], int, str]:
+    """Scan immediate children; recursive size for subdirs.
+
+    Returns (entries, total_bytes, status_note).
+    """
+    path = path.resolve()
+    key = str(path)
+    mt = _dir_mtime(path)
+    if key in _CACHE and _CACHE[key][0] == mt:
+        entries, total = _CACHE[key][1], _CACHE[key][2]
+        if not show_hidden:
+            entries = [e for e in entries if not e.name.startswith(".")]
+        else:
+            entries = list(_CACHE[key][1])
+        return entries, total, ""
+
+    deadline = time.monotonic() + timeout_s
+    entries: list[Entry] = []
+    total = 0
+    note = ""
+    try:
+        children = list(os.scandir(path))
+    except OSError as e:
+        return [], 0, f"cannot open: {e}"
+
+    n = len(children)
+    for i, ent in enumerate(children):
+        if progress and i % 3 == 0:
+            try:
+                progress(i, n, ent.name)
+            except Exception:
+                pass
+        name = ent.name
+        try:
+            p = Path(ent.path)
+            if ent.is_symlink():
+                entries.append(Entry(name, p, "link", 0))
+                continue
+            if ent.is_file(follow_symlinks=False):
+                try:
+                    sz = ent.stat(follow_symlinks=False).st_size
+                except OSError:
+                    sz = 0
+                entries.append(Entry(name, p, "file", sz, nfiles=1))
+                total += sz
+            elif ent.is_dir(follow_symlinks=False):
+                remain = max(0.5, deadline - time.monotonic())
+                sz, nf, partial = tree_bytes(p, deadline=time.monotonic() + remain)
+                entries.append(Entry(name, p, "dir", sz, partial=partial, nfiles=nf))
+                total += sz
+                if partial:
+                    note = "partial weigh (timeout) — R to rescan"
+            else:
+                try:
+                    sz = ent.stat(follow_symlinks=False).st_size
+                except OSError:
+                    sz = 0
+                entries.append(Entry(name, p, "other", sz))
+                total += sz
+        except OSError:
+            continue
+
+    # cache full list (including hidden)
+    _CACHE[key] = (mt, entries, total)
+    if not show_hidden:
+        entries = [e for e in entries if not e.name.startswith(".")]
+    return entries, total, note
+
+
+def invalidate(path: Path | None = None) -> None:
+    if path is None:
+        _CACHE.clear()
+        return
+    key = str(path.resolve())
+    _CACHE.pop(key, None)
+
+
+# ── sort / filter ──────────────────────────────────────────────────────
+
+def filter_sort(
+    entries: list[Entry],
+    filt: str,
+    sort_key: str,
+    reverse: bool,
+) -> list[Entry]:
+    q = filt.strip().lower()
+    out = entries
+    if q:
+        toks = q.split()
+        out = [e for e in out if all(t in e.name.lower() for t in toks)]
+    if sort_key == "name":
+        out = sorted(out, key=lambda e: (e.name.lower(), e.size), reverse=reverse)
+    else:  # size
+        out = sorted(out, key=lambda e: (e.size, e.name.lower()), reverse=reverse)
+    # dirs first? no — pure size/name like ncdu (usually size desc mixed)
+    return out
+
+
+# ── one-shot ───────────────────────────────────────────────────────────
+
+def list_once(path: Path, limit: int | None = None) -> int:
+    path = path.expanduser().resolve()
+    if not path.is_dir():
+        print(f"vault: not a directory: {path}", file=sys.stderr)
+        return 1
+    print(f"# weighing {path} …", flush=True)
+    entries, total, note = scan_dir(path, show_hidden=True, timeout_s=180.0)
+    entries = filter_sort(entries, "", "size", True)
+    if limit is not None:
+        entries = entries[: max(1, limit)]
+    fs_total, fs_used, fs_free = fs_info(path)
+    print(
+        f"# {NAME}  {path}  this-dir {fmt_bytes(total)}  "
+        f"disk {fmt_bytes(fs_used)}/{fmt_bytes(fs_total)} used  free {fmt_bytes(fs_free)}"
+    )
+    if note:
+        print(f"# note: {note}")
+    print(f"{'SIZE':>8}  {'KIND':<4}  NAME")
+    for e in entries:
+        mark = "~" if e.partial else " "
+        kind = {"dir": "dir", "file": "file", "link": "link"}.get(e.kind, e.kind)[:4]
+        print(f"{fmt_bytes(e.size):>8}{mark} {kind:<4}  {e.name}{'/' if e.kind == 'dir' else ''}")
+    return 0
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+def _bar(pct: float, width: int = 10) -> str:
+    pct = max(0.0, min(100.0, pct))
+    filled = int(round(width * pct / 100.0))
+    filled = max(0, min(width, filled))
+    return "█" * filled + "░" * (width - filled)
+
+
+def frame(
+    cwd: Path,
+    visible: list[Entry],
+    sel: int,
+    parent_total: int,
+    sort_key: str,
+    reverse: bool,
+    filt: str,
+    mode: str,
+    show_hidden: bool,
+    status: str,
+    scanning: str,
+) -> str:
+    tw = art.term_width()
+    th = art.term_height()
+    body_w = tw - 4
+    arrow = "↓" if reverse else "↑"
+    fs_total, fs_used, fs_free = fs_info(cwd)
+    pct = (100.0 * fs_used / fs_total) if fs_total else 0.0
+
+    # short path for title
+    try:
+        home = str(Path.home())
+        disp = str(cwd)
+        if disp.startswith(home):
+            disp = "~" + disp[len(home) :]
+    except Exception:
+        disp = str(cwd)
+
+    head_lines = [
+        _fit(f"path {disp}", body_w),
+        _fit(
+            f"here {fmt_bytes(parent_total)} · disk {fmt_bytes(fs_used)}/{fmt_bytes(fs_total)} "
+            f"{pct:.0f}% [{_bar(pct, 8 if body_w < 48 else 12)}] · free {fmt_bytes(fs_free)}",
+            body_w,
+        ),
+        _fit(
+            f"sort {sort_key}{arrow} · {len(visible)} items"
+            f"{' · hidden' if show_hidden else ''}"
+            f" · {mode}{(' · ' + scanning) if scanning else ''}",
+            body_w,
+        ),
+        _fit(
+            f"filter: {filt}_" if mode == "filter"
+            else (f"filter: {filt}" if filt else "filter: —  (/ to type)"),
+            body_w,
+        ),
+    ]
+    if status:
+        head_lines.append(_fit(status, body_w))
+    head = art.box(head_lines, title=NAME.upper(), width=tw, body_style=(P.MUTED,))
+
+    runes = art.box(
+        [
+            _fit("↑↓ move · enter dive · h parent · s sort · r rev · R rescan", body_w),
+            _fit("/ filter · . hidden · q leave", body_w),
+        ],
+        title="runes",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+
+    def assemble(h: int, with_runes: bool) -> str:
+        rows = _chest_rows(visible, sel, h, body_w, parent_total)
+        body = art.box(rows, title="chests", width=tw, body_style=(P.SILVER,))
+        parts = [head, "", body]
+        if with_runes:
+            parts += ["", runes]
+        return "\n".join(parts)
+
+    head_h = _line_count(head)
+    runes_h = _line_count(runes)
+
+    def max_h(with_runes: bool) -> int:
+        g = 2 if with_runes else 1
+        r = runes_h if with_runes else 0
+        # chrome 2 + 1 header row inside
+        return th - head_h - g - 2 - r - 1
+
+    h = max(0, max_h(True))
+    frame_s = assemble(h, True)
+    while _line_count(frame_s) > th and h > 0:
+        h -= 1
+        frame_s = assemble(h, True)
+    if _line_count(frame_s) > th:
+        h = max(0, max_h(False))
+        frame_s = assemble(h, False)
+        while _line_count(frame_s) > th and h > 0:
+            h -= 1
+            frame_s = assemble(h, False)
+    if _line_count(frame_s) > th:
+        frame_s = "\n".join(frame_s.splitlines()[:th])
+    return frame_s
+
+
+def _chest_rows(
+    visible: list[Entry],
+    sel: int,
+    h: int,
+    body_w: int,
+    parent_total: int,
+) -> list[str]:
+    if not visible:
+        return [_fit("(empty — h parent, R rescan)", body_w)]
+    if h <= 0:
+        return [_fit("(clipped — taller terminal helps)", body_w)]
+    sel = max(0, min(sel, len(visible) - 1))
+    start = max(0, min(sel - h // 2, max(0, len(visible) - h)))
+    end = min(len(visible), start + h)
+    hdr = f" {'':1} {'SIZE':>8} {'%':>5}  NAME"
+    rows = [art.paint(art.pad_vis(_fit(hdr, body_w), body_w), P.PINK_DIM)]
+    for i in range(start, end):
+        e = visible[i]
+        mark = "✦" if i == sel else " "
+        pct = (100.0 * e.size / parent_total) if parent_total > 0 else 0.0
+        pct_s = f"{pct:4.0f}%" if parent_total > 0 else "  — "
+        suffix = "/" if e.kind == "dir" else ("@" if e.kind == "link" else "")
+        rough = "~" if e.partial else " "
+        name = e.name + suffix
+        prefix = f" {mark} {fmt_bytes(e.size):>8}{rough}{pct_s}  "
+        room = max(4, body_w - art.vis_len(prefix))
+        line = art.pad_vis(prefix + _fit(name, room), body_w)
+        if i == sel:
+            rows.append(art.paint(line, P.PINK))
+        elif e.kind == "dir" and pct >= 20:
+            rows.append(art.paint(line, P.WARN))
+        else:
+            rows.append(line)
+    return rows
+
+
+def run_tui(start: Path) -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return list_once(start)
+
+    art.tui_begin(fd, "vault")
+
+    cwd = start.expanduser().resolve()
+    if not cwd.is_dir():
+        art.tui_cleanup()
+        print(f"vault: not a directory: {cwd}", file=sys.stderr)
+        return 1
+
+    sort_key = "size"
+    reverse = True
+    filt = ""
+    mode = "nav"
+    show_hidden = False
+    sel = 0
+    sel_name: str | None = None
+    status = ""
+    entries: list[Entry] = []
+    parent_total = 0
+    stick = True
+    stack: list[Path] = []  # for reference; parent via cwd.parent
+
+    def paint(msg: str = "", scanning: str = "") -> None:
+        visible = filter_sort(entries, filt, sort_key, reverse)
+        nonlocal sel, sel_name, stick
+        if stick and sel_name is not None:
+            for i, e in enumerate(visible):
+                if e.name == sel_name:
+                    sel = i
+                    break
+        stick = False
+        if sel >= len(visible):
+            sel = max(0, len(visible) - 1)
+        if visible:
+            sel_name = visible[sel].name
+        else:
+            sel_name = None
+        body = frame(
+            cwd, visible, sel, parent_total, sort_key, reverse, filt, mode,
+            show_hidden, msg or status, scanning,
+        )
+        try:
+            art.paint_frame(fd, body)
+        except OSError:
+            art.tty_write(fd, art.clear_screen() + body + "\n")
+
+    def do_scan() -> None:
+        nonlocal entries, parent_total, status
+        status = ""
+        note_holder = [""]
+
+        def prog(i: int, n: int, name: str) -> None:
+            paint(scanning=f"weighing {i + 1}/{n} {_fit(name, 20)}")
+
+        paint(scanning="weighing…")
+        entries, parent_total, note = scan_dir(
+            cwd, show_hidden=True, timeout_s=180.0, progress=prog,
+        )
+        # show_hidden filter applied in loop via filter on display list
+        if not show_hidden:
+            # sizes still from full scan; display filters dots
+            pass
+        note_holder[0] = note
+        if note:
+            status = note
+
+    try:
+        do_scan()
+        while True:
+            # apply hidden filter for display without dropping cache
+            base = entries if show_hidden else [e for e in entries if not e.name.startswith(".")]
+            visible = filter_sort(base, filt, sort_key, reverse)
+            if stick and sel_name is not None:
+                for i, e in enumerate(visible):
+                    if e.name == sel_name:
+                        sel = i
+                        break
+            stick = False
+            if sel >= len(visible):
+                sel = max(0, len(visible) - 1)
+            if visible:
+                sel_name = visible[sel].name
+            else:
+                sel_name = None
+
+            body = frame(
+                cwd, visible, sel, parent_total, sort_key, reverse, filt, mode,
+                show_hidden, status, "",
+            )
+            status = ""
+            try:
+                art.paint_frame(fd, body)
+            except OSError:
+                art.tty_write(fd, art.clear_screen() + body + "\n")
+
+            key = art.tui_read_key(fd)
+
+            if mode == "filter":
+                if key in ("esc", "enter"):
+                    mode = "nav"
+                    stick = True
+                elif key == "backspace":
+                    filt = filt[:-1]
+                    stick = True
+                elif key in ("clear", "ctrl-u"):
+                    filt = ""
+                    stick = True
+                elif key == "space":
+                    filt += " "
+                    stick = True
+                elif len(key) == 1 and key.isprintable():
+                    filt += key
+                    stick = True
+                continue
+
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "up":
+                sel = max(0, sel - 1)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "down":
+                sel = min(max(0, len(visible) - 1), sel + 1)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "pgup":
+                sel = max(0, sel - 10)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "pgdn":
+                sel = min(max(0, len(visible) - 1), sel + 10)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "home":
+                sel = 0
+                if visible:
+                    sel_name = visible[sel].name
+            elif key == "end":
+                sel = max(0, len(visible) - 1)
+                if visible:
+                    sel_name = visible[sel].name
+            elif key in ("enter", "right", "l"):
+                if not visible:
+                    status = "nothing to open"
+                else:
+                    e = visible[sel]
+                    if e.kind == "dir":
+                        stack.append(cwd)
+                        cwd = e.path.resolve()
+                        sel = 0
+                        sel_name = None
+                        stick = True
+                        do_scan()
+                    elif e.kind == "link":
+                        status = f"link {e.name} (not followed)"
+                    else:
+                        status = f"{e.name} · {fmt_bytes(e.size)} file"
+            elif key in ("left", "h") or (key == "backspace" and mode == "nav"):
+                parent = cwd.parent
+                if parent != cwd:
+                    # remember which child we came from
+                    came = cwd.name
+                    cwd = parent
+                    sel_name = came
+                    stick = True
+                    do_scan()
+                else:
+                    status = "already at root"
+            elif key == "s":
+                sort_key = "name" if sort_key == "size" else "size"
+                reverse = sort_key == "size"
+                stick = True
+            elif key == "r":
+                reverse = not reverse
+                stick = True
+            elif key == "R":
+                invalidate(cwd)
+                do_scan()
+                stick = True
+                status = "rescanned"
+            elif key == "/":
+                mode = "filter"
+            elif key == ".":
+                show_hidden = not show_hidden
+                stick = True
+                status = "show hidden" if show_hidden else "hide dotfiles"
+            elif key in ("clear", "ctrl-u"):
+                filt = ""
+                stick = True
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+# ── argv ───────────────────────────────────────────────────────────────
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if argv and argv[0] in ("list", "-l", "--list"):
+        rest = argv[1:]
+        limit = None
+        path = Path.home()
+        if rest and rest[0].isdigit():
+            limit = int(rest[0])
+            rest = rest[1:]
+        if rest:
+            path = Path(rest[0]).expanduser()
+        elif limit is None and not rest:
+            path = Path.home()
+        return list_once(path, limit=limit)
+    start = Path(argv[0]).expanduser() if argv else Path.home()
+    return run_tui(start)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

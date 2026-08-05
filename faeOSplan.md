@@ -37,6 +37,7 @@
 | **Scry** | Command/output history (Shift-Tab visions) | stable | [docs/plans/scry.md](docs/plans/scry.md) |
 | **Summon** | Quick launcher (type-to-run over PATH, dmenu-style) | stable | [docs/plans/summon.md](docs/plans/summon.md) |
 | **The Eye** | Process watcher (CPU/RSS/kill) | new | [docs/plans/eye.md](docs/plans/eye.md) |
+| **Vault** | Disk map (recursive sizes, ncdu-style) | new | [docs/plans/vault.md](docs/plans/vault.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -58,7 +59,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 | Clipboard history | Imbue | copy memory, re-paste |
 | Screenshots | Reflection | region/window/full → gallery |
 | Calculator | Abacus | REPL calc, `abacus "2+2"` from prompt |
-| Disk usage | Vault | ncdu-like treasure map |
+| Disk usage | Vault ✅ | ncdu-like treasure map |
 | Timer/pomodoro | Hourglass | countdowns, alarms, break (links to Zen) |
 | Password manager | Crypt | pass-based, gpg vault |
 
@@ -106,6 +107,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-05 (vault)** — **Vault v1: disk treasure map.** ncdu-style TUI: recursive dir sizes (no symlink follow), % of parent, dive/parent, sort size↔name, filter, hidden toggle, rescan, FS free/used bar. Scan cache by mtime; progress “weighing i/n”; partial mark on timeout. Height-budgeted layout (eye lessons). One-shot `vault list [N] [path]`. Distinct from Spellbook (browse/CRUD/pick vs weigh trees). Registered scroll + [docs/plans/vault.md](docs/plans/vault.md); Tier-1 Vault marked done.
 - **2026-08-05 (the eye)** — **The Eye v1: process & system watcher.** Live TUI over `/proc`: system header (load · mem bar · avail), process table (PID · CPU% · RSS · state · cmdline), sort cpu/mem/pid/name (`s` or `1234`, `r` reverse), `/` filter mode, space pause, `k`/`K` SIGTERM/SIGKILL with y/n confirm (refuses self). Sticky selection by pid across refreshes; CPU% from jiffie deltas. One-shot: `eye list [N]`. Shared `fae_termart` layer. Registered scroll SYSTEM + [docs/plans/eye.md](docs/plans/eye.md); Tier-1 The Eye marked done.
 - **2026-08-05 (summon land)** — **Summon hardened + shell-wired.** Fixes: (1) `-x <query> args…` no longer re-passes the query as argv[1] (`execvpe(name, [name]+args)`); (2) bare `summon <query>` pre-filters the picker (flags are no longer confused with the query); (3) ^U clear works (`ctrl-u`, matching termart); (4) letters always filter — arrows only for move (so `jq`/`nano` type cleanly). `pixie.zsh` wrappers: `summon` / `scroll` put the pick on the prompt via `print -z` (list/exec/refresh bypass). Scroll: spellbook blurb fixed; ^U clear. Registry status → stable; Tier-1 Summon marked done.
 - **2026-08-05 (summon)** — **Summon v1: dmenu-style quick launcher over PATH.** Name cache at `~/.cache/pixie/summon.list` (auto-refresh 6h / missing, `--refresh` to rescan; 2,286 commands on this box). Type-to-filter TUI on the shared `fae_termart` layer (enter prints, `-x` runs). Match order: exact → name-startswith → token-in-name → token-in-dir. Registered in scroll SYSTEM section + [docs/plans/summon.md](docs/plans/summon.md).
