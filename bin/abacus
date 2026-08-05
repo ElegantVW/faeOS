@@ -70,8 +70,9 @@ def _eval_node(node: ast.AST) -> float | int:
         return _eval_node(node.body)
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return node.value
-    # py<3.8 style Num kept for safety
-    if isinstance(node, ast.Num):  # type: ignore[attr-defined]
+    # Older Python used ast.Num; only check if the attr still exists
+    _Num = getattr(ast, "Num", None)
+    if _Num is not None and isinstance(node, _Num):
         return node.n  # type: ignore[attr-defined]
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
         return _UNARY[type(node.op)](_eval_node(node.operand))
