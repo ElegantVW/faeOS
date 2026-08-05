@@ -15,8 +15,8 @@ View:     REFLECTION_VIEW=chafa|normal  (or: reflection view …)
     reflection list [N]         recent shots
     reflection last             path of newest
     reflection open [path]      open by current view mode
-    reflection open --chafa     force terminal (chafa) preview
-    reflection open --normal    force real image (xdg-open / feh / …)
+    reflection open --chafa     force terminal art (chafa symbols)
+    reflection open --normal    force real image scaled to the terminal
     reflection view [chafa|normal]  show or set default view mode
     reflection backend          which tools are live
     reflection -h
@@ -651,8 +651,9 @@ def backend_report() -> str:
         f"DISPLAY={os.environ.get('DISPLAY') or '(unset)'}",
         f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY') or '(unset)'}",
     ]
-    for t in ("import", "magick", "scrot", "maim", "grim", "slurp", "chafa", "xprop", "convert"):
+    for t in ("import", "magick", "scrot", "maim", "grim", "slurp", "chafa", "kitty", "xprop", "convert", "feh", "imv"):
         lines.append(f"  {t}: {'yes' if _have(t) else 'no'}")
+    lines.append(f"  graphics backend: {graphics_backend()}")
     try:
         import ctypes
 
@@ -671,6 +672,189 @@ def backend_report() -> str:
 
 
 # ── preview / open ─────────────────────────────────────────────────────
+
+
+@dataclass
+class ImagePlace:
+    """Where to paint a real (pixel) image inside the TUI after the text frame."""
+
+    path: Path
+    col: int  # 0-based cell
+    row: int  # 0-based cell
+    cols: int
+    rows: int
+
+
+def _term_is_kitty() -> bool:
+    if os.environ.get("KITTY_WINDOW_ID"):
+        return True
+    term = (os.environ.get("TERM") or "").lower()
+    if "kitty" in term:
+        return True
+    # nested under ssh to kitty
+    if "kitty" in (os.environ.get("TERM_PROGRAM") or "").lower():
+        return True
+    return False
+
+
+def graphics_backend() -> str:
+    """Best real-image terminal backend for embedding.
+
+    Prefer chafa protocol streams (reliable on raw fds). kitty icat is used
+    only as a fullscreen option when a controlling TTY is available.
+    """
+    if _have("chafa"):
+        if _term_is_kitty():
+            return "chafa-kitty"
+        term = (os.environ.get("TERM") or "").lower()
+        if "iterm" in term or os.environ.get("ITERM_SESSION_ID"):
+            return "chafa-iterm"
+        return "chafa-sixels"
+    if _have("kitty") and _term_is_kitty():
+        return "kitty-icat"
+    return "none"
+
+
+def clear_inline_images(fd: int) -> None:
+    """Remove previously placed kitty/sixel images so redraws don't stack."""
+    try:
+        # Kitty: delete all visible images
+        os.write(fd, b"\x1b_Ga=d,d=A\x1b\\")
+    except OSError:
+        pass
+
+
+def paint_scaled_image(
+    fd: int,
+    path: Path,
+    *,
+    cols: int,
+    rows: int,
+    col: int = 0,
+    row: int = 0,
+) -> str:
+    """Paint the real image scaled into a cell rectangle. Returns backend or ''."""
+    if not path.is_file() or cols < 2 or rows < 1:
+        return ""
+    try:
+        # 1) chafa pixel formats — work when writing to any tty fd
+        if _have("chafa"):
+            if _term_is_kitty():
+                fmt, be = "kitty", "chafa-kitty"
+            elif os.environ.get("ITERM_SESSION_ID") or "iterm" in (
+                os.environ.get("TERM") or ""
+            ).lower():
+                fmt, be = "iterm", "chafa-iterm"
+            else:
+                fmt, be = "sixels", "chafa-sixels"
+            home = f"\x1b[{row + 1};{col + 1}H".encode()
+            r = subprocess.run(
+                [
+                    "chafa",
+                    "-f",
+                    fmt,
+                    f"--size={cols}x{rows}",
+                    "--animate=off",
+                    str(path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            )
+            if r.returncode == 0 and r.stdout:
+                data = r.stdout
+                # strip cursor hide/show chafa may prefix
+                if data.startswith(b"\x1b[?25l"):
+                    data = data[6:]
+                if data.endswith(b"\x1b[?25h"):
+                    data = data[:-6]
+                os.write(fd, home + data)
+                return be
+
+        # 2) kitty icat with place (needs a real terminal environment)
+        if _have("kitty") and _term_is_kitty():
+            place = f"{cols}x{rows}@{col}x{row}"
+            r = subprocess.run(
+                [
+                    "kitty",
+                    "+kitten",
+                    "icat",
+                    f"--place={place}",
+                    "--scale-up",
+                    "--align=center",
+                    "--transfer-mode=stream",
+                    str(path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            )
+            if r.returncode == 0 and r.stdout:
+                os.write(fd, r.stdout)
+                return "kitty-icat"
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return ""
+
+
+def _wait_one_key_early() -> None:
+    """Key wait usable before the TUI helper section is defined."""
+    try:
+        with open("/dev/tty", "r") as tin:
+            term_fd = tin.fileno()
+            import termios
+            import tty
+
+            old = termios.tcgetattr(term_fd)
+            try:
+                tty.setcbreak(term_fd)
+                os.read(term_fd, 1)
+            finally:
+                termios.tcsetattr(term_fd, termios.TCSADRAIN, old)
+    except (OSError, EOFError):
+        pass
+
+
+def show_image_fullscreen(path: Path, fd: int | None = None) -> str:
+    """Show real image scaled to the whole terminal; wait for a key. Returns backend."""
+    if not path.is_file():
+        return "missing"
+    close_fd = False
+    if fd is None:
+        try:
+            fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+            close_fd = True
+        except OSError:
+            return "no-tty"
+    try:
+        try:
+            cols, rows = shutil.get_terminal_size((80, 24))
+        except OSError:
+            cols, rows = 80, 24
+        img_rows = max(4, rows - 2)
+        clear_inline_images(fd)
+        os.write(fd, b"\x1b[H\x1b[2J\x1b[?25l")
+        be = paint_scaled_image(fd, path, cols=cols, rows=img_rows, col=0, row=0)
+        if not be and _have("chafa"):
+            lines = preview_chafa(path, cols, img_rows)
+            if lines:
+                os.write(fd, ("\n".join(lines) + "\n").encode("utf-8", "replace"))
+                be = "chafa-symbols"
+        if not be:
+            return open_external_gui(path)
+        hint = f"\x1b[{rows};1H\x1b[0m  {path.name}  ·  scaled image  ·  any key\x1b[K"
+        os.write(fd, hint.encode("utf-8", "replace"))
+        _wait_one_key_early()
+        clear_inline_images(fd)
+        return be or "image"
+    except OSError:
+        return "failed"
+    finally:
+        if close_fd and fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def preview_chafa(path: Path, cols: int, rows: int) -> list[str]:
@@ -735,15 +919,15 @@ def preview_chafa(path: Path, cols: int, rows: int) -> list[str]:
         return []
 
 
-def open_external(path: Path) -> str:
-    """Open with xdg-open / kitty / feh / etc. Returns status."""
+def open_external_gui(path: Path) -> str:
+    """Open in a GUI image viewer (separate window). Returns status."""
     if not path.is_file():
         return "missing"
     for cmd in (
         ["xdg-open", str(path)],
-        ["kitty", "+kitten", "icat", str(path)],
-        ["feh", str(path)],
+        ["feh", "--scale-down", "--auto-zoom", str(path)],
         ["imv", str(path)],
+        ["mpv", "--loop-file=no", str(path)],
     ):
         if not _have(cmd[0]):
             continue
@@ -758,6 +942,19 @@ def open_external(path: Path) -> str:
         except OSError:
             continue
     return "no viewer"
+
+
+def open_external(path: Path) -> str:
+    """Prefer in-terminal scaled image; fall back to GUI viewer."""
+    # When we have a real TTY + graphics, scale into the terminal.
+    if graphics_backend() != "none":
+        try:
+            be = show_image_fullscreen(path)
+            if be not in ("missing", "no-tty", "failed", "no viewer"):
+                return be
+        except Exception:
+            pass
+    return open_external_gui(path)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────
@@ -812,14 +1009,13 @@ def cmd_open(path: Path | None = None, *, view: str | None = None) -> int:
     mode = (view or get_view_mode()).lower()
     if mode == VIEW_CHAFA:
         if not _have("chafa"):
-            print("reflection: chafa not installed — opening normal image", file=sys.stderr)
+            print("reflection: chafa not installed — opening scaled image", file=sys.stderr)
             mode = VIEW_NORMAL
-        elif sys.stdout.isatty() or True:
+        else:
             cols = shutil.get_terminal_size((80, 24)).columns
             rows = max(8, shutil.get_terminal_size((80, 24)).lines - 4)
             lines = preview_chafa(path, cols, rows)
             if lines:
-                # write to tty when stdout is piped so colours still work
                 dest = sys.stdout
                 try:
                     if not sys.stdout.isatty():
@@ -831,19 +1027,21 @@ def cmd_open(path: Path | None = None, *, view: str | None = None) -> int:
                 if dest is not sys.stdout:
                     dest.close()
                 return 0
-            print("reflection: chafa preview empty — falling back to normal", file=sys.stderr)
+            print("reflection: chafa preview empty — falling back to image", file=sys.stderr)
             mode = VIEW_NORMAL
+    # normal: real image scaled to the terminal (or GUI fallback)
     be = open_external(path)
-    print(f"reflection: opened normal image with {be}: {path}", file=sys.stderr)
-    return 0 if be not in ("no viewer", "missing") else 1
+    print(f"reflection: scaled image via {be}: {path}", file=sys.stderr)
+    return 0 if be not in ("no viewer", "missing", "failed", "no-tty") else 1
 
 
 def cmd_view(argv: list[str]) -> int:
     if not argv:
         mode = get_view_mode()
         print(f"view: {mode}")
-        print(f"  chafa  — terminal art preview (chafa symbols)")
-        print(f"  normal — real PNG via xdg-open / feh / imv / …")
+        print(f"  chafa  — terminal art (chafa symbols)")
+        print(f"  normal — real image scaled to the terminal (kitty/sixel)")
+        print(f"graphics: {graphics_backend()}")
         print(f"config: {config_path()}")
         return 0
     try:
@@ -899,7 +1097,7 @@ def _glass_rows(
     *,
     view: str,
 ) -> list[str]:
-    """Looking-glass body: chafa art or normal meta card, exactly n_rows."""
+    """Looking-glass body: chafa art, or blank canvas for real-image overlay."""
     n_rows = max(1, n_rows)
     if shot is None:
         rows = [
@@ -915,7 +1113,7 @@ def _glass_rows(
         else:
             dim = f"{shot.width}×{shot.height}" if shot.width else "?"
             rows = [
-                art.pad_vis(_fit("(chafa unavailable — v for normal · o open image)", body_w), body_w),
+                art.pad_vis(_fit("(chafa unavailable — v for normal)", body_w), body_w),
                 art.pad_vis(_fit(shot.path.name, body_w), body_w),
                 art.pad_vis(
                     _fit(f"{dim} · {_fmt_bytes(shot.bytes)} · {shot.mode}", body_w),
@@ -923,21 +1121,20 @@ def _glass_rows(
                 ),
             ]
     else:
-        # normal mode — facts card; enter/o opens the real PNG
-        dim = f"{shot.width}×{shot.height}" if shot.width else "?"
-        rows = [
-            art.pad_vis(_fit("view · normal (real image)", body_w), body_w),
-            art.pad_vis(_fit(shot.path.name, body_w), body_w),
-            art.pad_vis(
-                _fit(f"{dim} · {_fmt_bytes(shot.bytes)} · {shot.mode}", body_w),
-                body_w,
-            ),
-            art.pad_vis(_fit(str(shot.path), body_w), body_w),
-            art.pad_vis(
-                _fit("enter / o → open PNG in image viewer", body_w),
-                body_w,
-            ),
-        ]
+        # normal mode — blank cells; real pixels painted after the text frame
+        if graphics_backend() == "none":
+            dim = f"{shot.width}×{shot.height}" if shot.width else "?"
+            rows = [
+                art.pad_vis(_fit("normal image (no terminal graphics)", body_w), body_w),
+                art.pad_vis(_fit("enter / o → open viewer · install kitty/chafa", body_w), body_w),
+                art.pad_vis(_fit(shot.path.name, body_w), body_w),
+                art.pad_vis(
+                    _fit(f"{dim} · {_fmt_bytes(shot.bytes)}", body_w),
+                    body_w,
+                ),
+            ]
+        else:
+            rows = [" " * body_w]
     while len(rows) < n_rows:
         rows.append(" " * body_w)
     return rows[:n_rows]
@@ -951,11 +1148,10 @@ def build_frame(
     mode: str,
     pending: Shot | None,
     view: str,
-) -> tuple[str, int]:
+) -> tuple[str, int, ImagePlace | None]:
     """Height-safe layout: head + mirrors + looking glass + Runes always fit.
 
-    Returns (frame, list_rows_used) so key handlers know page size.
-    Shrinks list first, then glass; never hard-clips the Runes footer.
+    Returns (frame, list_rows_used, image_place for normal-mode overlay).
     """
     tw = art.term_width()
     th = art.term_height()
@@ -964,7 +1160,12 @@ def build_frame(
     body_w = outer - 4
 
     view_label = "chafa" if view == VIEW_CHAFA else "normal"
-    st = flash or f"{len(shots)} mirrors · view {view_label} · {shots_dir().name}/"
+    gfx = graphics_backend() if view == VIEW_NORMAL else ""
+    st = flash or (
+        f"{len(shots)} mirrors · view {view_label}"
+        + (f"/{gfx}" if gfx else "")
+        + f" · {shots_dir().name}/"
+    )
     head_lines = [_fit(st, body_w)]
     if mode == "confirm_del" and pending:
         head_lines.append(
@@ -982,7 +1183,7 @@ def build_frame(
     runes = art.box(
         [
             _fit("↑↓ move · enter open · v chafa|normal · f/w/r capture", body_w),
-            _fit("o always real image · d delete · y path · q leave", body_w),
+            _fit("o fullscreen image · d delete · y path · q leave", body_w),
         ],
         title="Runes",
         width=outer,
@@ -993,17 +1194,14 @@ def build_frame(
     # 3 blank separators between 4 panels
     gaps = 3
     fixed = head_h + runes_h + gaps
-    # each flexible panel needs top+bottom border (2) + ≥1 content
     remain = th - fixed
     if remain < 6:
-        # tiny terminal: drop glass, keep list+runes
         list_content = max(1, remain - 2)
         glass_content = 0
     else:
-        # prefer a useful glass (~40% of remain, content rows), min 3 max 12
-        # normal mode needs less glass height than chafa
+        # normal mode wants a large glass for the real image
         if view == VIEW_NORMAL:
-            glass_total_budget = max(5, min(10, remain // 3))
+            glass_total_budget = max(8, min(18, remain * 3 // 5))
         else:
             glass_total_budget = max(5, min(14, remain * 2 // 5))
         glass_content = max(3, glass_total_budget - 2)
@@ -1021,7 +1219,11 @@ def build_frame(
         )
         parts = [head, "", body]
         if gc > 0:
-            glass_title = "looking glass · chafa" if view == VIEW_CHAFA else "looking glass · normal"
+            glass_title = (
+                "looking glass · chafa"
+                if view == VIEW_CHAFA
+                else "looking glass · image"
+            )
             glass = art.box(
                 _glass_rows(shot, body_w, gc, view=view),
                 title=glass_title,
@@ -1033,7 +1235,6 @@ def build_frame(
         return "\n".join(parts)
 
     frame = assemble(list_content, glass_content)
-    # Shrink until it fits — list first, then glass. Always keep Runes.
     guard = 0
     while _line_count(frame) > th and guard < 40:
         guard += 1
@@ -1044,55 +1245,71 @@ def build_frame(
         elif glass_content > 0:
             glass_content = 0
         elif list_content > 0:
-            list_content = max(1, list_content)  # stuck
             break
         else:
             break
         frame = assemble(list_content, glass_content)
 
-    # last resort: still over (huge head?) — trim blank gaps only by reassemble without glass
     if _line_count(frame) > th:
         frame = assemble(max(1, list_content), 0)
+        glass_content = 0
     if _line_count(frame) > th:
-        # keep runes: drop from top of mirrors only via 1-line list
         frame = assemble(1, 0)
-    # absolute last resort — should almost never hit
+        list_content = 1
+        glass_content = 0
     if _line_count(frame) > th:
         lines = frame.splitlines()
-        # keep tail (runes) by dropping from the middle of list if needed
         runes_lines = runes.splitlines()
         head_lines_f = head.splitlines()
-        keep_tail = len(runes_lines) + 1  # blank + runes
+        keep_tail = len(runes_lines) + 1
         keep_head = len(head_lines_f) + 1
         mid_budget = max(0, th - keep_head - keep_tail)
         mid = lines[keep_head : len(lines) - keep_tail]
         frame = "\n".join(
             head_lines_f + [""] + mid[:mid_budget] + ([""] if mid_budget else []) + runes_lines
         )
+        glass_content = 0
         if _line_count(frame) > th:
             frame = "\n".join(frame.splitlines()[:th])
 
-    return frame, list_content
+    # Geometry for real-image overlay inside looking glass (0-based cells)
+    place: ImagePlace | None = None
+    if (
+        view == VIEW_NORMAL
+        and shot is not None
+        and glass_content > 0
+        and graphics_backend() != "none"
+    ):
+        # frame layout: head, blank, body, blank, glass, blank, runes
+        body_h = _line_count(
+            art.box(
+                _mirror_rows(shots, sel, max(1, list_content), body_w),
+                title="mirrors",
+                width=outer,
+                body_style=(P.SILVER,),
+            )
+        )
+        # 0-based row of glass title line
+        glass_title_row = head_h + 1 + body_h + 1
+        content_row = glass_title_row + 1  # first content line inside box
+        # box: "│ " + body + " │" → content starts at col 2
+        content_col = 2
+        place = ImagePlace(
+            path=shot.path,
+            col=content_col,
+            row=content_row,
+            cols=body_w,
+            rows=glass_content,
+        )
+
+    return frame, list_content, place
 
 
 def _wait_one_key() -> None:
-    try:
-        with open("/dev/tty", "r") as tin:
-            term_fd = tin.fileno()
-            import termios
-            import tty
-
-            old = termios.tcgetattr(term_fd)
-            try:
-                tty.setcbreak(term_fd)
-                os.read(term_fd, 1)
-            finally:
-                termios.tcsetattr(term_fd, termios.TCSADRAIN, old)
-    except (OSError, EOFError):
-        pass
+    _wait_one_key_early()
 
 
-def open_shot_in_tui(path: Path, view: str) -> str:
+def open_shot_in_tui(path: Path, view: str, fd: int | None = None) -> str:
     """Open selected shot according to view mode. Returns status flash."""
     if view == VIEW_CHAFA and _have("chafa"):
         try:
@@ -1116,8 +1333,9 @@ def open_shot_in_tui(path: Path, view: str) -> str:
             return "chafa preview"
         except (OSError, EOFError):
             return "chafa failed"
-    be = open_external(path)
-    return f"normal image via {be}"
+    # normal: real image scaled to the terminal window
+    be = show_image_fullscreen(path, fd=fd)
+    return f"image · {be}"
 
 
 def run_tui() -> int:
@@ -1138,11 +1356,22 @@ def run_tui() -> int:
             if sel >= len(shots):
                 sel = max(0, len(shots) - 1)
 
-            frame, list_rows = build_frame(
+            frame, list_rows, img_place = build_frame(
                 shots, sel, flash=flash, mode=mode, pending=pending, view=view
             )
             try:
+                clear_inline_images(fd)
                 art.paint_frame(fd, frame)
+                # normal mode: paint real image scaled into the looking glass
+                if img_place is not None:
+                    paint_scaled_image(
+                        fd,
+                        img_place.path,
+                        cols=img_place.cols,
+                        rows=img_place.rows,
+                        col=img_place.col,
+                        row=img_place.row,
+                    )
             except OSError:
                 pass
             flash = ""
@@ -1180,7 +1409,8 @@ def run_tui() -> int:
                 if shots:
                     art.tui_suspend()
                     try:
-                        flash = open_shot_in_tui(shots[sel].path, view)
+                        clear_inline_images(fd)
+                        flash = open_shot_in_tui(shots[sel].path, view, fd=fd)
                     finally:
                         art.tui_resume()
             elif key in ("v", "V", "t", "T"):
@@ -1216,14 +1446,14 @@ def run_tui() -> int:
                 if shot:
                     flash = f"full via {be} · {shot.path.name}"
                     sel = 0
-                    # in normal view, offer immediate open of the real shot
                     if view == VIEW_NORMAL:
                         art.tui_suspend()
                         try:
-                            open_external(shot.path)
+                            clear_inline_images(fd)
+                            show_image_fullscreen(shot.path, fd=fd)
                         finally:
                             art.tui_resume()
-                        flash = f"full via {be} · opened normal image"
+                        flash = f"full via {be} · scaled image"
                 else:
                     flash = f"full failed — {be}"
             elif key in ("w", "W"):
@@ -1241,10 +1471,11 @@ def run_tui() -> int:
                     if view == VIEW_NORMAL:
                         art.tui_suspend()
                         try:
-                            open_external(shot.path)
+                            clear_inline_images(fd)
+                            show_image_fullscreen(shot.path, fd=fd)
                         finally:
                             art.tui_resume()
-                        flash = f"window via {be} · opened normal image"
+                        flash = f"window via {be} · scaled image"
                 else:
                     flash = f"window failed — {be}"
             elif key in ("r", "R"):
@@ -1267,10 +1498,11 @@ def run_tui() -> int:
                     if view == VIEW_NORMAL:
                         art.tui_suspend()
                         try:
-                            open_external(shot.path)
+                            clear_inline_images(fd)
+                            show_image_fullscreen(shot.path, fd=fd)
                         finally:
                             art.tui_resume()
-                        flash = f"region via {be} · opened normal image"
+                        flash = f"region via {be} · scaled image"
                 else:
                     flash = f"region failed — {be}"
             elif key in ("d", "D", "delete"):
@@ -1278,10 +1510,15 @@ def run_tui() -> int:
                     pending = shots[sel]
                     mode = "confirm_del"
             elif key in ("o", "O"):
-                # always real image, regardless of view mode
+                # always real image scaled to the window
                 if shots:
-                    be = open_external(shots[sel].path)
-                    flash = f"normal image via {be}"
+                    art.tui_suspend()
+                    try:
+                        clear_inline_images(fd)
+                        be = show_image_fullscreen(shots[sel].path, fd=fd)
+                    finally:
+                        art.tui_resume()
+                    flash = f"image · {be}"
             elif key in ("y", "Y"):
                 if shots:
                     art.tui_cleanup()
