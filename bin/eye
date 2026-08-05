@@ -1,0 +1,591 @@
+#!/usr/bin/env python3
+"""eye — The Eye: process & system watcher for faeOS.
+
+Live TUI over /proc: CPU · RSS · command. Sort, filter, kill.
+
+    eye                 interactive watcher
+    eye list            one-shot table (stdout)
+    eye list 15         top 15 by current sort (cpu)
+    eye -h              this help
+
+Keys (nav mode):
+  ↑↓ / PgUp PgDn / Home End   move
+  s                           cycle sort  cpu → mem → pid → name
+  1 2 3 4                     sort cpu / mem / pid / name
+  r                           reverse order
+  /                           type a filter (esc/enter leave filter mode)
+  space                       pause / resume refresh
+  k                           SIGTERM selected (y confirm)
+  K                           SIGKILL selected (y confirm)
+  q / esc                     leave
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "The Eye"
+SORTS = ("cpu", "mem", "pid", "name")
+REFRESH = 1.0
+try:
+    CLK = int(os.sysconf("SC_CLK_TCK"))
+except (ValueError, OSError, AttributeError):
+    CLK = 100
+try:
+    PAGE = int(os.sysconf("SC_PAGE_SIZE"))
+except (ValueError, OSError, AttributeError):
+    PAGE = 4096
+
+
+# ── system snapshot ────────────────────────────────────────────────────
+
+def ncpu() -> int:
+    try:
+        return max(1, os.cpu_count() or 1)
+    except Exception:
+        return 1
+
+
+def meminfo() -> dict[str, int]:
+    """kB values from /proc/meminfo."""
+    out: dict[str, int] = {}
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                k, rest = line.split(":", 1)
+                parts = rest.split()
+                if parts:
+                    try:
+                        out[k] = int(parts[0])
+                    except ValueError:
+                        pass
+    except OSError:
+        pass
+    return out
+
+
+def loadavg() -> str:
+    try:
+        with open("/proc/loadavg", encoding="utf-8") as f:
+            a, b, c, *_ = f.read().split()
+            return f"{a} {b} {c}"
+    except OSError:
+        return "?"
+
+
+def fmt_bytes(kib: float) -> str:
+    """Pretty size from KiB."""
+    v = float(kib) * 1024.0
+    for unit, div in (("G", 1024**3), ("M", 1024**2), ("K", 1024.0)):
+        if v >= div or unit == "K":
+            n = v / div
+            if n >= 100:
+                return f"{n:.0f}{unit}"
+            if n >= 10:
+                return f"{n:.1f}{unit}"
+            return f"{n:.2f}{unit}" if unit == "G" else f"{n:.1f}{unit}"
+    return f"{v:.0f}B"
+
+
+def fmt_cpu(pct: float) -> str:
+    if pct < 10:
+        return f"{pct:5.1f}"
+    if pct < 100:
+        return f"{pct:5.1f}"
+    return f"{pct:5.0f}"
+
+
+# ── processes ──────────────────────────────────────────────────────────
+
+@dataclass
+class Proc:
+    pid: int
+    name: str
+    state: str
+    cmdline: str
+    rss_kib: int
+    cpu_jiffies: int  # utime+stime
+    cpu_pct: float = 0.0  # filled after delta
+
+
+def read_procs() -> dict[int, Proc]:
+    procs: dict[int, Proc] = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return procs
+    for entry in names:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        base = f"/proc/{pid}"
+        try:
+            with open(f"{base}/stat", encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        # comm is in parens and may contain spaces
+        try:
+            lpar = raw.index("(")
+            rpar = raw.rindex(")")
+        except ValueError:
+            continue
+        comm = raw[lpar + 1 : rpar]
+        rest = raw[rpar + 2 :].split()
+        # after comm: state ppid …  (0-index in rest)
+        # utime=11, stime=12, rss=21 (pages) in rest
+        if len(rest) < 22:
+            continue
+        state = rest[0]
+        try:
+            utime = int(rest[11])
+            stime = int(rest[12])
+            rss_pages = int(rest[21])
+        except ValueError:
+            continue
+        rss_kib = max(0, (rss_pages * PAGE) // 1024)
+        cmdline = ""
+        try:
+            with open(f"{base}/cmdline", "rb") as f:
+                raw_cmd = f.read().replace(b"\x00", b" ").strip()
+            if raw_cmd:
+                cmdline = raw_cmd.decode("utf-8", errors="replace")
+        except OSError:
+            pass
+        if not cmdline:
+            cmdline = f"[{comm}]"
+        # short display name
+        name = comm
+        procs[pid] = Proc(
+            pid=pid,
+            name=name,
+            state=state,
+            cmdline=cmdline,
+            rss_kib=rss_kib,
+            cpu_jiffies=utime + stime,
+        )
+    return procs
+
+
+def apply_cpu_delta(
+    cur: dict[int, Proc],
+    prev: dict[int, int] | None,
+    dt: float,
+) -> dict[int, int]:
+    """Mutate cur[*].cpu_pct from jiffie deltas. Return new prev map."""
+    if dt <= 0:
+        dt = 0.001
+    n = ncpu()
+    new_prev: dict[int, int] = {}
+    for pid, p in cur.items():
+        new_prev[pid] = p.cpu_jiffies
+        if prev is None or pid not in prev:
+            p.cpu_pct = 0.0
+            continue
+        delta = p.cpu_jiffies - prev[pid]
+        if delta < 0:
+            delta = 0
+        # % of one core; can exceed 100 on multi-threaded procs
+        p.cpu_pct = (delta / CLK) / dt * 100.0
+        # also expose machine-relative optional — keep one-core style (htop-ish)
+        _ = n
+    return new_prev
+
+
+def filter_sort(
+    procs: list[Proc],
+    filt: str,
+    sort_key: str,
+    reverse: bool,
+) -> list[Proc]:
+    q = filt.strip().lower()
+    if q:
+        out = []
+        for p in procs:
+            hay = f"{p.pid} {p.name} {p.cmdline}".lower()
+            if all(tok in hay for tok in q.split()):
+                out.append(p)
+        procs = out
+    if sort_key == "cpu":
+        procs.sort(key=lambda p: (p.cpu_pct, p.rss_kib, p.pid), reverse=reverse)
+    elif sort_key == "mem":
+        procs.sort(key=lambda p: (p.rss_kib, p.cpu_pct, p.pid), reverse=reverse)
+    elif sort_key == "name":
+        procs.sort(key=lambda p: (p.name.lower(), p.pid), reverse=reverse)
+    else:  # pid
+        procs.sort(key=lambda p: p.pid, reverse=reverse)
+    return procs
+
+
+# ── one-shot ───────────────────────────────────────────────────────────
+
+def list_once(limit: int | None = None, sort_key: str = "cpu", filt: str = "") -> int:
+    p1 = read_procs()
+    prev = {pid: p.cpu_jiffies for pid, p in p1.items()}
+    time.sleep(0.35)
+    p2 = read_procs()
+    apply_cpu_delta(p2, prev, 0.35)
+    rows = filter_sort(list(p2.values()), filt, sort_key, reverse=True)
+    if limit is not None:
+        rows = rows[: max(1, limit)]
+    mi = meminfo()
+    total = mi.get("MemTotal", 0)
+    avail = mi.get("MemAvailable", mi.get("MemFree", 0))
+    used = max(0, total - avail)
+    print(
+        f"# {NAME}  load {loadavg()}  "
+        f"mem {fmt_bytes(used)}/{fmt_bytes(total)} used  "
+        f"avail {fmt_bytes(avail)}  sort={sort_key}"
+    )
+    print(f"{'PID':>7} {'CPU%':>6} {'RSS':>7}  {'S':1}  COMMAND")
+    for p in rows:
+        cmd = p.cmdline
+        if len(cmd) > 80:
+            cmd = cmd[:79] + "…"
+        print(f"{p.pid:7d} {fmt_cpu(p.cpu_pct):>6} {fmt_bytes(p.rss_kib):>7}  {p.state:1}  {cmd}")
+    return 0
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+def system_lines() -> list[str]:
+    mi = meminfo()
+    total = mi.get("MemTotal", 0)
+    avail = mi.get("MemAvailable", mi.get("MemFree", 0))
+    used = max(0, total - avail)
+    pct = (100.0 * used / total) if total else 0.0
+    bar_w = 12
+    filled = int(round(bar_w * pct / 100.0)) if total else 0
+    filled = max(0, min(bar_w, filled))
+    bar = "█" * filled + "░" * (bar_w - filled)
+    return [
+        f"load {loadavg()}   cpus {ncpu()}   mem {fmt_bytes(used)}/{fmt_bytes(total)}  {pct:.0f}% [{bar}]",
+        f"avail {fmt_bytes(avail)}   buff/cache {fmt_bytes(mi.get('Buffers', 0) + mi.get('Cached', 0))}",
+    ]
+
+
+def frame(
+    visible: list[Proc],
+    sel: int,
+    sort_key: str,
+    reverse: bool,
+    filt: str,
+    mode: str,
+    paused: bool,
+    status: str,
+    confirm: str,
+) -> str:
+    tw = art.term_width()
+    th = art.term_height()
+    arrow = "↓" if reverse else "↑"
+    sort_mark = f"{sort_key}{arrow}"
+    mode_hint = {
+        "nav": "nav",
+        "filter": "filter…",
+        "confirm": "confirm kill",
+    }.get(mode, mode)
+    pause_mark = "  · PAUSED" if paused else ""
+    head_lines = system_lines() + [
+        f"sort {sort_mark}   showing {len(visible)}   mode {mode_hint}{pause_mark}",
+        f"filter: {filt}_" if mode == "filter" else (f"filter: {filt}" if filt else "filter: (none — press / )"),
+    ]
+    if status:
+        head_lines.append(status)
+    if confirm:
+        head_lines.append(art.paint(confirm, P.WARN))
+    head = art.box(head_lines, title=NAME.upper(), width=tw, body_style=(P.MUTED,))
+
+    # table rows: leave room for head + runes + gaps
+    h = max(6, th - 14)
+    body_w = tw - 4
+    if not visible:
+        rows = ["(no processes match — / to edit filter, ^U clear)"]
+    else:
+        sel = max(0, min(sel, len(visible) - 1))
+        start = max(0, min(sel - h // 2, max(0, len(visible) - h)))
+        end = min(len(visible), start + h)
+        # header
+        hdr = f" {'':1} {'PID':>7} {'CPU%':>6} {'RSS':>7}  S  COMMAND"
+        if art.vis_len(hdr) > body_w:
+            hdr = art.pad_vis(hdr[: body_w - 1], body_w)
+        else:
+            hdr = art.pad_vis(hdr, body_w)
+        rows = [art.paint(hdr, P.PINK_DIM)]
+        for i in range(start, end):
+            p = visible[i]
+            mark = "✦" if i == sel else " "
+            cmd = p.cmdline.replace("\n", " ")
+            # budget for command column
+            prefix = f" {mark} {p.pid:7d} {fmt_cpu(p.cpu_pct):>6} {fmt_bytes(p.rss_kib):>7}  {p.state:1}  "
+            room = max(8, body_w - art.vis_len(prefix))
+            if art.vis_len(cmd) > room:
+                # truncate by chars roughly
+                cmd = cmd[: max(0, room - 1)] + "…"
+            line = art.pad_vis(prefix + cmd, body_w)
+            if i == sel:
+                rows.append(art.paint(line, P.PINK))
+            elif p.cpu_pct >= 50 or p.rss_kib >= 512 * 1024:
+                rows.append(art.paint(line, P.WARN))
+            else:
+                rows.append(line)
+
+    body = art.box(rows, title="gaze", width=tw, body_style=(P.SILVER,))
+    runes = art.box(
+        [
+            "↑↓ move · s/1234 sort · r reverse · / filter · space pause",
+            "k SIGTERM · K SIGKILL · q leave",
+        ],
+        title="runes",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+    return "\n".join([head, "", body, "", runes])
+
+
+def kill_pid(pid: int, sig: signal.Signals) -> str:
+    try:
+        os.kill(pid, sig)
+        return f"sent {sig.name} → pid {pid}"
+    except ProcessLookupError:
+        return f"pid {pid} already gone"
+    except PermissionError:
+        return f"permission denied for pid {pid}"
+    except OSError as e:
+        return f"kill failed: {e}"
+
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return list_once(limit=25)
+
+    art.tui_begin(fd, "eye")
+
+    sort_key = "cpu"
+    reverse = True
+    filt = ""
+    mode = "nav"  # nav | filter | confirm
+    paused = False
+    sel = 0
+    status = ""
+    confirm_msg = ""
+    pending_sig: signal.Signals | None = None
+    pending_pid = 0
+
+    prev_jiff: dict[int, int] | None = None
+    last_sample = 0.0
+    procs: list[Proc] = []
+    sel_pid: int | None = None
+
+    def sample(*, warm: bool = False) -> None:
+        nonlocal prev_jiff, last_sample, procs
+        now = time.monotonic()
+        cur = read_procs()
+        if prev_jiff is None:
+            prev_jiff = {pid: p.cpu_jiffies for pid, p in cur.items()}
+            last_sample = now
+            if warm:
+                time.sleep(0.15)
+                now = time.monotonic()
+                cur = read_procs()
+                prev_jiff = apply_cpu_delta(cur, prev_jiff, max(0.05, now - last_sample))
+                last_sample = now
+            else:
+                for p in cur.values():
+                    p.cpu_pct = 0.0
+        else:
+            dt = now - last_sample
+            if dt < 0.05:
+                return
+            prev_jiff = apply_cpu_delta(cur, prev_jiff, dt)
+            last_sample = now
+        procs = list(cur.values())
+
+    try:
+        sample(warm=True)
+        stick = True  # re-resolve sel from sel_pid after sample/filter/sort
+        while True:
+            if not paused and (time.monotonic() - last_sample) >= REFRESH:
+                sample()
+                stick = True
+
+            visible = filter_sort(procs, filt, sort_key, reverse)
+            if stick and sel_pid is not None:
+                for i, p in enumerate(visible):
+                    if p.pid == sel_pid:
+                        sel = i
+                        break
+            stick = False
+            if sel >= len(visible):
+                sel = max(0, len(visible) - 1)
+            if visible:
+                sel_pid = visible[sel].pid
+            else:
+                sel_pid = None
+
+            body = frame(
+                visible, sel, sort_key, reverse, filt, mode, paused, status, confirm_msg
+            )
+            status = ""
+            try:
+                art.paint_frame(fd, body)
+            except OSError:
+                art.tty_write(fd, art.clear_screen() + body + "\n")
+
+            key = art.tui_read_key(fd, timeout=REFRESH if not paused else None)
+            if key == "":
+                continue  # timeout → refresh
+
+            # ── confirm kill ──
+            if mode == "confirm":
+                if key in ("y", "Y"):
+                    if pending_sig is not None and pending_pid:
+                        status = kill_pid(pending_pid, pending_sig)
+                    mode = "nav"
+                    confirm_msg = ""
+                    pending_sig = None
+                    sample()
+                elif key in ("n", "N", "esc", "q"):
+                    mode = "nav"
+                    confirm_msg = ""
+                    pending_sig = None
+                    status = "kill cancelled"
+                continue
+
+            # ── filter mode ──
+            if mode == "filter":
+                if key in ("esc", "enter"):
+                    mode = "nav"
+                    stick = True
+                elif key == "backspace":
+                    filt = filt[:-1]
+                    stick = True
+                elif key in ("clear", "ctrl-u"):
+                    filt = ""
+                    stick = True
+                elif key == "space":
+                    filt += " "
+                    stick = True
+                elif len(key) == 1 and key.isprintable():
+                    filt += key
+                    stick = True
+                continue
+
+            # ── nav mode ──
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "up":
+                sel = max(0, sel - 1)
+                if visible:
+                    sel_pid = visible[sel].pid
+            elif key == "down":
+                sel = min(max(0, len(visible) - 1), sel + 1)
+                if visible:
+                    sel_pid = visible[sel].pid
+            elif key == "pgup":
+                sel = max(0, sel - 10)
+                if visible:
+                    sel_pid = visible[sel].pid
+            elif key == "pgdn":
+                sel = min(max(0, len(visible) - 1), sel + 10)
+                if visible:
+                    sel_pid = visible[sel].pid
+            elif key == "home":
+                sel = 0
+                if visible:
+                    sel_pid = visible[sel].pid
+            elif key == "end":
+                sel = max(0, len(visible) - 1)
+                if visible:
+                    sel_pid = visible[sel].pid
+            elif key == "s":
+                i = SORTS.index(sort_key) if sort_key in SORTS else 0
+                sort_key = SORTS[(i + 1) % len(SORTS)]
+                reverse = sort_key in ("cpu", "mem")
+                stick = True
+            elif key == "1":
+                sort_key, reverse, stick = "cpu", True, True
+            elif key == "2":
+                sort_key, reverse, stick = "mem", True, True
+            elif key == "3":
+                sort_key, reverse, stick = "pid", False, True
+            elif key == "4":
+                sort_key, reverse, stick = "name", False, True
+            elif key == "r":
+                reverse = not reverse
+                stick = True
+            elif key == "/":
+                mode = "filter"
+            elif key == "space":
+                paused = not paused
+                status = "paused" if paused else "resumed"
+            elif key == "k":
+                if not visible:
+                    status = "nothing to kill"
+                else:
+                    p = visible[sel]
+                    if p.pid == os.getpid():
+                        status = "won't kill the eye itself"
+                    else:
+                        mode = "confirm"
+                        pending_sig = signal.SIGTERM
+                        pending_pid = p.pid
+                        confirm_msg = f"SIGTERM pid {p.pid} ({p.name})?  y / n"
+            elif key == "K":
+                if not visible:
+                    status = "nothing to kill"
+                else:
+                    p = visible[sel]
+                    if p.pid == os.getpid():
+                        status = "won't kill the eye itself"
+                    else:
+                        mode = "confirm"
+                        pending_sig = signal.SIGKILL
+                        pending_pid = p.pid
+                        confirm_msg = f"SIGKILL pid {p.pid} ({p.name})?  y / n"
+            elif key in ("clear", "ctrl-u"):
+                filt = ""
+                stick = True
+            # ignore other keys in nav (don't steal letters into filter)
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+# ── argv ───────────────────────────────────────────────────────────────
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if argv and argv[0] in ("list", "-l", "--list"):
+        rest = argv[1:]
+        limit = None
+        if rest and rest[0].isdigit():
+            limit = int(rest[0])
+        return list_once(limit=limit)
+    if argv and argv[0].isdigit():
+        # eye 20 → list top 20
+        return list_once(limit=int(argv[0]))
+    return run_tui()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

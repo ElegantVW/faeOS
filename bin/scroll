@@ -138,6 +138,8 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("summon", "Quick launcher (dmenu-style, type to run)"),
             ("summon -x <query>", "Launch first match directly"),
             ("summon --refresh", "Rescan PATH cache"),
+            ("eye", "The Eye — process watcher (CPU/RSS/kill)"),
+            ("eye list 15", "Top 15 processes once (stdout)"),
             ("termfix", "Reset TTY + line-edit after glitches"),
             ("tick status", "Tick + grace state"),
             ("tick on 10", "Idle clear every 10s"),

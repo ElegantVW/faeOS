@@ -36,6 +36,7 @@
 | **Magpie** | Browser/search (privacy, DDG) | search stable; browse in progress | [docs/plans/magpie.md](docs/plans/magpie.md) |
 | **Scry** | Command/output history (Shift-Tab visions) | stable | [docs/plans/scry.md](docs/plans/scry.md) |
 | **Summon** | Quick launcher (type-to-run over PATH, dmenu-style) | stable | [docs/plans/summon.md](docs/plans/summon.md) |
+| **The Eye** | Process watcher (CPU/RSS/kill) | new | [docs/plans/eye.md](docs/plans/eye.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -52,7 +53,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 | Quick launcher | Summon ✅ | dmenu-style: type a command → run |
 | Notes | Grimoire | markdown notes, pages, tags |
 | Package frontend | Alchemy | pacman menu: brew (install) / sip (update) / distill (clean) |
-| Task manager | The Eye | htop-like: CPU/RAM/disk/processes/kill |
+| Task manager | The Eye ✅ | htop-like: CPU/RAM/disk/processes/kill |
 | To-dos | Quests | todo.txt-style questlog, due dates |
 | Clipboard history | Imbue | copy memory, re-paste |
 | Screenshots | Reflection | region/window/full → gallery |
@@ -105,6 +106,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-05 (the eye)** — **The Eye v1: process & system watcher.** Live TUI over `/proc`: system header (load · mem bar · avail), process table (PID · CPU% · RSS · state · cmdline), sort cpu/mem/pid/name (`s` or `1234`, `r` reverse), `/` filter mode, space pause, `k`/`K` SIGTERM/SIGKILL with y/n confirm (refuses self). Sticky selection by pid across refreshes; CPU% from jiffie deltas. One-shot: `eye list [N]`. Shared `fae_termart` layer. Registered scroll SYSTEM + [docs/plans/eye.md](docs/plans/eye.md); Tier-1 The Eye marked done.
 - **2026-08-05 (summon land)** — **Summon hardened + shell-wired.** Fixes: (1) `-x <query> args…` no longer re-passes the query as argv[1] (`execvpe(name, [name]+args)`); (2) bare `summon <query>` pre-filters the picker (flags are no longer confused with the query); (3) ^U clear works (`ctrl-u`, matching termart); (4) letters always filter — arrows only for move (so `jq`/`nano` type cleanly). `pixie.zsh` wrappers: `summon` / `scroll` put the pick on the prompt via `print -z` (list/exec/refresh bypass). Scroll: spellbook blurb fixed; ^U clear. Registry status → stable; Tier-1 Summon marked done.
 - **2026-08-05 (summon)** — **Summon v1: dmenu-style quick launcher over PATH.** Name cache at `~/.cache/pixie/summon.list` (auto-refresh 6h / missing, `--refresh` to rescan; 2,286 commands on this box). Type-to-filter TUI on the shared `fae_termart` layer (enter prints, `-x` runs). Match order: exact → name-startswith → token-in-name → token-in-dir. Registered in scroll SYSTEM section + [docs/plans/summon.md](docs/plans/summon.md).
 - **2026-08-05 (Phase 1 tests)** — **First test suite: `tests/test_fae_termart.py` (47 cases)** covering the two shared-layer contracts every faeOS TUI depends on: `tui_read_key` (plain keys, CSI arrows/home/end/pgup/pgdn/delete, SS3, ctrl-*, escape, timeout/EOF) and `box`/`paint_frame` geometry (constant width 44–80, unicode/ASCII frames, wrapping, pre-styled line retention, title truncation, CR-LF in raw mode). **Caught a real bug:** the CSI-gathering loop spun forever on EOF (closed tty/pipe) — `tui_read_key` now breaks on empty read. Plan docs synced to menagerie v2 (`pixie.md`, `kur.md`, registry rows, RAM-budget milestone).

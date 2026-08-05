@@ -28,6 +28,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | `zen` | Fullscreen browser break (X one-shot / VT) |
 | `scroll` | Themed command directory (interactive help picker) |
 | `summon` / `summon -x <query>` | Quick launcher (type-to-run over PATH, dmenu-style) |
+| `eye` / `eye list 15` | The Eye — process watcher (CPU · RSS · kill); one-shot table |
 | `spellbook` | File-manager TUI (j/k move, ? help, n/d/r/e dialogs) |
 | `tick` / `termfix` | Screen tick + TTY line-edit recovery |
 
@@ -41,6 +42,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | **Scry** | Past commands / replies |
 | **Ether** | Network paths / hotspot |
 | **Magpie** | Private web search |
+| **The Eye** | Processes / CPU / RAM |
 
 Prompt: framed pink status box (user · mood · music · RAM/CPU/HDD/temp) + `>`.
 
