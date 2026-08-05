@@ -929,12 +929,12 @@ impl Term {
     }
 
     pub fn read_key(&mut self) -> Result<Key> {
-        let mut b0 = [0u8; 1];
-        let n = io::stdin().read(&mut b0)?;
-        if n == 0 {
-            return Ok(Key::Esc);
-        }
-        Ok(match b0[0] {
+        // Use libc::read on fd 0 — Rust's Stdin buffer can swallow CSI tails.
+        let b0 = match read_byte_raw() {
+            None => return Ok(Key::Esc),
+            Some(b) => b,
+        };
+        Ok(match b0 {
             b'\n' | b'\r' => Key::Enter,
             b'\x03' => Key::Ctrl('c'),
             b'\x1b' => parse_escape_sequence(),
@@ -954,6 +954,16 @@ impl Term {
     }
 }
 
+fn read_byte_raw() -> Option<u8> {
+    let mut b = [0u8; 1];
+    let n = unsafe { libc::read(0, b.as_mut_ptr() as *mut libc::c_void, 1) };
+    if n == 1 {
+        Some(b[0])
+    } else {
+        None
+    }
+}
+
 fn wait_stdin(timeout: Duration) -> bool {
     unsafe {
         let mut pfd = libc::pollfd {
@@ -966,34 +976,30 @@ fn wait_stdin(timeout: Duration) -> bool {
     }
 }
 
-/// Read CSI/SS3 after an ESC byte. Collects bytes for up to ~100ms.
+/// Read CSI/SS3 after an ESC byte. Collects bytes for up to ~120ms via raw fd.
 fn parse_escape_sequence() -> Key {
     let mut seq: Vec<u8> = Vec::with_capacity(8);
-    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + Duration::from_millis(120);
     while std::time::Instant::now() < deadline {
         let remain = deadline.saturating_duration_since(std::time::Instant::now());
-        if !wait_stdin(remain.min(Duration::from_millis(20))) {
+        if !wait_stdin(remain.min(Duration::from_millis(25))) {
             if seq.is_empty() {
                 return Key::Esc;
             }
             break;
         }
-        let mut b = [0u8; 1];
-        match io::stdin().read(&mut b) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                seq.push(b[0]);
-                // CSI final byte, or SS3 single letter after O
+        match read_byte_raw() {
+            None => break,
+            Some(b) => {
+                seq.push(b);
                 if seq.len() == 1 && (seq[0] == b'[' || seq[0] == b'O') {
                     continue;
                 }
                 if seq.len() >= 2 {
                     let last = *seq.last().unwrap();
-                    // SS3: O + letter
                     if seq[0] == b'O' && last.is_ascii_alphabetic() {
                         break;
                     }
-                    // CSI: final byte 0x40-0x7E
                     if seq[0] == b'[' && (0x40..=0x7e).contains(&last) {
                         break;
                     }
@@ -1013,7 +1019,6 @@ fn parse_escape_sequence() -> Key {
         [b'[', b'F'] | [b'O', b'F'] | [b'[', b'4', b'~'] => Key::End,
         [b'[', b'5', b'~'] => Key::PgUp,
         [b'[', b'6', b'~'] => Key::PgDn,
-        // some terminals send 1;1A style — take last letter
         s if s.first() == Some(&b'[') && s.last() == Some(&b'A') => Key::Up,
         s if s.first() == Some(&b'[') && s.last() == Some(&b'B') => Key::Down,
         s if s.first() == Some(&b'[') && s.last() == Some(&b'C') => Key::Right,
