@@ -1,6 +1,6 @@
 # FaeOS Plan
 
-**Last updated:** 2026-08-04
+**Last updated:** 2026-08-05
 **Status:** Active build toward v1.0 (Arch distro)
 **Location:** This file is the *single* main plan. Each app has its own short plan in `docs/plans/`; this file stays concise.
 
@@ -29,7 +29,7 @@
 | **Spellbook** | File manager (TUI) | stable | [docs/plans/spellbook.md](docs/plans/spellbook.md) |
 | **Ether** | Network manager (bt/wifi/lan, veil VPN, bridge hotspot) | stable | [docs/plans/ether.md](docs/plans/ether.md) |
 | **Siren** | Media player (mpv, queue, playlists, trove) | stable | [docs/plans/siren.md](docs/plans/siren.md) |
-| **Pixie** | Local AI assistant with tools (qwen coder) | stable | [docs/plans/pixie.md](docs/plans/pixie.md) |
+| **Pixie** | Local AI assistant with tools (qwen3-4b) | stable | [docs/plans/pixie.md](docs/plans/pixie.md) |
 | **Kur** | Haiku dragon — **easter egg, hidden from scroll** | stable | [docs/plans/kur.md](docs/plans/kur.md) |
 | **Imp** | Terminal art generator (pixie-art lineage) | in dev (separate instance) | [docs/plans/imp.md](docs/plans/imp.md) |
 | **Goblin** | Mail (aerc IMAP → local text, IDLE push) | stable | [docs/plans/goblin.md](docs/plans/goblin.md) |
@@ -85,10 +85,10 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ### Phase 1 — Hardening (current)
 - [x] Shared `tui_*` layer on all TUIs (ether, siren, scry, goblin, spellbook, scroll)
-- [x] LLM RAM management: sleep-idle unload/reload (`PIXIE_LLM_SLEEP_IDLE`)
+- [x] LLM RAM management: menagerie v2 — per-app instances, budget + eviction (replaces sleep-idle; see [docs/plans/menagerie.md](docs/plans/menagerie.md))
+- [x] Tests for shared layer + key map (`tests/test_fae_termart.py`, 47 cases)
 - [ ] Per-app plans maintained; wizard first-run flows
 - [ ] Error handling passes (lost tty, pipe mode, KeyboardInterrupt) — mostly done via `tui_cleanup`
-- [ ] Tests for shared layer + key map
 
 ### Phase 2 — Distro (weeks/months)
 - [ ] Arch ISO / spin (archiso or calamares): installs the whole ecosystem
@@ -103,6 +103,8 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 - [ ] CONTRIBUTING.md, CHANGELOG.md, plugin seam
 
 ## Log
+
+- **2026-08-05 (Phase 1 tests)** — **First test suite: `tests/test_fae_termart.py` (47 cases)** covering the two shared-layer contracts every faeOS TUI depends on: `tui_read_key` (plain keys, CSI arrows/home/end/pgup/pgdn/delete, SS3, ctrl-*, escape, timeout/EOF) and `box`/`paint_frame` geometry (constant width 44–80, unicode/ASCII frames, wrapping, pre-styled line retention, title truncation, CR-LF in raw mode). **Caught a real bug:** the CSI-gathering loop spun forever on EOF (closed tty/pipe) — `tui_read_key` now breaks on empty read. Plan docs synced to menagerie v2 (`pixie.md`, `kur.md`, registry rows, RAM-budget milestone).
 
 - **2026-08-05 (menagerie v2)** — **Menagerie = AI control center; every AI app gets its own dedicated llama-server instance.** Old 3-profile/port-fixed design retired: each app (pixie 8080 · ask 8090 · magpie 8091 · imp 8082 · kur 8081) now owns an independent spawn via `menagerie ensure <app>` — same model can run in several instances without collisions; apps stop their own on quit. New `menagerie-registry.py` (models + per-app bindings in `~/.config/pixie/menagerie.json`), `menagerie-tui.py` (interactive den: start/stop, per-app model switching, add/remove models, RAM budget), `menagerie set <app> <model>`, `models add --hf` (asks before installing the hf CLI, handles token login, `HF_HUB_DISABLE_XET=1`). **RAM budget**: suggested from hardware on first open (no AI; 7.5 GB box → 5.0 GB), editable in TUI or `menagerie budget`; `ensure` evicts idle instances when the budget is exceeded. systemd `menagerie.service` retired (ask/magpie/pixie/kur-server/imp all moved off `systemctl`; faectl → `menagerie restart pixie`). **Also fixed en route:** kur-server cold-start now waits for the model to load instead of falling back to the canned haiku; menagerie no longer uses `fuser -k` (stops only its own pids, warns on foreign port holders).
 

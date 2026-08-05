@@ -645,8 +645,10 @@ def tui_read_key(fd: int, timeout: float | None = None) -> str:
                 if not r:
                     break
                 b = os.read(fd, 1)
+                if not b:  # EOF / closed pipe — stop gathering, don't spin
+                    break
                 seq += b
-                if b and b[0] >= 0x40:
+                if b[0] >= 0x40:
                     break
             s = seq.decode("latin-1", errors="replace")
             if s.startswith("A"):
