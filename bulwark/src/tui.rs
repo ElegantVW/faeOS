@@ -937,61 +937,28 @@ impl Term {
             b'\n' | b'\r' => return Ok(Key::Enter),
             b'\x03' => return Ok(Key::Ctrl('c')),
             b'\x1b' => {
-                // CSI / SS3 — non-blocking peek
-                if !wait_stdin(Duration::from_millis(40)) {
+                // CSI / SS3 arrows — wait a bit then drain available bytes
+                if !wait_stdin(Duration::from_millis(80)) {
                     return Ok(Key::Esc);
                 }
-                let mut b1 = [0u8; 1];
-                if io::stdin().read(&mut b1)? == 0 {
+                let mut rest = [0u8; 16];
+                let n = io::stdin().read(&mut rest).unwrap_or(0);
+                if n == 0 {
                     return Ok(Key::Esc);
                 }
-                if b1[0] == b'[' {
-                    // gather until final byte
-                    let mut seq = Vec::new();
-                    loop {
-                        if !wait_stdin(Duration::from_millis(40)) {
-                            break;
-                        }
-                        let mut c = [0u8; 1];
-                        if io::stdin().read(&mut c)? == 0 {
-                            break;
-                        }
-                        seq.push(c[0]);
-                        if c[0] >= 0x40 {
-                            break;
-                        }
-                    }
-                    return Ok(match seq.as_slice() {
-                        [b'A', ..] => Key::Up,
-                        [b'B', ..] => Key::Down,
-                        [b'C', ..] => Key::Right,
-                        [b'D', ..] => Key::Left,
-                        [b'H', ..] | [b'1', b'~', ..] => Key::Home,
-                        [b'F', ..] | [b'4', b'~', ..] => Key::End,
-                        [b'5', b'~', ..] => Key::PgUp,
-                        [b'6', b'~', ..] => Key::PgDn,
-                        _ => Key::Esc,
-                    });
-                }
-                if b1[0] == b'O' {
-                    if !wait_stdin(Duration::from_millis(40)) {
-                        return Ok(Key::Esc);
-                    }
-                    let mut b2 = [0u8; 1];
-                    if io::stdin().read(&mut b2)? == 0 {
-                        return Ok(Key::Esc);
-                    }
-                    return Ok(match b2[0] {
-                        b'A' => Key::Up,
-                        b'B' => Key::Down,
-                        b'C' => Key::Right,
-                        b'D' => Key::Left,
-                        b'H' => Key::Home,
-                        b'F' => Key::End,
-                        _ => Key::Esc,
-                    });
-                }
-                return Ok(Key::Esc);
+                // forms: [A  [B  [C  [D  OA OB OC OD  [1~ [4~ [5~ [6~
+                let s = &rest[..n];
+                return Ok(match s {
+                    [b'[', b'A', ..] | [b'O', b'A', ..] => Key::Up,
+                    [b'[', b'B', ..] | [b'O', b'B', ..] => Key::Down,
+                    [b'[', b'C', ..] | [b'O', b'C', ..] => Key::Right,
+                    [b'[', b'D', ..] | [b'O', b'D', ..] => Key::Left,
+                    [b'[', b'H', ..] | [b'O', b'H', ..] | [b'[', b'1', b'~', ..] => Key::Home,
+                    [b'[', b'F', ..] | [b'O', b'F', ..] | [b'[', b'4', b'~', ..] => Key::End,
+                    [b'[', b'5', b'~', ..] => Key::PgUp,
+                    [b'[', b'6', b'~', ..] => Key::PgDn,
+                    _ => Key::Esc,
+                });
             }
             c if c.is_ascii() => return Ok(Key::Char(c as char)),
             _ => return Ok(Key::Char(' ')),
