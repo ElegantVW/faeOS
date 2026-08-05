@@ -261,20 +261,92 @@ def list_once(limit: int | None = None, sort_key: str = "cpu", filt: str = "") -
 
 # ── TUI ────────────────────────────────────────────────────────────────
 
-def system_lines() -> list[str]:
+def system_lines(*, body_w: int) -> list[str]:
+    """Short lines that fit `body_w` without wrapping (keeps the head short)."""
     mi = meminfo()
     total = mi.get("MemTotal", 0)
     avail = mi.get("MemAvailable", mi.get("MemFree", 0))
     used = max(0, total - avail)
     pct = (100.0 * used / total) if total else 0.0
-    bar_w = 12
+    # loadavg is three numbers — take first only on narrow
+    ld = loadavg()
+    if body_w < 48:
+        ld = ld.split()[0] if ld != "?" else "?"
+    bar_w = max(4, min(12, body_w - 28))
     filled = int(round(bar_w * pct / 100.0)) if total else 0
     filled = max(0, min(bar_w, filled))
     bar = "█" * filled + "░" * (bar_w - filled)
-    return [
-        f"load {loadavg()}   cpus {ncpu()}   mem {fmt_bytes(used)}/{fmt_bytes(total)}  {pct:.0f}% [{bar}]",
-        f"avail {fmt_bytes(avail)}   buff/cache {fmt_bytes(mi.get('Buffers', 0) + mi.get('Cached', 0))}",
-    ]
+    # Two fixed lines, each forced ≤ body_w
+    line1 = f"ld {ld} · {ncpu()}c · {fmt_bytes(used)}/{fmt_bytes(total)} {pct:.0f}% [{bar}]"
+    line2 = f"free {fmt_bytes(avail)} · cache {fmt_bytes(mi.get('Buffers', 0) + mi.get('Cached', 0))}"
+    return [_fit(line1, body_w), _fit(line2, body_w)]
+
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    # hard truncate with ellipsis
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    if not s:
+        return 0
+    return s.count("\n") + 1
+
+
+def _trunc_cmd(cmd: str, room: int) -> str:
+    if art.vis_len(cmd) <= room:
+        return cmd
+    out: list[str] = []
+    w = 0
+    for ch in cmd:
+        cw = art.vis_len(ch)
+        if w + cw >= room - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _gaze_rows(
+    visible: list[Proc],
+    sel: int,
+    h: int,
+    body_w: int,
+) -> list[str]:
+    """Column header + up to `h` process rows (scroll window around sel)."""
+    if not visible:
+        return [_fit("(no match — / filter, ^U clear)", body_w)]
+    if h <= 0:
+        return [_fit("(gaze clipped — taller terminal helps)", body_w)]
+    sel = max(0, min(sel, len(visible) - 1))
+    start = max(0, min(sel - h // 2, max(0, len(visible) - h)))
+    end = min(len(visible), start + h)
+    hdr = f" {'':1} {'PID':>7} {'CPU%':>6} {'RSS':>7}  S  COMMAND"
+    rows = [art.paint(art.pad_vis(_fit(hdr, body_w), body_w), P.PINK_DIM)]
+    for i in range(start, end):
+        p = visible[i]
+        mark = "✦" if i == sel else " "
+        cmd = p.cmdline.replace("\n", " ")
+        prefix = f" {mark} {p.pid:7d} {fmt_cpu(p.cpu_pct):>6} {fmt_bytes(p.rss_kib):>7}  {p.state:1}  "
+        room = max(4, body_w - art.vis_len(prefix))
+        line = art.pad_vis(prefix + _trunc_cmd(cmd, room), body_w)
+        if i == sel:
+            rows.append(art.paint(line, P.PINK))
+        elif p.cpu_pct >= 50 or p.rss_kib >= 512 * 1024:
+            rows.append(art.paint(line, P.WARN))
+        else:
+            rows.append(line)
+    return rows
 
 
 def frame(
@@ -290,6 +362,7 @@ def frame(
 ) -> str:
     tw = art.term_width()
     th = art.term_height()
+    body_w = tw - 4
     arrow = "↓" if reverse else "↑"
     sort_mark = f"{sort_key}{arrow}"
     mode_hint = {
@@ -297,62 +370,80 @@ def frame(
         "filter": "filter…",
         "confirm": "confirm kill",
     }.get(mode, mode)
-    pause_mark = "  · PAUSED" if paused else ""
-    head_lines = system_lines() + [
-        f"sort {sort_mark}   showing {len(visible)}   mode {mode_hint}{pause_mark}",
-        f"filter: {filt}_" if mode == "filter" else (f"filter: {filt}" if filt else "filter: (none — press / )"),
+    pause_mark = " · PAUSED" if paused else ""
+
+    head_lines = system_lines(body_w=body_w) + [
+        _fit(f"sort {sort_mark} · {len(visible)} · {mode_hint}{pause_mark}", body_w),
+        _fit(
+            f"filter: {filt}_" if mode == "filter"
+            else (f"filter: {filt}" if filt else "filter: —  (/ to type)"),
+            body_w,
+        ),
     ]
     if status:
-        head_lines.append(status)
+        head_lines.append(_fit(status, body_w))
     if confirm:
-        head_lines.append(art.paint(confirm, P.WARN))
+        head_lines.append(art.paint(_fit(art.strip_ansi(confirm), body_w), P.WARN))
     head = art.box(head_lines, title=NAME.upper(), width=tw, body_style=(P.MUTED,))
 
-    # table rows: leave room for head + runes + gaps
-    h = max(6, th - 14)
-    body_w = tw - 4
-    if not visible:
-        rows = ["(no processes match — / to edit filter, ^U clear)"]
-    else:
-        sel = max(0, min(sel, len(visible) - 1))
-        start = max(0, min(sel - h // 2, max(0, len(visible) - h)))
-        end = min(len(visible), start + h)
-        # header
-        hdr = f" {'':1} {'PID':>7} {'CPU%':>6} {'RSS':>7}  S  COMMAND"
-        if art.vis_len(hdr) > body_w:
-            hdr = art.pad_vis(hdr[: body_w - 1], body_w)
-        else:
-            hdr = art.pad_vis(hdr, body_w)
-        rows = [art.paint(hdr, P.PINK_DIM)]
-        for i in range(start, end):
-            p = visible[i]
-            mark = "✦" if i == sel else " "
-            cmd = p.cmdline.replace("\n", " ")
-            # budget for command column
-            prefix = f" {mark} {p.pid:7d} {fmt_cpu(p.cpu_pct):>6} {fmt_bytes(p.rss_kib):>7}  {p.state:1}  "
-            room = max(8, body_w - art.vis_len(prefix))
-            if art.vis_len(cmd) > room:
-                # truncate by chars roughly
-                cmd = cmd[: max(0, room - 1)] + "…"
-            line = art.pad_vis(prefix + cmd, body_w)
-            if i == sel:
-                rows.append(art.paint(line, P.PINK))
-            elif p.cpu_pct >= 50 or p.rss_kib >= 512 * 1024:
-                rows.append(art.paint(line, P.WARN))
-            else:
-                rows.append(line)
-
-    body = art.box(rows, title="gaze", width=tw, body_style=(P.SILVER,))
-    runes = art.box(
+    runes_lines = (
         [
-            "↑↓ move · s/1234 sort · r reverse · / filter · space pause",
-            "k SIGTERM · K SIGKILL · q leave",
-        ],
-        title="runes",
-        width=tw,
-        body_style=(P.MUTED,),
+            _fit("↑↓ move · s/1234 sort · r rev · / filter · space pause", body_w),
+            _fit("k SIGTERM · K SIGKILL · q leave", body_w),
+        ]
+        if body_w >= 48
+        else [
+            _fit("↑↓ s/1234 sort · r rev · / filter", body_w),
+            _fit("k TERM · K KILL · q leave", body_w),
+        ]
     )
-    return "\n".join([head, "", body, "", runes])
+    runes = art.box(runes_lines, title="runes", width=tw, body_style=(P.MUTED,))
+
+    def assemble(h: int, with_runes: bool) -> str:
+        rows = _gaze_rows(visible, sel, h, body_w)
+        body = art.box(rows, title="gaze", width=tw, body_style=(P.SILVER,))
+        parts = [head, "", body]
+        if with_runes:
+            parts += ["", runes]
+        return "\n".join(parts)
+
+    # Budget: everything except process rows is measured, gaze is the flex.
+    # head + gap + gaze_chrome(+col hdr inside rows) + [gap + runes]
+    head_h = _line_count(head)
+    runes_h = _line_count(runes)
+    gaps_with = 2
+    gaps_without = 1
+    gaze_chrome = 2  # top+bottom border; col header is inside rows list
+
+    def max_h(with_runes: bool) -> int:
+        g = gaps_with if with_runes else gaps_without
+        r = runes_h if with_runes else 0
+        # rows always include 1 chrome-internal line (hdr or empty msg)
+        return th - head_h - g - gaze_chrome - r - 1
+
+    with_runes = True
+    h = max(0, max_h(True))
+    frame_s = assemble(h, True)
+
+    # Shrink process rows until it fits (wraps / status / confirm)
+    while _line_count(frame_s) > th and h > 0:
+        h -= 1
+        frame_s = assemble(h, True)
+
+    # Drop runes on tiny screens if still over
+    if _line_count(frame_s) > th:
+        with_runes = False
+        h = max(0, max_h(False))
+        frame_s = assemble(h, False)
+        while _line_count(frame_s) > th and h > 0:
+            h -= 1
+            frame_s = assemble(h, False)
+
+    # Last resort: hard clip (never scroll the header off)
+    if _line_count(frame_s) > th:
+        lines = frame_s.splitlines()
+        frame_s = "\n".join(lines[:th])
+    return frame_s
 
 
 def kill_pid(pid: int, sig: signal.Signals) -> str:
