@@ -145,6 +145,8 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("alchemy", "Alchemy — pacman cauldron (brew / sip / distill)"),
             ("alchemy search <q>", "Search repos"),
             ("alchemy brew <pkg>", "Install a package (sudo)"),
+            ("grimoire", "Grimoire — markdown notes (pages)"),
+            ("grimoire new <title>", "Create a new note + open editor"),
             ("termfix", "Reset TTY + line-edit after glitches"),
             ("tick status", "Tick + grace state"),
             ("tick on 10", "Idle clear every 10s"),

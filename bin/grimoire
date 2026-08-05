@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+"""grimoire — markdown notes for faeOS.
+
+Pages of spells and scribbles. Plain .md under ~/notes (override: GRIMOIRE_DIR).
+
+    grimoire                 interactive TUI
+    grimoire list [q]        list notes (stdout)
+    grimoire new [title]     create + open in $EDITOR
+    grimoire edit <name>     open existing
+    grimoire show <name>     print to stdout
+    grimoire -h
+
+TUI keys:
+  ↑↓          move
+  enter / e   edit (EDITOR / nano / vim)
+  v           view (read-only in-grimoire)
+  n           new note (title prompt)
+  d           delete — y/n confirm
+  /           filter
+  r           refresh
+  q / esc     leave
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
+
+import fae_termart as art
+from fae_termart import Palette as P
+
+NAME = "Grimoire"
+
+
+def notes_dir() -> Path:
+    raw = os.environ.get("GRIMOIRE_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / "notes"
+
+
+def ensure_dir() -> Path:
+    d = notes_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _fit(s: str, width: int) -> str:
+    if art.vis_len(s) <= width:
+        return s
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = art.vis_len(ch)
+        if w + cw >= width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+def _line_count(s: str) -> int:
+    return s.count("\n") + 1 if s else 0
+
+
+def _slug(title: str) -> str:
+    s = title.strip().lower()
+    s = re.sub(r"[^\w\s\-]+", "", s, flags=re.UNICODE)
+    s = re.sub(r"[\s_]+", "-", s).strip("-")
+    return s or time.strftime("%Y%m%d-%H%M%S")
+
+
+def _editor() -> list[str]:
+    for key in ("VISUAL", "EDITOR"):
+        v = os.environ.get(key, "").strip()
+        if v:
+            return v.split()
+    for cand in ("nano", "vim", "vi"):
+        p = shutil.which(cand)
+        if p:
+            return [p]
+    return ["nano"]
+
+
+@dataclass
+class Note:
+    path: Path
+    title: str
+    mtime: float
+    size: int
+    preview: str = ""
+
+    @property
+    def stem(self) -> str:
+        return self.path.stem
+
+
+def _title_from_file(path: Path) -> tuple[str, str]:
+    """Return (title, preview) from first heading / first non-empty line."""
+    title = path.stem.replace("-", " ").replace("_", " ")
+    preview = ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return title, preview
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            title = s.lstrip("#").strip() or title
+            continue
+        preview = s
+        break
+    return title, preview
+
+
+def list_notes(directory: Path | None = None) -> list[Note]:
+    d = directory or ensure_dir()
+    notes: list[Note] = []
+    try:
+        for p in d.iterdir():
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in (".md", ".txt", ".markdown"):
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            title, preview = _title_from_file(p)
+            notes.append(Note(path=p, title=title, mtime=st.st_mtime, size=st.st_size, preview=preview))
+    except OSError:
+        pass
+    notes.sort(key=lambda n: n.mtime, reverse=True)
+    return notes
+
+
+def filter_notes(notes: list[Note], filt: str) -> list[Note]:
+    q = filt.strip().lower()
+    if not q:
+        return list(notes)
+    toks = q.split()
+    out = []
+    for n in notes:
+        hay = f"{n.title} {n.stem} {n.preview} {n.path.name}".lower()
+        if all(t in hay for t in toks):
+            out.append(n)
+    return out
+
+
+def fmt_age(mtime: float) -> str:
+    sec = max(0, time.time() - mtime)
+    if sec < 60:
+        return "just now"
+    if sec < 3600:
+        return f"{int(sec // 60)}m"
+    if sec < 86400:
+        return f"{int(sec // 3600)}h"
+    if sec < 86400 * 14:
+        return f"{int(sec // 86400)}d"
+    return time.strftime("%Y-%m-%d", time.localtime(mtime))
+
+
+def create_note(title: str) -> Path:
+    d = ensure_dir()
+    slug = _slug(title)
+    path = d / f"{slug}.md"
+    n = 2
+    while path.exists():
+        path = d / f"{slug}-{n}.md"
+        n += 1
+    body = f"# {title.strip() or path.stem}\n\n"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def edit_note(path: Path) -> int:
+    cmd = _editor() + [str(path)]
+    try:
+        return int(subprocess.call(cmd))
+    except OSError as e:
+        print(f"grimoire: editor failed: {e}", file=sys.stderr)
+        return 1
+
+
+def delete_note(path: Path) -> str:
+    try:
+        path.unlink()
+        return f"burned {path.name}"
+    except FileNotFoundError:
+        return "already gone"
+    except OSError as e:
+        return f"delete failed: {e}"
+
+
+# ── one-shot ───────────────────────────────────────────────────────────
+
+def cmd_list(filt: str = "") -> int:
+    notes = filter_notes(list_notes(), filt)
+    d = notes_dir()
+    print(f"# {NAME}  {d}  ({len(notes)} pages)")
+    for n in notes:
+        print(f"{fmt_age(n.mtime):>10}  {n.path.name:<28}  {n.title}")
+    return 0
+
+
+def cmd_show(name: str) -> int:
+    path = _resolve(name)
+    if path is None:
+        print(f"grimoire: no note matching {name!r}", file=sys.stderr)
+        return 1
+    sys.stdout.write(path.read_text(encoding="utf-8", errors="replace"))
+    if not path.read_text(encoding="utf-8", errors="replace").endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+def _resolve(name: str) -> Path | None:
+    d = ensure_dir()
+    cand = Path(name).expanduser()
+    if cand.is_file():
+        return cand
+    p = d / name
+    if p.is_file():
+        return p
+    if not name.endswith((".md", ".txt", ".markdown")):
+        for ext in (".md", ".txt", ".markdown"):
+            p = d / f"{name}{ext}"
+            if p.is_file():
+                return p
+    # fuzzy stem match
+    q = name.lower().removesuffix(".md")
+    for n in list_notes(d):
+        if q in n.stem.lower() or q in n.title.lower():
+            return n.path
+    return None
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+def frame(
+    notes: list[Note],
+    sel: int,
+    filt: str,
+    mode: str,
+    status: str,
+    confirm: str,
+    root: Path,
+) -> str:
+    tw = art.term_width()
+    th = art.term_height()
+    body_w = tw - 4
+    try:
+        disp = str(root)
+        home = str(Path.home())
+        if disp.startswith(home):
+            disp = "~" + disp[len(home) :]
+    except Exception:
+        disp = str(root)
+
+    head_lines = [
+        _fit(f"pages {disp} · {len(notes)} shown", body_w),
+        _fit(
+            f"filter: {filt}_" if mode == "filter"
+            else (f"filter: {filt}" if filt else "filter: —  (/ to type)"),
+            body_w,
+        ),
+        _fit(f"mode {mode}", body_w),
+    ]
+    if status:
+        head_lines.append(_fit(status, body_w))
+    if confirm:
+        head_lines.append(art.paint(_fit(art.strip_ansi(confirm), body_w), P.WARN))
+    head = art.box(head_lines, title=NAME.upper(), width=tw, body_style=(P.MUTED,))
+
+    runes = art.box(
+        [
+            _fit("↑↓ move · enter/e edit · v view · n new · d burn", body_w),
+            _fit("/ filter · r refresh · q leave", body_w),
+        ],
+        title="runes",
+        width=tw,
+        body_style=(P.MUTED,),
+    )
+
+    def rows(h: int) -> list[str]:
+        if not notes:
+            return [_fit("(empty grimoire — press n for a new page)", body_w)]
+        if h <= 0:
+            return [_fit("(clipped)", body_w)]
+        s = max(0, min(sel, len(notes) - 1))
+        start = max(0, min(s - h // 2, max(0, len(notes) - h)))
+        end = min(len(notes), start + h)
+        hdr = f" {'':1} {'AGE':>8}  {'TITLE'}"
+        out = [art.paint(art.pad_vis(_fit(hdr, body_w), body_w), P.PINK_DIM)]
+        for i in range(start, end):
+            n = notes[i]
+            mark = "✦" if i == s else " "
+            line = f" {mark} {fmt_age(n.mtime):>8}  {n.title}"
+            if n.preview and art.vis_len(line) < body_w - 10:
+                line = f"{line}  · {n.preview}"
+            line = art.pad_vis(_fit(line, body_w), body_w)
+            out.append(art.paint(line, P.PINK) if i == s else line)
+        return out
+
+    def assemble(h: int, with_runes: bool) -> str:
+        body = art.box(rows(h), title="pages", width=tw, body_style=(P.SILVER,))
+        parts = [head, "", body]
+        if with_runes:
+            parts += ["", runes]
+        return "\n".join(parts)
+
+    head_h = _line_count(head)
+    runes_h = _line_count(runes)
+
+    def max_h(with_runes: bool) -> int:
+        g = 2 if with_runes else 1
+        r = runes_h if with_runes else 0
+        return th - head_h - g - 2 - r - 1
+
+    h = max(0, max_h(True))
+    frame_s = assemble(h, True)
+    while _line_count(frame_s) > th and h > 0:
+        h -= 1
+        frame_s = assemble(h, True)
+    if _line_count(frame_s) > th:
+        h = max(0, max_h(False))
+        frame_s = assemble(h, False)
+        while _line_count(frame_s) > th and h > 0:
+            h -= 1
+            frame_s = assemble(h, False)
+    if _line_count(frame_s) > th:
+        frame_s = "\n".join(frame_s.splitlines()[:th])
+    return frame_s
+
+
+def _prompt_title(fd: int) -> str | None:
+    """Cooked input for a new title. Returns None if cancelled."""
+    art.tui_suspend()
+    try:
+        sys.stdout.write(art.paint("\n  ✦ title of the new page: ", P.PINK))
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        return line.strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    finally:
+        art.tui_resume()
+
+
+def _view_note(fd: int, path: Path) -> None:
+    """Simple full-screen reader inside grimoire."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return
+    lines = text.splitlines() or [""]
+    top = 0
+    while True:
+        tw = art.term_width()
+        th = art.term_height()
+        body_w = tw - 4
+        # chrome: head 4 + runes 4 + gaps ≈ 10
+        h = max(4, th - 12)
+        chunk = lines[top : top + h]
+        if not chunk:
+            chunk = [""]
+        rows = [art.pad_vis(_fit(ln, body_w), body_w) for ln in chunk]
+        head = art.box(
+            [_fit(path.name, body_w), _fit(f"lines {top + 1}–{min(len(lines), top + h)}/{len(lines)}", body_w)],
+            title="read",
+            width=tw,
+            body_style=(P.MUTED,),
+        )
+        body = art.box(rows, title="ink", width=tw, body_style=(P.SILVER,))
+        runes = art.box(
+            [_fit("↑↓/pg scroll · q back", body_w)],
+            title="runes",
+            width=tw,
+            body_style=(P.MUTED,),
+        )
+        frame_s = "\n".join([head, "", body, "", runes])
+        if _line_count(frame_s) > th:
+            frame_s = "\n".join(frame_s.splitlines()[:th])
+        try:
+            art.paint_frame(fd, frame_s)
+        except OSError:
+            pass
+        key = art.tui_read_key(fd)
+        if key in ("q", "Q", "esc", "ctrl-c", "backspace", "left", "h"):
+            return
+        if key in ("down", "j", "enter"):
+            top = min(max(0, len(lines) - h), top + 1)
+        elif key in ("up", "k"):
+            top = max(0, top - 1)
+        elif key == "pgdn" or key == "space":
+            top = min(max(0, len(lines) - h), top + h)
+        elif key == "pgup":
+            top = max(0, top - h)
+        elif key == "home" or key == "g":
+            top = 0
+        elif key == "end" or key == "G":
+            top = max(0, len(lines) - h)
+
+
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return cmd_list()
+
+    art.tui_begin(fd, "grimoire")
+    root = ensure_dir()
+    all_notes: list[Note] = []
+    filt = ""
+    mode = "nav"
+    sel = 0
+    sel_name: str | None = None
+    status = ""
+    confirm_msg = ""
+    pending: Note | None = None
+    stick = True
+
+    def refresh() -> None:
+        nonlocal all_notes, status
+        all_notes = list_notes(root)
+        status = f"{len(all_notes)} pages"
+
+    def visible() -> list[Note]:
+        return filter_notes(all_notes, filt)
+
+    def leave_edit(path: Path) -> None:
+        """Drop TUI, run editor, come back."""
+        nonlocal status
+        art.tui_cleanup()
+        print(art.paint(f"\n  ✦ opening {path.name} …\n", P.PINK))
+        rc = edit_note(path)
+        try:
+            input(art.paint("  press Enter to return to grimoire… ", P.MUTED))
+        except EOFError:
+            pass
+        new_fd = art.tui_open_tty()
+        if new_fd is None:
+            raise SystemExit(rc)
+        art.tui_begin(new_fd, "grimoire")
+        fd_box[0] = new_fd
+        refresh()
+        status = f"edited {path.name}" if rc == 0 else f"editor exit {rc}"
+
+    fd_box = [fd]
+
+    try:
+        refresh()
+        while True:
+            vis = visible()
+            if stick and sel_name is not None:
+                for i, n in enumerate(vis):
+                    if n.path.name == sel_name:
+                        sel = i
+                        break
+            stick = False
+            if sel >= len(vis):
+                sel = max(0, len(vis) - 1)
+            if vis:
+                sel_name = vis[sel].path.name
+            else:
+                sel_name = None
+
+            body = frame(vis, sel, filt, mode, status, confirm_msg, root)
+            status = ""
+            try:
+                art.paint_frame(fd_box[0], body)
+            except OSError:
+                pass
+
+            key = art.tui_read_key(fd_box[0])
+
+            if mode == "confirm":
+                if key in ("y", "Y") and pending is not None:
+                    status = delete_note(pending.path)
+                    pending = None
+                    confirm_msg = ""
+                    mode = "nav"
+                    refresh()
+                    stick = True
+                elif key in ("n", "N", "esc", "q"):
+                    pending = None
+                    confirm_msg = ""
+                    mode = "nav"
+                    status = "kept"
+                continue
+
+            if mode == "filter":
+                if key in ("esc", "enter"):
+                    mode = "nav"
+                    stick = True
+                elif key == "backspace":
+                    filt = filt[:-1]
+                    stick = True
+                elif key in ("clear", "ctrl-u"):
+                    filt = ""
+                    stick = True
+                elif key == "space":
+                    filt += " "
+                    stick = True
+                elif len(key) == 1 and key.isprintable():
+                    filt += key
+                    stick = True
+                continue
+
+            if key in ("q", "Q", "esc", "ctrl-c"):
+                art.tui_cleanup()
+                return 0
+            if key == "up":
+                sel = max(0, sel - 1)
+                if vis:
+                    sel_name = vis[sel].path.name
+            elif key == "down":
+                sel = min(max(0, len(vis) - 1), sel + 1)
+                if vis:
+                    sel_name = vis[sel].path.name
+            elif key == "pgup":
+                sel = max(0, sel - 10)
+            elif key == "pgdn":
+                sel = min(max(0, len(vis) - 1), sel + 10)
+            elif key == "home":
+                sel = 0
+            elif key == "end":
+                sel = max(0, len(vis) - 1)
+            elif key == "/":
+                mode = "filter"
+            elif key == "r":
+                refresh()
+                stick = True
+            elif key == "n":
+                title = _prompt_title(fd_box[0])
+                if title is None or title == "":
+                    status = "new page cancelled"
+                else:
+                    path = create_note(title)
+                    leave_edit(path)
+                    stick = True
+                    sel_name = path.name
+            elif key in ("enter", "e", "right", "l"):
+                if not vis:
+                    status = "no page"
+                else:
+                    leave_edit(vis[sel].path)
+                    stick = True
+            elif key == "v":
+                if not vis:
+                    status = "no page"
+                else:
+                    _view_note(fd_box[0], vis[sel].path)
+            elif key in ("d", "D", "delete"):
+                if not vis:
+                    status = "no page"
+                else:
+                    pending = vis[sel]
+                    mode = "confirm"
+                    confirm_msg = f"burn {pending.path.name}?  y / n"
+            elif key in ("clear", "ctrl-u"):
+                filt = ""
+                stick = True
+    finally:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    if not argv:
+        return run_tui()
+    cmd = argv[0]
+    rest = argv[1:]
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if cmd in ("list", "ls"):
+        return cmd_list(" ".join(rest))
+    if cmd in ("new", "n", "add"):
+        title = " ".join(rest) if rest else time.strftime("note %Y-%m-%d %H:%M")
+        path = create_note(title)
+        print(path)
+        return edit_note(path)
+    if cmd in ("edit", "e", "open"):
+        if not rest:
+            print("grimoire edit <name>", file=sys.stderr)
+            return 2
+        path = _resolve(" ".join(rest))
+        if path is None:
+            print(f"grimoire: not found", file=sys.stderr)
+            return 1
+        return edit_note(path)
+    if cmd in ("show", "cat", "print"):
+        if not rest:
+            print("grimoire show <name>", file=sys.stderr)
+            return 2
+        return cmd_show(" ".join(rest))
+    if cmd in ("tui", "ui"):
+        return run_tui()
+    # bare name → edit
+    path = _resolve(" ".join(argv))
+    if path is not None:
+        return edit_note(path)
+    print(f"grimoire: unknown {cmd!r} — try grimoire -h", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

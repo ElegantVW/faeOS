@@ -39,6 +39,7 @@
 | **The Eye** | Process watcher (CPU/RSS/kill) | new | [docs/plans/eye.md](docs/plans/eye.md) |
 | **Vault** | Disk map (recursive sizes, ncdu-style) | new | [docs/plans/vault.md](docs/plans/vault.md) |
 | **Alchemy** | Package cauldron (pacman brew/sip/distill) | new | [docs/plans/alchemy.md](docs/plans/alchemy.md) |
+| **Grimoire** | Markdown notes (`~/notes`) | new | [docs/plans/grimoire.md](docs/plans/grimoire.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -53,7 +54,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 | App | fae name | Role |
 |-----|----------|------|
 | Quick launcher | Summon ✅ | dmenu-style: type a command → run |
-| Notes | Grimoire | markdown notes, pages, tags |
+| Notes | Grimoire ✅ | markdown notes, pages, tags |
 | Package frontend | Alchemy ✅ | pacman menu: brew (install) / sip (update) / distill (clean) |
 | Task manager | The Eye ✅ | htop-like: CPU/RAM/disk/processes/kill |
 | To-dos | Quests | todo.txt-style questlog, due dates |
@@ -108,6 +109,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-05 (grimoire)** — **Grimoire v1: markdown notes.** Pages in `~/notes` (or `$GRIMOIRE_DIR`): TUI list by mtime, filter, new/edit via `$EDITOR`/`nano`, in-app view, burn (delete) with y/n. CLI: `list` `new` `edit` `show`. Height-budgeted. Registered scroll + [docs/plans/grimoire.md](docs/plans/grimoire.md); Tier-1 Grimoire marked done.
 - **2026-08-05 (alchemy progress)** — **Alchemy sip no longer looks hung.** Privileged runs: `sudo -v` on the real tty first, then stream `sudo -n pacman` with a Siren-style panel — phase name, █░ fill (package n/m, download %, or phase ladder), **elapsed clock that ticks every 250ms even when pacman is silent**, last line + short log tail. Pulse marquee while waiting. Covers brew/pour/sip/distill.
 - **2026-08-05 (alchemy)** — **Alchemy v1: pacman cauldron.** TUI: local installed list + search view (tab), filter/query (`/`), brew (`i`/enter) / pour (`d`) / sip (`u` = -Syu) / distill (`c` = -Sc) each with y/n then drop to tty for `sudo pacman` (password ok) and re-enter. CLI: `list` `search` `brew` `pour` `sip` `distill`. Height-budgeted layout. Registered scroll + [docs/plans/alchemy.md](docs/plans/alchemy.md); Tier-1 Alchemy marked done.
 - **2026-08-05 (vault delete)** — **Vault: delete with confirm.** `d` on a row → yellow confirm `delete dir|file name (size)? y/n`; `y` unlinks files/links or `shutil.rmtree` dirs (no symlink follow into trees); refuses `/` and `$HOME`; invalidates scan cache + rescans; `n`/esc cancels. Runes + plan updated.

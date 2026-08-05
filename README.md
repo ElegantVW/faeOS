@@ -31,6 +31,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | `eye` / `eye list 15` | The Eye — process watcher (CPU · RSS · kill); one-shot table |
 | `vault` / `vault list ~` | Vault — disk map (recursive sizes); dive toward heavy dirs |
 | `alchemy` / `brew` / `sip` / `distill` | Alchemy — pacman UI: search, install, upgrade, clean cache |
+| `grimoire` / `grimoire new …` | Grimoire — markdown notes under `~/notes` |
 | `spellbook` | File-manager TUI (j/k move, ? help, n/d/r/e dialogs) |
 | `tick` / `termfix` | Screen tick + TTY line-edit recovery |
 
@@ -47,6 +48,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | **The Eye** | Processes / CPU / RAM |
 | **Vault** | Disk usage map |
 | **Alchemy** | Packages (pacman) |
+| **Grimoire** | Notes (markdown) |
 
 Prompt: framed pink status box (user · mood · music · RAM/CPU/HDD/temp) + `>`.
 
