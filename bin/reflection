@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -600,26 +601,63 @@ def backend_report() -> str:
 
 
 def preview_chafa(path: Path, cols: int, rows: int) -> list[str]:
-    if not _have("chafa") or not path.is_file():
+    """Render image to exactly ≤rows terminal lines, each ≤cols visible cells.
+
+    Always forces ``-f symbols``: piped chafa otherwise emits Kitty/sixel
+    (one opaque line) so the looking glass looks empty and height math dies.
+    Clamped so art.box() never re-wraps (which shreds ANSI and inflates height).
+    """
+    if not _have("chafa") or not path.is_file() or rows < 1 or cols < 4:
         return []
-    # size as WxH cells
-    size = f"{max(8, cols)}x{max(4, rows)}"
+    cols = max(8, cols)
+    rows = max(1, rows)
+    size = f"{cols}x{rows}"
+    # Strip cursor / kitty noise chafa sometimes prefixes
+    junk_re = re.compile(
+        r"\x1b\[\?25[lh]"  # cursor hide/show
+        r"|\x1b_G[^\x1b]*\x1b\\"  # kitty graphics
+        r"|\x1bP[^\x1b]*\x1b\\"  # sixel DCS (coarse)
+    )
     try:
         r = subprocess.run(
             [
                 "chafa",
                 f"--size={size}",
                 "--animate=off",
+                "-f",
+                "symbols",  # never sixel/kitty into a box
                 str(path),
             ],
             capture_output=True,
             text=True,
             timeout=8,
+            env={**os.environ, "TERM": os.environ.get("TERM", "xterm-256color")},
         )
-        if r.returncode != 0:
+        if r.returncode != 0 or not r.stdout.strip():
             return []
-        lines = r.stdout.splitlines()
-        return lines[:rows]
+        text = junk_re.sub("", r.stdout)
+        out: list[str] = []
+        for raw in text.splitlines():
+            if not raw and out:
+                continue
+            # Keep ANSI if it fits; otherwise hard-cut plain (box would re-wrap).
+            plain = art.strip_ansi(raw)
+            if not plain.strip() and not out:
+                continue
+            if art.vis_len(plain) > cols:
+                cut: list[str] = []
+                w = 0
+                for ch in plain:
+                    cw = art.vis_len(ch)
+                    if w + cw > cols:
+                        break
+                    cut.append(ch)
+                    w += cw
+                raw = "".join(cut)
+            out.append(raw)
+            if len(out) >= rows:
+                break
+        return out[:rows]
     except (OSError, subprocess.TimeoutExpired):
         return []
 
@@ -713,6 +751,194 @@ def cmd_open(path: Path | None = None) -> int:
 # ── TUI ────────────────────────────────────────────────────────────────
 
 
+def _mirror_rows(
+    shots: list[Shot],
+    sel: int,
+    n_rows: int,
+    body_w: int,
+) -> list[str]:
+    """Exactly n_rows list lines (padded), newest-first shots."""
+    n_rows = max(1, n_rows)
+    if not shots:
+        rows = [art.pad_vis(_fit("(empty gallery — f full · w window · r region)", body_w), body_w)]
+        while len(rows) < n_rows:
+            rows.append(" " * body_w)
+        return rows[:n_rows]
+
+    start = max(0, min(sel - n_rows // 2, max(0, len(shots) - n_rows)))
+    end = min(len(shots), start + n_rows)
+    rows: list[str] = []
+    for i in range(start, end):
+        s = shots[i]
+        mark = "✦" if i == sel else " "
+        dim = f"{s.width}×{s.height}" if s.width else "?"
+        left = f" {mark} {_age(s.ts):>4}  {s.mode:<6}  "
+        rest = f"{dim}  {s.path.name}"
+        line = left + _fit(rest, max(4, body_w - art.vis_len(left)))
+        line = art.pad_vis(_fit(line, body_w), body_w)
+        if i == sel:
+            rows.append(art.paint(line, P.PINK))
+        else:
+            rows.append(line)
+    while len(rows) < n_rows:
+        rows.append(" " * body_w)
+    return rows[:n_rows]
+
+
+def _glass_rows(shot: Shot | None, body_w: int, n_rows: int) -> list[str]:
+    """Looking-glass body: chafa preview or text fallback, exactly n_rows."""
+    n_rows = max(1, n_rows)
+    if shot is None:
+        rows = [
+            art.pad_vis(
+                _fit("(no mirrors yet — f full · w window · r region)", body_w),
+                body_w,
+            )
+        ]
+    else:
+        chafa_lines = preview_chafa(shot.path, body_w, n_rows)
+        if chafa_lines:
+            rows = list(chafa_lines)
+        else:
+            dim = f"{shot.width}×{shot.height}" if shot.width else "?"
+            rows = [
+                art.pad_vis(_fit(shot.path.name, body_w), body_w),
+                art.pad_vis(
+                    _fit(f"{dim} · {_fmt_bytes(shot.bytes)} · {shot.mode}", body_w),
+                    body_w,
+                ),
+                art.pad_vis(_fit(str(shot.path), body_w), body_w),
+            ]
+    while len(rows) < n_rows:
+        rows.append(" " * body_w)
+    return rows[:n_rows]
+
+
+def build_frame(
+    shots: list[Shot],
+    sel: int,
+    *,
+    flash: str,
+    mode: str,
+    pending: Shot | None,
+) -> tuple[str, int]:
+    """Height-safe layout: head + mirrors + looking glass + Runes always fit.
+
+    Returns (frame, list_rows_used) so key handlers know page size.
+    Shrinks list first, then glass; never hard-clips the Runes footer.
+    """
+    tw = art.term_width()
+    th = art.term_height()
+    # art.box caps outer at 96 and uses body_w = outer - 4
+    outer = max(36, min(tw, 96))
+    body_w = outer - 4
+
+    st = flash or f"{len(shots)} mirrors · {shots_dir().name}/"
+    head_lines = [_fit(st, body_w)]
+    if mode == "confirm_del" and pending:
+        head_lines.append(
+            art.paint(
+                _fit(f"shatter this mirror?  y / n  ·  {pending.path.name}", body_w),
+                P.WARN,
+            )
+        )
+    head = art.box(
+        head_lines,
+        title=f"{NAME} ✦ gallery",
+        width=outer,
+        body_style=(P.MUTED,),
+    )
+    runes = art.box(
+        [
+            _fit("↑↓ move · enter open · f full · w window · r region", body_w),
+            _fit("d delete · o external · y path · q leave", body_w),
+        ],
+        title="Runes",
+        width=outer,
+        body_style=(P.MUTED,),
+    )
+    head_h = _line_count(head)
+    runes_h = _line_count(runes)
+    # 3 blank separators between 4 panels
+    gaps = 3
+    fixed = head_h + runes_h + gaps
+    # each flexible panel needs top+bottom border (2) + ≥1 content
+    remain = th - fixed
+    if remain < 6:
+        # tiny terminal: drop glass, keep list+runes
+        list_content = max(1, remain - 2)
+        glass_content = 0
+    else:
+        # prefer a useful glass (~40% of remain, content rows), min 3 max 12
+        glass_total_budget = max(5, min(14, remain * 2 // 5))
+        glass_content = max(3, glass_total_budget - 2)
+        list_total = remain - (glass_content + 2)
+        list_content = max(1, list_total - 2)
+
+    shot = shots[sel] if shots else None
+
+    def assemble(lc: int, gc: int) -> str:
+        body = art.box(
+            _mirror_rows(shots, sel, max(1, lc), body_w),
+            title="mirrors",
+            width=outer,
+            body_style=(P.SILVER,),
+        )
+        parts = [head, "", body]
+        if gc > 0:
+            glass = art.box(
+                _glass_rows(shot, body_w, gc),
+                title="looking glass",
+                width=outer,
+                body_style=(P.SILVER,),
+            )
+            parts += ["", glass]
+        parts += ["", runes]
+        return "\n".join(parts)
+
+    frame = assemble(list_content, glass_content)
+    # Shrink until it fits — list first, then glass. Always keep Runes.
+    guard = 0
+    while _line_count(frame) > th and guard < 40:
+        guard += 1
+        if list_content > 1:
+            list_content -= 1
+        elif glass_content > 3:
+            glass_content -= 1
+        elif glass_content > 0:
+            glass_content = 0
+        elif list_content > 0:
+            list_content = max(1, list_content)  # stuck
+            break
+        else:
+            break
+        frame = assemble(list_content, glass_content)
+
+    # last resort: still over (huge head?) — trim blank gaps only by reassemble without glass
+    if _line_count(frame) > th:
+        frame = assemble(max(1, list_content), 0)
+    if _line_count(frame) > th:
+        # keep runes: drop from top of mirrors only via 1-line list
+        frame = assemble(1, 0)
+    # absolute last resort — should almost never hit
+    if _line_count(frame) > th:
+        lines = frame.splitlines()
+        # keep tail (runes) by dropping from the middle of list if needed
+        runes_lines = runes.splitlines()
+        head_lines_f = head.splitlines()
+        keep_tail = len(runes_lines) + 1  # blank + runes
+        keep_head = len(head_lines_f) + 1
+        mid_budget = max(0, th - keep_head - keep_tail)
+        mid = lines[keep_head : len(lines) - keep_tail]
+        frame = "\n".join(
+            head_lines_f + [""] + mid[:mid_budget] + ([""] if mid_budget else []) + runes_lines
+        )
+        if _line_count(frame) > th:
+            frame = "\n".join(frame.splitlines()[:th])
+
+    return frame, list_content
+
+
 def run_tui() -> int:
     fd = art.tui_open_tty()
     if fd is None:
@@ -723,101 +949,16 @@ def run_tui() -> int:
     flash = ""
     mode = "nav"  # nav | confirm_del
     pending: Shot | None = None
-    # rebuild list each paint
+    list_rows = 3
     try:
         while True:
             shots = list_shots()
             if sel >= len(shots):
                 sel = max(0, len(shots) - 1)
 
-            tw = art.term_width()
-            th = art.term_height()
-            body_w = tw - 4
-
-            st = flash or f"{len(shots)} mirrors · {shots_dir().name}/"
-            head_lines = [_fit(st, body_w)]
-            if mode == "confirm_del" and pending:
-                head_lines.append(
-                    art.paint(
-                        _fit(f"shatter this mirror?  y / n  ·  {pending.path.name}", body_w),
-                        P.WARN,
-                    )
-                )
-            head = art.box(
-                head_lines,
-                title=f"{NAME} ✦ gallery",
-                width=tw,
-                body_style=(P.MUTED,),
+            frame, list_rows = build_frame(
+                shots, sel, flash=flash, mode=mode, pending=pending
             )
-            runes = art.box(
-                [
-                    _fit("↑↓ move · enter open · f full · w window · r region", body_w),
-                    _fit("d delete · o external · y path · q leave", body_w),
-                ],
-                title="Runes",
-                width=tw,
-                body_style=(P.MUTED,),
-            )
-
-            # preview pane
-            prev_h = max(6, min(14, th // 3))
-            prev_rows: list[str] = []
-            if shots:
-                s = shots[sel]
-                chafa_lines = preview_chafa(s.path, body_w, prev_h - 1)
-                if chafa_lines:
-                    for line in chafa_lines:
-                        # chafa already has ANSI; pad carefully
-                        prev_rows.append(line[: tw * 4])  # keep ansi, soft cap
-                else:
-                    dim = f"{s.width}×{s.height}" if s.width else "?"
-                    prev_rows = [
-                        art.pad_vis(_fit(f"{s.path.name}", body_w), body_w),
-                        art.pad_vis(_fit(f"{dim} · {_fmt_bytes(s.bytes)} · {s.mode}", body_w), body_w),
-                        art.pad_vis(_fit(str(s.path), body_w), body_w),
-                    ]
-            else:
-                prev_rows = [
-                    art.pad_vis(
-                        _fit("(no mirrors yet — f full · w window · r region)", body_w),
-                        body_w,
-                    )
-                ]
-            while len(prev_rows) < 3:
-                prev_rows.append(" " * min(body_w, 1))
-            prev_box = art.box(
-                prev_rows[:prev_h],
-                title="looking glass",
-                width=tw,
-                body_style=(P.SILVER,),
-            )
-
-            used = _line_count(head) + _line_count(runes) + _line_count(prev_box) + 4
-            avail = max(3, th - used)
-
-            rows: list[str] = []
-            if not shots:
-                rows = [art.pad_vis(_fit("(empty gallery)", body_w), body_w)]
-            else:
-                start = max(0, min(sel - avail // 2, max(0, len(shots) - avail)))
-                end = min(len(shots), start + avail)
-                for i in range(start, end):
-                    s = shots[i]
-                    mark = "✦" if i == sel else " "
-                    dim = f"{s.width}×{s.height}" if s.width else "?"
-                    left = f" {mark} {_age(s.ts):>4}  {s.mode:<6}  "
-                    rest = f"{dim}  {s.path.name}"
-                    line = left + _fit(rest, max(4, body_w - art.vis_len(left)))
-                    line = art.pad_vis(_fit(line, body_w), body_w)
-                    if i == sel:
-                        rows.append(art.paint(line, P.PINK))
-                    else:
-                        rows.append(line)
-            body = art.box(rows or [" "], title="mirrors", width=tw, body_style=(P.SILVER,))
-
-            frame = "\n".join([head, "", body, "", prev_box, "", runes])
-            if _line_count(frame) > th:
-                frame = "\n".join(frame.splitlines()[:th])
             try:
                 art.paint_frame(fd, frame)
             except OSError:
@@ -850,9 +991,9 @@ def run_tui() -> int:
             elif key == "end":
                 sel = max(0, len(shots) - 1)
             elif key == "pgup":
-                sel = max(0, sel - avail)
+                sel = max(0, sel - list_rows)
             elif key == "pgdn":
-                sel = min(max(0, len(shots) - 1), sel + avail)
+                sel = min(max(0, len(shots) - 1), sel + list_rows)
             elif key in ("enter", "right", " "):
                 if shots:
                     # enlarge chafa in a one-shot suspend view
