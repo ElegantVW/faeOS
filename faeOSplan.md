@@ -47,6 +47,7 @@
 | **Bulwark** | Host protection (Aegis/Purity/Sentinel/Ward) — first-party Rust | new | [docs/plans/bulwark.md](docs/plans/bulwark.md) |
 | **Imbue** | Clipboard memory (history / re-paste) | new | [docs/plans/imbue.md](docs/plans/imbue.md) |
 | **Reflection** | Screenshots & gallery (full / window / region) | new | [docs/plans/reflection.md](docs/plans/reflection.md) |
+| **Fairy Lantern** | GBA emulator from scratch (light a fable) | new | [docs/plans/fairy-lantern.md](docs/plans/fairy-lantern.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -89,7 +90,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 | QR codes | Sigil | wifi creds etc. in seconds |
 | File search | Seek | instant home-wide search |
 
-**Tier 3 — flavor + niche:** Mantle (theme switcher), Tales (podcasts, or into Siren), Tongues (offline translate), Gale (speed test), Lunacy (moon), Proverbs (login motd), Hearth (IRC), Immolation (secure wipe), Puppeteer (systemd unit manager), Scriptorium (screen record).
+**Tier 3 — flavor + niche:** Mantle (theme switcher), Tales (podcasts, or into Siren), Tongues (offline translate), Gale (speed test), Lunacy (moon), Proverbs (login motd), Hearth (IRC), Immolation (secure wipe), Puppeteer (systemd unit manager), Scriptorium (screen record), **Fairy Lantern** (GBA from scratch).
 
 **Infra gaps (not apps):** clipboard daemon, tmux defaults, autologin + silent boot, LUKS setup, pipewire tuning — the installer layer (Phase 2).
 

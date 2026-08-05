@@ -1,0 +1,501 @@
+//! ARM state decode/execute (subset → expand over phases).
+
+use super::Cpu;
+use crate::bus::Bus;
+
+pub fn step(cpu: &mut Cpu, bus: &mut Bus) -> u32 {
+    let pc = cpu.r[15];
+    let op = bus.read32(pc);
+    cpu.r[15] = pc.wrapping_add(4);
+
+    if !cond_ok(cpu, op >> 28) {
+        cpu.cycles += 1;
+        return 1;
+    }
+
+    let cycles = exec(cpu, bus, op);
+    cpu.cycles += cycles as u64;
+    cycles
+}
+
+fn cond_ok(cpu: &Cpu, cond: u32) -> bool {
+    let n = cpu.cpsr.n;
+    let z = cpu.cpsr.z;
+    let c = cpu.cpsr.c;
+    let v = cpu.cpsr.v;
+    match cond {
+        0x0 => z,                          // EQ
+        0x1 => !z,                         // NE
+        0x2 => c,                          // CS/HS
+        0x3 => !c,                         // CC/LO
+        0x4 => n,                          // MI
+        0x5 => !n,                         // PL
+        0x6 => v,                          // VS
+        0x7 => !v,                         // VC
+        0x8 => c && !z,                    // HI
+        0x9 => !c || z,                    // LS
+        0xA => n == v,                     // GE
+        0xB => n != v,                     // LT
+        0xC => !z && n == v,               // GT
+        0xD => z || n != v,                // LE
+        0xE => true,                       // AL
+        0xF => false,                      // NV (ARMv4 rarely)
+        _ => true,
+    }
+}
+
+fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
+    // Branch and exchange
+    if (op & 0x0FFF_FFF0) == 0x012F_FF10 {
+        let rm = (op & 0xF) as usize;
+        let v = cpu.r[rm];
+        cpu.cpsr.thumb = (v & 1) != 0;
+        cpu.r[15] = v & !1;
+        return 3;
+    }
+
+    // B / BL
+    if (op & 0x0E00_0000) == 0x0A00_0000 {
+        let link = (op & (1 << 24)) != 0;
+        let imm = (op & 0x00FF_FFFF) as i32;
+        let imm = (imm << 8) >> 8;
+        let offset = (imm * 4) as u32;
+        // PC already advanced by 4; ARM says offset from PC+8 = (PC_after_fetch)+4
+        let target = cpu.r[15].wrapping_add(4).wrapping_add(offset);
+        if link {
+            cpu.r[14] = cpu.r[15].wrapping_sub(4); // return to next insn
+        }
+        cpu.r[15] = target;
+        return 3;
+    }
+
+    // SWI
+    if (op & 0x0F00_0000) == 0x0F00_0000 {
+        // HLE: ignore comment field; bios_hle later
+        let _comment = op & 0x00FF_FFFF;
+        // Soft stub: treat as NOP for homebrew that shouldn't hit SWI yet
+        return 3;
+    }
+
+    // MRS
+    if (op & 0x0FBF_0FFF) == 0x010F_0000 {
+        let rd = ((op >> 12) & 0xF) as usize;
+        let spsr = (op & (1 << 22)) != 0;
+        let v = if spsr {
+            cpu.spsr.to_u32()
+        } else {
+            cpu.cpsr.to_u32()
+        };
+        if rd != 15 {
+            cpu.r[rd] = v;
+        }
+        return 1;
+    }
+
+    // MSR (reg)
+    if (op & 0x0FB0_FFF0) == 0x0120_F000 {
+        let rm = (op & 0xF) as usize;
+        let spsr = (op & (1 << 22)) != 0;
+        let v = cpu.r[rm];
+        // only flags for now if bit 19 (field_mask flags)
+        let mask = (op >> 16) & 0xF;
+        apply_msr(cpu, spsr, mask, v);
+        return 1;
+    }
+
+    // Multiply
+    if (op & 0x0FC0_00F0) == 0x0000_0090 {
+        let rd = ((op >> 16) & 0xF) as usize;
+        let rn = ((op >> 12) & 0xF) as usize;
+        let rs = ((op >> 8) & 0xF) as usize;
+        let rm = (op & 0xF) as usize;
+        let a = (op & (1 << 21)) != 0;
+        let s = (op & (1 << 20)) != 0;
+        let mut result = cpu.r[rm].wrapping_mul(cpu.r[rs]);
+        if a {
+            result = result.wrapping_add(cpu.r[rn]);
+        }
+        if rd != 15 {
+            cpu.r[rd] = result;
+        }
+        if s {
+            cpu.cpsr.set_nz(result);
+        }
+        return 2;
+    }
+
+    // Single data transfer LDR/STR
+    if (op & 0x0C00_0000) == 0x0400_0000 {
+        return ldr_str(cpu, bus, op);
+    }
+
+    // Block data transfer LDM/STM
+    if (op & 0x0E00_0000) == 0x0800_0000 {
+        return ldm_stm(cpu, bus, op);
+    }
+
+    // Data processing
+    if (op & 0x0C00_0000) == 0x0000_0000 {
+        // exclude multiplies already handled (bit4=1 bit7=1)
+        if (op & 0x0FC0_00F0) == 0x0000_0090 {
+            return 1;
+        }
+        return data_processing(cpu, bus, op);
+    }
+
+    // Unknown — soft NOP (log in debug builds later)
+    1
+}
+
+fn apply_msr(cpu: &mut Cpu, spsr: bool, field_mask: u32, v: u32) {
+    let dest = if spsr {
+        &mut cpu.spsr
+    } else {
+        &mut cpu.cpsr
+    };
+    if field_mask & 8 != 0 {
+        // flags
+        dest.n = v & (1 << 31) != 0;
+        dest.z = v & (1 << 30) != 0;
+        dest.c = v & (1 << 29) != 0;
+        dest.v = v & (1 << 28) != 0;
+    }
+    if field_mask & 1 != 0 && !spsr {
+        dest.mode = (v & 0x1F) as u8;
+        dest.thumb = v & (1 << 5) != 0;
+        dest.fiq_disable = v & (1 << 6) != 0;
+        dest.irq_disable = v & (1 << 7) != 0;
+    }
+}
+
+fn barrel_shift(cpu: &Cpu, op: u32, carry_in: bool) -> (u32, bool) {
+    // bit 25: immediate
+    if (op & (1 << 25)) != 0 {
+        let imm = op & 0xFF;
+        let rot = ((op >> 8) & 0xF) * 2;
+        if rot == 0 {
+            return (imm, carry_in);
+        }
+        let v = imm.rotate_right(rot);
+        let c = (v & (1 << 31)) != 0;
+        return (v, c);
+    }
+    // register
+    let rm = (op & 0xF) as usize;
+    let mut val = if rm == 15 {
+        cpu.pc_arm_read()
+    } else {
+        cpu.r[rm]
+    };
+    let shift_imm = (op & (1 << 4)) == 0;
+    let shift_type = (op >> 5) & 3;
+    let (amount, _) = if shift_imm {
+        (((op >> 7) & 0x1F), false)
+    } else {
+        let rs = ((op >> 8) & 0xF) as usize;
+        (cpu.r[rs] & 0xFF, true)
+    };
+
+    match shift_type {
+        0 => {
+            // LSL
+            if amount == 0 {
+                (val, carry_in)
+            } else if amount < 32 {
+                let c = (val >> (32 - amount)) & 1 != 0;
+                (val << amount, c)
+            } else if amount == 32 {
+                (0, (val & 1) != 0)
+            } else {
+                (0, false)
+            }
+        }
+        1 => {
+            // LSR
+            if !shift_imm && amount == 0 {
+                return (val, carry_in);
+            }
+            let a = if shift_imm && amount == 0 { 32 } else { amount };
+            if a == 0 {
+                (val, carry_in)
+            } else if a < 32 {
+                let c = (val >> (a - 1)) & 1 != 0;
+                (val >> a, c)
+            } else if a == 32 {
+                (0, (val >> 31) & 1 != 0)
+            } else {
+                (0, false)
+            }
+        }
+        2 => {
+            // ASR
+            let a = if shift_imm && amount == 0 { 32 } else { amount };
+            if a == 0 {
+                (val, carry_in)
+            } else if a < 32 {
+                let c = (val >> (a - 1)) & 1 != 0;
+                (((val as i32) >> a) as u32, c)
+            } else {
+                let c = (val >> 31) & 1 != 0;
+                let v = if c { 0xFFFF_FFFF } else { 0 };
+                (v, c)
+            }
+        }
+        3 => {
+            // ROR / RRX
+            if shift_imm && amount == 0 {
+                // RRX
+                let c = (val & 1) != 0;
+                let v = (val >> 1) | if carry_in { 1 << 31 } else { 0 };
+                (v, c)
+            } else {
+                let a = amount & 31;
+                if amount == 0 {
+                    (val, carry_in)
+                } else if a == 0 {
+                    ((val >> 31) & 1 != 0, (val >> 31) & 1 != 0); // amount multiple of 32
+                    let c = (val >> 31) & 1 != 0;
+                    (val, c)
+                } else {
+                    let c = (val >> (a - 1)) & 1 != 0;
+                    (val.rotate_right(a), c)
+                }
+            }
+        }
+        _ => (val, carry_in),
+    }
+}
+
+fn data_processing(cpu: &mut Cpu, _bus: &mut Bus, op: u32) -> u32 {
+    let opcode = (op >> 21) & 0xF;
+    let s = (op & (1 << 20)) != 0;
+    let rn_i = ((op >> 16) & 0xF) as usize;
+    let rd = ((op >> 12) & 0xF) as usize;
+    let rn = if rn_i == 15 {
+        cpu.pc_arm_read()
+    } else {
+        cpu.r[rn_i]
+    };
+    let (oper2, sh_c) = barrel_shift(cpu, op, cpu.cpsr.c);
+
+    let (result, write, set_c, set_v, c_out, v_out) = match opcode {
+        0x0 => (rn & oper2, true, false, false, sh_c, cpu.cpsr.v), // AND
+        0x1 => (rn ^ oper2, true, false, false, sh_c, cpu.cpsr.v), // EOR
+        0x2 => {
+            // SUB
+            let (r, c) = rn.overflowing_sub(oper2);
+            let v = ((rn ^ oper2) & (rn ^ r)) >> 31 != 0;
+            (r, true, true, true, !c, v) // ARM C = !borrow
+        }
+        0x3 => {
+            // RSB
+            let (r, c) = oper2.overflowing_sub(rn);
+            let v = ((oper2 ^ rn) & (oper2 ^ r)) >> 31 != 0;
+            (r, true, true, true, !c, v)
+        }
+        0x4 => {
+            // ADD
+            let (r, c) = rn.overflowing_add(oper2);
+            let v = (!(rn ^ oper2) & (rn ^ r)) >> 31 != 0;
+            (r, true, true, true, c, v)
+        }
+        0x5 => {
+            // ADC
+            let carry = if cpu.cpsr.c { 1u32 } else { 0 };
+            let (r1, c1) = rn.overflowing_add(oper2);
+            let (r, c2) = r1.overflowing_add(carry);
+            let v = (!(rn ^ oper2) & (rn ^ r)) >> 31 != 0;
+            (r, true, true, true, c1 || c2, v)
+        }
+        0x6 => {
+            // SBC
+            let carry = if cpu.cpsr.c { 0u32 } else { 1 }; // borrow
+            let (r1, c1) = rn.overflowing_sub(oper2);
+            let (r, c2) = r1.overflowing_sub(carry);
+            let v = ((rn ^ oper2) & (rn ^ r)) >> 31 != 0;
+            (r, true, true, true, !(c1 || c2), v)
+        }
+        0x7 => {
+            // RSC
+            let carry = if cpu.cpsr.c { 0u32 } else { 1 };
+            let (r1, c1) = oper2.overflowing_sub(rn);
+            let (r, c2) = r1.overflowing_sub(carry);
+            let v = ((oper2 ^ rn) & (oper2 ^ r)) >> 31 != 0;
+            (r, true, true, true, !(c1 || c2), v)
+        }
+        0x8 => (rn & oper2, false, false, false, sh_c, cpu.cpsr.v), // TST
+        0x9 => (rn ^ oper2, false, false, false, sh_c, cpu.cpsr.v), // TEQ
+        0xA => {
+            // CMP
+            let (r, c) = rn.overflowing_sub(oper2);
+            let v = ((rn ^ oper2) & (rn ^ r)) >> 31 != 0;
+            (r, false, true, true, !c, v)
+        }
+        0xB => {
+            // CMN
+            let (r, c) = rn.overflowing_add(oper2);
+            let v = (!(rn ^ oper2) & (rn ^ r)) >> 31 != 0;
+            (r, false, true, true, c, v)
+        }
+        0xC => (rn | oper2, true, false, false, sh_c, cpu.cpsr.v), // ORR
+        0xD => (oper2, true, false, false, sh_c, cpu.cpsr.v),      // MOV
+        0xE => (rn & !oper2, true, false, false, sh_c, cpu.cpsr.v), // BIC
+        0xF => (!oper2, true, false, false, sh_c, cpu.cpsr.v),     // MVN
+        _ => (0, false, false, false, sh_c, cpu.cpsr.v),
+    };
+
+    if write && rd != 15 {
+        cpu.r[rd] = result;
+    } else if write && rd == 15 {
+        cpu.r[15] = result & !3;
+        // if S and rd==15, would restore SPSR — skip for now
+    }
+
+    if s && rd != 15 {
+        cpu.cpsr.set_nz(result);
+        if set_c {
+            cpu.cpsr.c = c_out;
+        } else {
+            cpu.cpsr.c = sh_c;
+        }
+        if set_v {
+            cpu.cpsr.v = v_out;
+        }
+    } else if s && !write {
+        // TST/TEQ/CMP/CMN always set flags
+        cpu.cpsr.set_nz(result);
+        if set_c {
+            cpu.cpsr.c = c_out;
+        } else {
+            cpu.cpsr.c = sh_c;
+        }
+        if set_v {
+            cpu.cpsr.v = v_out;
+        }
+    }
+
+    1
+}
+
+fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
+    let i = (op & (1 << 25)) != 0; // reg offset
+    let p = (op & (1 << 24)) != 0; // pre
+    let u = (op & (1 << 23)) != 0; // up
+    let b = (op & (1 << 22)) != 0; // byte
+    let w = (op & (1 << 21)) != 0; // writeback
+    let l = (op & (1 << 20)) != 0; // load
+    let rn_i = ((op >> 16) & 0xF) as usize;
+    let rd = ((op >> 12) & 0xF) as usize;
+    let mut base = if rn_i == 15 {
+        cpu.pc_arm_read()
+    } else {
+        cpu.r[rn_i]
+    };
+
+    let offset = if !i {
+        op & 0xFFF
+    } else {
+        let (v, _) = barrel_shift(cpu, op, cpu.cpsr.c);
+        v
+    };
+
+    let offset = if u {
+        offset
+    } else {
+        (0u32).wrapping_sub(offset)
+    };
+
+    let addr = if p {
+        base.wrapping_add(offset)
+    } else {
+        base
+    };
+
+    if l {
+        let val = if b {
+            bus.read8(addr) as u32
+        } else {
+            bus.read32(addr & !3).rotate_right((addr & 3) * 8)
+        };
+        if rd == 15 {
+            cpu.cpsr.thumb = (val & 1) != 0;
+            cpu.r[15] = val & !1;
+        } else {
+            cpu.r[rd] = val;
+        }
+    } else {
+        let val = if rd == 15 {
+            cpu.pc_arm_read()
+        } else {
+            cpu.r[rd]
+        };
+        if b {
+            bus.write8(addr, val as u8);
+        } else {
+            bus.write32(addr & !3, val);
+        }
+    }
+
+    if (w || !p) && rn_i != 15 {
+        if p {
+            cpu.r[rn_i] = addr;
+        } else {
+            cpu.r[rn_i] = base.wrapping_add(offset);
+        }
+    }
+    let _ = w;
+    let _ = base;
+    2
+}
+
+fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
+    let p = (op & (1 << 24)) != 0;
+    let u = (op & (1 << 23)) != 0;
+    let w = (op & (1 << 21)) != 0;
+    let l = (op & (1 << 20)) != 0;
+    let rn = ((op >> 16) & 0xF) as usize;
+    let list = (op & 0xFFFF) as u16;
+    if list == 0 {
+        return 1;
+    }
+    let count = list.count_ones();
+    let addr = cpu.r[rn];
+    // IB/IA/DB/DA start address
+    let start = match (p, u) {
+        (true, true) => addr.wrapping_add(4),                          // IB
+        (false, true) => addr,                                         // IA
+        (true, false) => addr.wrapping_sub(4 * count),                 // DB
+        (false, false) => addr.wrapping_sub(4 * count).wrapping_add(4), // DA
+    };
+    let mut a = start;
+    for i in 0..16 {
+        if list & (1 << i) != 0 {
+            if l {
+                let v = bus.read32(a);
+                if i == 15 {
+                    cpu.cpsr.thumb = (v & 1) != 0;
+                    cpu.r[15] = v & !1;
+                } else {
+                    cpu.r[i] = v;
+                }
+            } else {
+                let v = if i == 15 {
+                    cpu.pc_arm_read()
+                } else {
+                    cpu.r[i]
+                };
+                bus.write32(a, v);
+            }
+            a = a.wrapping_add(4);
+        }
+    }
+    if w && rn != 15 {
+        let final_base = if u {
+            addr.wrapping_add(4 * count)
+        } else {
+            addr.wrapping_sub(4 * count)
+        };
+        cpu.r[rn] = final_base;
+    }
+    count + 1
+}

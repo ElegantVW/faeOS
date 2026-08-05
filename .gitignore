@@ -37,3 +37,9 @@ auth.json
 # bulwark rust build
 bulwark/target/
 
+
+# Fairy Lantern (GBA) — never commit carts/saves
+*.gba
+*.sav
+fairy-lantern/roms/
+fairy-lantern/target/
