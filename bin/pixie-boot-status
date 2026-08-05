@@ -12,13 +12,11 @@ echo "default: $(systemctl get-default)"
 echo
 echo "── user services ──"
 loginctl show-user "$USER" -p Linger 2>/dev/null
-systemctl --user is-active menagerie.service 2>/dev/null | sed 's/^/menagerie:  /'
-systemctl --user is-enabled menagerie.service 2>/dev/null | sed 's/^/  enabled:  /'
 echo
 echo "── pixie ──"
 echo "tick:    $(head -1 "${XDG_CONFIG_HOME:-$HOME/.config}/pixie/tick" 2>/dev/null || echo on/default)"
 "$HOME/bin/pixie-screen" status 2>/dev/null || true
-command -v menagerie >/dev/null && menagerie status 2>/dev/null | head -8 || true
+command -v menagerie >/dev/null && menagerie status all 2>/dev/null | head -10 || true
 echo
 echo "── keys ──"
 echo "  Ctrl++ / Ctrl+-   font zoom (kmscon)"

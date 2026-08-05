@@ -40,8 +40,8 @@ def menagerie_status(profile: str) -> tuple[bool, str]:
         return False, "unknown"
 
 def check_llm() -> tuple[bool, str]:
-    ok, status = menagerie_status("qwen")
-    return ok, f"{status} (menagerie qwen · 8080)"
+    ok, status = menagerie_status("pixie")
+    return ok, f"{status} (menagerie pixie · 8080)"
 
 def check_kur() -> tuple[bool, str]:
     ok, status = menagerie_status("kur")
@@ -94,10 +94,10 @@ def main() -> int:
         return 0
 
     elif args.action == "restart-llm":
-        print("Restarting local LLM (menagerie.service)…")
+        print("Restarting pixie's LLM (menagerie restart pixie)…")
         subprocess.run(
-            ["systemctl", "--user", "restart", "menagerie.service"],
-            capture_output=True, timeout=30,
+            [str(Path.home() / "bin" / "menagerie"), "restart", "pixie"],
+            capture_output=True, timeout=300,
         )
         print("Done.")
         return 0

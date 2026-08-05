@@ -39,7 +39,7 @@ from fae_termart import Palette as P, PIXIE_WAIT
 # Force Unicode box drawing for smooth round corners
 os.environ["PIXIE_UNICODE"] = "1"
 
-LLAMA = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
+LLAMA = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8091").rstrip("/")
 MODEL = os.environ.get("ASK_MODEL", os.environ.get("ASK_WEB_MODEL", "qwen"))
 UA = "duck/3.0 (terminal search; +https://github.com/jarun/ddgr)"
 # How many top hits to open when -a / --deep
@@ -619,12 +619,13 @@ def llm_up() -> bool:
 
 
 def ensure_llm_up() -> bool:
-    """Start menagerie.service (qwen on 8080) and wait for it to answer."""
+    """Summon magpie's own critter (menagerie ensure magpie, port 8091)."""
     import subprocess
     import time
     try:
-        subprocess.run(["systemctl", "--user", "start", "menagerie.service"],
-                       capture_output=True, timeout=15)
+        subprocess.run(
+            [str(Path.home() / "bin" / "menagerie"), "ensure", "magpie"],
+            capture_output=True, timeout=240)
     except Exception:
         pass
     for _ in range(90):

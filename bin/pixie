@@ -14,17 +14,19 @@ import threading
 import urllib.parse
 import urllib.request
 import time
+from pathlib import Path
 
 API_URL = f"http://127.0.0.1:{os.environ.get('PIXIE_LLM_PORT', '8080')}/completion"
 
 SYSTEM_PROMPT = """You are Pixie, a sharp, helpful, and concise AI assistant running locally.
 You have access to local system tools. You can choose to call a tool by outputting a clean JSON object containing "name" and "arguments" fields.
-Your primary active operational background service is called "menagerie.service".
+Your primary AI runtime is the menagerie: each app (pixie, ask, magpie, imp, kur) owns its own local llama-server instance — pixie's lives on port 8080.
 
 Available tools:
 1. execute_bash: {"name": "execute_bash", "arguments": {"command": "string"}}
 2. read_local_file: {"name": "read_local_file", "arguments": {"path": "string", "start_line": int, "end_line": int}}
 3. manage_systemd_service: {"name": "manage_systemd_service", "arguments": {"service_name": "string", "action": "status|restart|logs"}}
+4. check_mail: {"name": "check_mail", "arguments": {"sync": bool, "box": "unread|read|trash"}}
 
 If you need to use a tool to answer the user, output ONLY the JSON object for that tool call. No other text.
 If you have the final answer or do not need a tool, output a clear, friendly conversational response."""
@@ -174,8 +176,68 @@ def fetch_web_page(url: str, max_chars: int = 4000) -> dict:
     except Exception as e:
         return {"error": f"fetch_web_page failed: {e}"}
 
+# --- Mail (via goblin: aerc IMAP → ~/.cache/goblin/mail/{unread,read,trash}/*.txt) ---
+
+GOBLIN = Path.home() / "bin" / "goblin"
+
+
+def _run_goblin(argv: list[str], timeout: int = 120) -> str:
+    """Run the goblin CLI; return stdout+stderr text for the agent."""
+    if not GOBLIN.is_file():
+        return f"error: goblin not found at {GOBLIN}"
+    try:
+        proc = subprocess.run(
+            [str(GOBLIN), *argv],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, "PATH": f"{Path.home() / 'bin'}:{os.environ.get('PATH', '')}"},
+        )
+    except subprocess.TimeoutExpired:
+        return f"error: goblin timed out after {timeout}s (IMAP slow or unreachable?)"
+    except OSError as e:
+        return f"error: could not run goblin: {e}"
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    parts = [out] if out else []
+    if err:
+        parts.append(f"[log]\n{err}")
+    if proc.returncode != 0:
+        parts.append(f"(exit {proc.returncode})")
+    return "\n".join(parts) if parts else "(no output)"
+
+
+def check_mail(sync: bool = True, box: str = "unread", max_messages: int = 20) -> dict:
+    """Sync mail via goblin and return a digest pixie can summarize.
+
+    sync=True downloads new mail from the IMAP account first. box may be
+    unread|read|trash; the digest (full contents for summarization) is
+    only built for unread.
+    """
+    box = (box or "unread").strip().lower()
+    if box not in ("unread", "read", "trash"):
+        return {"error": "box must be unread, read, or trash"}
+    result: dict = {"box": box}
+    if sync:
+        result["sync"] = _run_goblin(["sync"], timeout=180)
+    listing = _run_goblin(["list", box, "--plain"], timeout=60)
+    result["listing"] = listing
+    subjects = []
+    for line in listing.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 4 and fields[3].startswith("subject="):
+            subjects.append(fields[3][len("subject="):])
+    result["count"] = len(subjects)
+    result["subjects"] = subjects
+    if box == "unread":
+        limit = max(1, min(int(max_messages or 20), 50))
+        result["digest"] = _run_goblin(["bundle", "--limit", str(limit)], timeout=60)
+    else:
+        result["digest"] = "(no digest for read/trash — use the listing)"
+    return result
+
 _KNOWN_TOOLS = ["execute_bash", "read_local_file", "manage_systemd_service",
-                "write_local_file", "web_research", "fetch_web_page"]
+                "write_local_file", "web_research", "fetch_web_page", "check_mail"]
 
 _TOOL_ALIASES = {
     "create_file": "write_local_file", "create": "write_local_file",
@@ -187,6 +249,9 @@ _TOOL_ALIASES = {
     "search_web": "web_research", "web_search": "web_research",
     "fetch_url": "fetch_web_page", "open_url": "fetch_web_page",
     "systemctl": "manage_systemd_service",
+    "check_email": "check_mail", "mail": "check_mail", "email": "check_mail",
+    "get_mail": "check_mail", "list_mail": "check_mail", "read_mail": "check_mail",
+    "inbox": "check_mail",
     "file_create": "write_local_file", "create_file": "write_local_file",
     "mkfile": "write_local_file", "writefile": "write_local_file",
     "write_content": "write_local_file", "write_to_file": "write_local_file",
@@ -211,6 +276,11 @@ def _norm_args(fname: str, fargs: dict) -> dict:
         return {"path": str(path), "start_line": fargs.get("start_line"), "end_line": fargs.get("end_line")}
     if fname == "web_research":
         return {"query": str(fargs.get("query", "")), "max_results": int(fargs.get("max_results", 5))}
+    if fname == "check_mail":
+        sync = fargs.get("sync", fargs.get("sync_mail", fargs.get("pull", True)))
+        box = str(fargs.get("box", fargs.get("folder", fargs.get("mailbox", "unread"))) or "unread")
+        limit = fargs.get("max_messages", fargs.get("limit", fargs.get("max_results", 20)))
+        return {"sync": sync, "box": box, "max_messages": int(limit or 20)}
     return fargs
 
 def run_tool(fname: str, fargs: dict) -> dict:
@@ -242,7 +312,46 @@ def run_tool(fname: str, fargs: dict) -> dict:
         return web_research(fargs.get('query', ''), int(fargs.get('max_results', 5)))
     if fname == "fetch_web_page":
         return fetch_web_page(fargs.get('url', ''), int(fargs.get('max_chars', 4000)))
+    if fname == "check_mail":
+        fargs = _norm_args(fname, fargs)
+        return check_mail(fargs.get('sync', True), fargs.get('box', 'unread'), fargs.get('max_messages', 20))
     return {"error": f"Unknown function mapping: {fname}"}
+
+_TOOL_RESULT_CAP = 1200
+_TOOL_ROUND_CAP = 4000
+
+def tool_payload(results: list) -> str:
+    """Serialize tool results for the model, capped to keep the context small.
+
+    Big results (mail digests, file reads, ls -R) would otherwise blow the
+    LLM context in one round; the TUI display is unaffected (tool_body).
+    """
+    parts = []
+    used = 0
+    for item in results:
+        s = json.dumps(item, ensure_ascii=False)
+        if len(s) > _TOOL_RESULT_CAP:
+            s = s[:_TOOL_RESULT_CAP] + f"… [truncated: was {len(s)} chars]"
+        if used + len(s) > _TOOL_ROUND_CAP:
+            break
+        parts.append(s)
+        used += len(s)
+    return "[" + ", ".join(parts) + "]"
+
+def _drop_oldest(msgs: list, keep_ratio: float = 0.5) -> bool:
+    """Drop oldest non-system messages so a retry fits the context. Returns
+    True if anything was dropped."""
+    non_sys = [m for m in msgs if m["role"] != "system"]
+    drop = max(1, int(len(non_sys) * (1 - keep_ratio)))
+    dropped = False
+    for m in list(msgs[1:]):
+        if drop <= 0:
+            break
+        if m["role"] != "system":
+            msgs.remove(m)
+            drop -= 1
+            dropped = True
+    return dropped
 
 def extract_tool_call(text: str):
     """Find a JSON object with name+arguments anywhere in text (handles
@@ -306,15 +415,16 @@ def llm_up(verbose: bool = False) -> bool:
 
 
 def ensure_llm_up(quiet: bool = True) -> bool:
-    """Start menagerie.service (qwen on 8080) and wait until it answers.
+    """Summon pixie's own critter (menagerie ensure pixie, port 8080).
 
     Returns True once the server reports healthy (model may still be
     loading — llama.cpp answers 200 with a model still warming up).
     """
     import subprocess
     try:
-        subprocess.run(["systemctl", "--user", "start", "menagerie.service"],
-                       capture_output=True, timeout=15)
+        subprocess.run(
+            [str(Path.home() / "bin" / "menagerie"), "ensure", "pixie"],
+            capture_output=True, timeout=240)
     except Exception:
         return llm_up()
     for _ in range(60):
@@ -325,15 +435,12 @@ def ensure_llm_up(quiet: bool = True) -> bool:
 
 
 def unload_qwen() -> None:
-    """Unload the qwen model from RAM when the chat quits.
-
-    menagerie.service has Restart=on-failure, so a bare `menagerie stop`
-    would be undone by systemd; stop the unit cleanly instead.
-    """
+    """Stop pixie's own llama-server instance when the chat quits."""
     import subprocess
     try:
-        subprocess.run(["systemctl", "--user", "stop", "menagerie.service"],
-                       capture_output=True, timeout=15)
+        subprocess.run(
+            [str(Path.home() / "bin" / "menagerie"), "stop", "pixie"],
+            capture_output=True, timeout=30)
     except Exception:
         pass
 
@@ -509,20 +616,26 @@ def stream_completion(prompt: str, on_chunk, cancel: dict, err_sink=None) -> str
     return "".join(full)
 
 def chat_messages(chat: list, rune: dict) -> list:
+    tools_block = "\n".join(
+        f"{i}. {name}: {schema}" for i, (name, schema) in enumerate(rune.get("tools", []), 1)
+    )
     sys_ctx = (f"You are running on the user's faeOS system.\n"
                f"Current working directory: {os.getcwd()}\n"
                f"Use real, existing paths (relative to the working directory or absolute).\n\n"
-               f"{rune['prompt']}")
+               f"{rune['prompt']}\n\n"
+               f"Available tools in this mode:\n{tools_block}")
     msgs = [{"role": "system", "content": sys_ctx}]
-    n = len(chat)
-    for i, entry in enumerate(chat):
+    history = chat[-14:]
+    n = len(history)
+    for i, entry in enumerate(history):
         role, text, *_ = entry
         if role not in ("user", "assistant"):
             continue
         content = text
         if role == "user" and i == n - 1:
             content += ("\n\n(If you need a tool, your reply must be EXACTLY one JSON object "
-                        "{\"name\": \"valid tool name\", \"arguments\": {...}} — nothing else. "
+                        "{\"name\": \"one of the available tools above\", \"arguments\": {...}} "
+                        "— nothing else. "
                         "Otherwise reply conversationally with your pixie charm.)")
         msgs.append({"role": role, "content": content})
     return msgs
@@ -617,7 +730,8 @@ _RUNES = [
         "desc": "friendly chats · quick tasks",
         "tools": [("execute_bash", '{"command": "string"}'),
                   ("read_local_file", '{"path": "string", "start_line": int, "end_line": int}'),
-                  ("manage_systemd_service", '{"service_name": "string", "action": "status|restart|logs"}')],
+                  ("manage_systemd_service", '{"service_name": "string", "action": "status|restart|logs"}'),
+                  ("check_mail", '{"sync": bool, "box": "unread|read|trash", "max_messages": int}')],
         "prompt": f"""{_PERSONA}
 You are in Chat mode: a general assistant on the user's faeOS system. Be concise and helpful; ask one clarifying question if the request is ambiguous; use tools when they help.
 {_TOOL_RULES}""",
@@ -752,6 +866,7 @@ def chat_ui(verbose: bool = False) -> int:
         def fail(msg: str) -> None:
             pending["err"] = msg
 
+        ctx_retry = False
         while True:
             first = ""
             pending["live"] = False
@@ -760,6 +875,15 @@ def chat_ui(verbose: bool = False) -> int:
                 pending["cancelled"] = True
                 pending["done"] = True
                 return
+            if (pending["err"] and not ctx_retry and len(msgs) > 2
+                    and any(k in pending["err"].lower() for k in ("400", "context", "too long"))):
+                # Context overflow: drop the oldest history and retry once.
+                ctx_retry = True
+                pending["err"] = None
+                pending["full"] = ""
+                pending["text"] = ""
+                _drop_oldest(msgs)
+                continue
 
             intent = None
             if not pending["live"]:
@@ -804,7 +928,7 @@ def chat_ui(verbose: bool = False) -> int:
                     results.append({"tool": fname, "arguments": fargs, "result": result})
                 if results:
                     msgs.append({"role": "assistant", "content": first})
-                    msgs.append({"role": "tool", "content": json.dumps(results)})
+                    msgs.append({"role": "tool", "content": tool_payload(results)})
                     rounds += 1
                     continue
 

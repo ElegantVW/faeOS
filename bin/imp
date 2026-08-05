@@ -432,13 +432,13 @@ def pixie_llm_bin() -> str | None:
 
 
 def _restart_imp() -> bool:
-    """Restart the imp llama-server profile; blocks until ready or fails."""
+    """Re-summon imp's own llama-server instance; blocks until ready or fails."""
     binpath = pixie_llm_bin()
     if not binpath:
         return False
     try:
         proc = subprocess.run(
-            [binpath, "restart", "imp"], capture_output=True, text=True, timeout=100
+            [binpath, "ensure", "imp"], capture_output=True, text=True, timeout=120
         )
         return proc.returncode == 0
     except Exception:

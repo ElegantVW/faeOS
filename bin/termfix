@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# termfix — reset TTY + line-edit after glitches (cooked/raw mishaps, e.g. after TUIs)
+if [[ ! -t 1 ]]; then
+  echo "termfix: not a terminal" >&2
+  exit 1
+fi
+stty sane 2>/dev/null || true
+tput reset 2>/dev/null || true
+printf '\033[?25h\033[?2004l\033[?7h\033[0m'
+echo

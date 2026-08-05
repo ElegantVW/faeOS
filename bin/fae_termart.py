@@ -667,7 +667,7 @@ def tui_read_key(fd: int, timeout: float | None = None) -> str:
                 return "home"
             if s.startswith(("F", "4~", "8~")):
                 return "end"
-            if s.startswith("3~") or s.startswith("3"):
+            if s.startswith("3~"):
                 return "delete"
             return f"csi:{s}"
         if n1 == b"O":

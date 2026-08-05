@@ -59,7 +59,7 @@ cmd_status() {
   echo "  boot:    autovt -> $(readlink /etc/systemd/system/autovt@.service 2>/dev/null || echo '?')"
   echo "  tty1:    $(systemctl is-enabled kmsconvt@tty1.service 2>/dev/null || echo '?')"
   echo "  linger:  $(loginctl show-user "${USER:-evenweaker}" -p Linger --value 2>/dev/null || echo '?')"
-  echo "  llm:     $(systemctl --user is-active menagerie.service 2>/dev/null || echo '?')"
+  echo "  llm:     $(command -v menagerie >/dev/null && menagerie status all 2>/dev/null | tail -1 || echo 'menagerie missing')"
   if in_kmscon; then
     echo "  mode:    already in kmscon"
   elif on_vt; then

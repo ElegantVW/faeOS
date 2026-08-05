@@ -1,132 +1,97 @@
 #!/usr/bin/env bash
-# menagerie — fully offline llama.cpp server(s) for Pixie + friends
+# menagerie — the AI control center: where the wizard keeps the critters.
 #
-# Profiles (models under ~/.local/share/pixie/models/):
-#   qwen     Qwen2.5 (Base or Coder) port 8080  (default Pixie)
-#   kur      SmolLM2-360M-Instruct  port 8081  (haiku dragon — tiny/fast)
-#   imp      Qwen2.5 Coder          port 8082  (terminal art generator)
-#   default  qwen (base), else qwen coder
+# Every AI app (pixie, ask, magpie, imp, kur) gets its own dedicated
+# llama-server instance on its own port, bound to its own model from
+# ~/.config/pixie/menagerie.json. Models are added/removed/switched here.
 #
-# Usage:
-#   menagerie start [qwen|kur|imp|default]
-#   menagerie stop  [qwen|kur|all]
-#   menagerie status [profile|all]
-#   menagerie restart [profile]
-#   menagerie chat [profile] "hello"
-#   menagerie path|logs [profile]
+#   menagerie                         interactive TUI
+#   menagerie ensure <app>            summon the app's critter if not healthy
+#   menagerie start|stop|restart|status|chat|logs|path <app>
+#   menagerie set <app> <model>       switch which model an app uses
+#   menagerie models [add <path>] [add --hf <repo> <file>] [rm <name>]
+#   menagerie budget [N]              RAM budget for loaded models (GB)
 #
+# Legacy aliases: qwen|default → pixie; all → every app.
 set -euo pipefail
 
-CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pixie"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pixie/llm"
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pixie"
+DATA_DIR="${PIXIE_LLM_DATA:-$HOME/.local/share/pixie}"
+CFG_DIR="${PIXIE_LLM_CFG:-$HOME/.config/pixie}"
+CACHE_DIR="${PIXIE_LLM_CACHE:-$HOME/.cache/pixie}"
 MODEL_DIR="${PIXIE_LLM_MODEL_DIR:-$DATA_DIR/models}"
+LLM_DIR="$CACHE_DIR/llm"
+mkdir -p "$LLM_DIR" "$MODEL_DIR"
 
-HOST="${PIXIE_LLM_HOST:-127.0.0.1}"
-_NPROC="$(nproc 2>/dev/null || echo 4)"
-THREADS_DEFAULT="${PIXIE_LLM_THREADS:-$(( _NPROC > 1 ? _NPROC - 1 : 1 ))}"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REG_HELPER="${PIXIE_MENAGERIE_REGISTRY:-$SELF_DIR/menagerie-registry.py}"
+[[ -x "$REG_HELPER" ]] || REG_HELPER="$HOME/bin/menagerie-registry.py"
+RUNNER="${PIXIE_MENAGERIE_RUNNER:-$SELF_DIR/menagerie-run}"
+[[ -x "$RUNNER" ]] || RUNNER="$HOME/bin/menagerie-run"
+HOST="127.0.0.1"
 NGL="${PIXIE_LLM_NGL:-0}"
-# unload the model from RAM after this many idle seconds (0 = keep resident);
-# the server stays up and reloads it on the next request
-SLEEP_IDLE="${PIXIE_LLM_SLEEP_IDLE:-300}"
-if [[ "$SLEEP_IDLE" -le 0 ]]; then SLEEP_IDLE=-1; fi
+THREADS="${PIXIE_LLM_THREADS:-$(nproc 2>/dev/null || echo 4)}"
 
-mkdir -p "$CFG_DIR" "$CACHE_DIR" "$MODEL_DIR"
+APP=""
+PORT=""
+CTX=""
+ALIAS=""
+MODEL=""
+MODEL_PATH=""
+URL=""
+PID_FILE=""
+LOG_FILE=""
 
-# profile → model file, port, ctx, alias, threads
-resolve_profile() {
-  local p="${1:-default}"
-  case "$p" in
-    default|pixie|"")
-      if [[ -f "$MODEL_DIR/qwen3-4b-instruct-q4_k_m.gguf" ]] || \
-         [[ -f "$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf" ]] || \
-         compgen -G "$MODEL_DIR/qwen*coder*.gguf" > /dev/null; then
-        p=qwen
-      else
-        echo "menagerie: no model found under $MODEL_DIR" >&2
-        echo "  download the coder: hf download Qwen/Qwen2.5-Coder-3B-Instruct-GGUF \\" >&2
-        echo "    qwen2.5-coder-3b-instruct-q4_k_m.gguf --local-dir \"$MODEL_DIR\"" >&2
-        return 1
-      fi
-      ;;
+reg() {
+  python3 "$REG_HELPER" "$@"
+}
+
+# ── app resolution ────────────────────────────────────────────────────
+resolve_app() {
+  APP="${1:-pixie}"
+  case "$APP" in
+    qwen|default) APP=pixie ;;
   esac
-  PROFILE="$p"
-  case "$PROFILE" in
-    qwen)
-      MODEL="${PIXIE_LLM_MODEL:-$MODEL_DIR/qwen3-4b-instruct-q4_k_m.gguf}"
-      if [[ ! -f "$MODEL" ]]; then
-        MODEL="$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf"
-      fi
-      if [[ ! -f "$MODEL" ]]; then
-        MODEL="$(compgen -G "$MODEL_DIR/qwen*coder*.gguf" | head -1)"
-      fi
-      PORT="${PIXIE_LLM_PORT:-8080}"
-      CTX="${PIXIE_LLM_CTX:-4096}"
-      ALIAS="${PIXIE_LLM_ALIAS:-qwen}"
-      THREADS="${PIXIE_LLM_THREADS:-$THREADS_DEFAULT}"
-      ;;
-    kur)
-      MODEL="${KUR_LLM_MODEL:-$MODEL_DIR/smollm2-360m-instruct-q4_k_m.gguf}"
-      PORT="${KUR_LLM_PORT:-8081}"
-      CTX="${KUR_LLM_CTX:-1024}"
-      ALIAS="${KUR_LLM_ALIAS:-kur}"
-      # tiny model: all cores OK for snappy haiku
-      THREADS="${KUR_LLM_THREADS:-$_NPROC}"
-      ;;
-    imp)
-      # Imp's art generator — a Qwen2.5 Coder on its own port so it never
-      # fights Pixie (8080) or the comment dragon (8081). Default to any
-      # coder GGUF already present, else the conventional coder filename.
-      MODEL=""
-      if [[ -n "${IMP_LLM_MODEL:-}" ]]; then
-        MODEL="$IMP_LLM_MODEL"
-      else
-        for f in "$MODEL_DIR"/qwen*coder*.gguf "$MODEL_DIR"/*coder*.gguf; do
-          if [[ -f "$f" ]]; then MODEL="$f"; break; fi
-        done
-      fi
-      if [[ -z "$MODEL" ]]; then
-        MODEL="$MODEL_DIR/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
-      fi
-      PORT="${IMP_LLM_PORT:-8082}"
-      CTX="${IMP_LLM_CTX:-4096}"
-      ALIAS="${IMP_LLM_ALIAS:-imp}"
-      THREADS="${IMP_LLM_THREADS:-$THREADS_DEFAULT}"
-      ;;
-    *)
-      echo "unknown profile: $p  (qwen|kur|imp|default)" >&2
-      return 1
-      ;;
-  esac
-  PID_FILE="$CACHE_DIR/llama-server.${PROFILE}.pid"
-  LOG_FILE="$CACHE_DIR/llama-server.${PROFILE}.log"
+  if [[ "$APP" == "all" ]]; then return 0; fi
+  local line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local key="${line%%=*}" val="${line#*=}"
+    case "$key" in
+      PORT) PORT="$val" ;;
+      CTX) CTX="$val" ;;
+      ALIAS) ALIAS="$val" ;;
+      MODEL) MODEL="$val" ;;
+      MODEL_PATH) MODEL_PATH="$val" ;;
+    esac
+  done < <(reg get-app "$APP")
+  if [[ -z "$PORT" ]]; then
+    echo "menagerie: unknown app '$APP' (known: $(reg list-apps | cut -f1 | tr '\n' ' '))" >&2
+    return 1
+  fi
   URL="http://${HOST}:${PORT}"
+  PID_FILE="$LLM_DIR/llama-server.${APP}.pid"
+  LOG_FILE="$LLM_DIR/llama-server.${APP}.log"
+  return 0
+}
+
+all_apps() {
+  reg list-apps | cut -f1
 }
 
 find_server() {
   if [[ -n "${PIXIE_LLAMA_SERVER:-}" && -x "${PIXIE_LLAMA_SERVER}" ]]; then
-    echo "$PIXIE_LLAMA_SERVER"
-    return
+    echo "$PIXIE_LLAMA_SERVER"; return
   fi
-  if [[ -x "$HOME/bin/llama-server" ]]; then
-    echo "$HOME/bin/llama-server"
-    return
-  fi
-  if command -v llama-server >/dev/null 2>&1; then
-    command -v llama-server
-    return
-  fi
-  for p in \
-    "$HOME/.local/lib/pixie/llama-server" \
-    /usr/bin/llama-server \
-    /usr/local/bin/llama-server
-  do
-    if [[ -x "$p" ]]; then
-      echo "$p"
-      return
-    fi
+  if [[ -x "$HOME/bin/llama-server" ]]; then echo "$HOME/bin/llama-server"; return; fi
+  if command -v llama-server >/dev/null 2>&1; then command -v llama-server; return; fi
+  for p in "$HOME/.local/lib/pixie/llama-server" /usr/bin/llama-server /usr/local/bin/llama-server; do
+    if [[ -x "$p" ]]; then echo "$p"; return; fi
   done
   return 1
+}
+
+port_busy() {
+  command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ":${PORT}\\b"
 }
 
 is_running() {
@@ -137,10 +102,7 @@ is_running() {
       return 0
     fi
   fi
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltn 2>/dev/null | grep -qE ":${PORT}\\b" && return 0
-  fi
-  return 1
+  port_busy
 }
 
 health() {
@@ -149,96 +111,90 @@ health() {
 }
 
 is_asleep() {
-  # llama-server returns 503 on /health while the model is unloaded (sleeping)
   local code
   code=$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' "${URL}/health" 2>/dev/null || true)
   [[ "$code" == "503" ]]
 }
 
-cmd_status() {
-  local srv
-  srv=$(find_server 2>/dev/null || echo "(llama-server not found)")
-  echo "profile:  $PROFILE"
-  echo "backend:  llama.cpp (offline)"
-  echo "server:   $srv"
-  echo "model:    $MODEL"
-  echo "listen:   ${HOST}:${PORT}  (localhost only)"
-  echo "url:      $URL"
-  echo "ctx/thr:  $CTX / $THREADS"
-  echo "sleep:    ${SLEEP_IDLE}s idle → unloads model from RAM (-1 = keep loaded)"
-  if is_running && health; then
-    echo "status:   running"
-    [[ -f "$PID_FILE" ]] && echo "pid:      $(cat "$PID_FILE")"
-    return 0
-  elif is_running && is_asleep; then
-    echo "status:   running but asleep (model unloaded, RAM freed)"
-    echo "          next request reloads it (~20s) — server never needs a manual start"
-    [[ -f "$PID_FILE" ]] && echo "pid:      $(cat "$PID_FILE")"
-    return 0
-  elif is_running; then
-    echo "status:   process up, API not ready yet (loading model?)"
-    return 1
-  else
-    echo "status:   stopped"
-    return 1
-  fi
+# ── RAM budget ────────────────────────────────────────────────────────
+budget_gb() { reg budget | awk '{print $1}'; }
+
+ram_ok() {
+  reg ram-ok "$MODEL_PATH" >/dev/null 2>&1
 }
 
-cmd_status_all() {
-  local p rc=0
-  for p in qwen kur imp; do
-    echo "── $p ──"
-    resolve_profile "$p"
-    cmd_status || true
-    echo
-  done
+evict_for_model() {
+  # apps to stop so our model fits; asleep first, then oldest running
+  reg evict-for "$MODEL_PATH" 2>/dev/null || true
+}
+
+# ── commands ──────────────────────────────────────────────────────────
+cmd_ensure() {
+  if is_running && health; then
+    echo "menagerie [$APP] ready at $URL (model: $MODEL)"
+    return 0
+  fi
+  if is_running && is_asleep; then
+    echo "menagerie [$APP] asleep at $URL — next request wakes it"
+    return 0
+  fi
+  if ! ram_ok; then
+    local ev target_app="$APP"
+    for ev in $(evict_for_model); do
+      [[ "$ev" == "$target_app" ]] && continue
+      echo "menagerie: evicting $ev (idle) to make room for $target_app (budget $(budget_gb) GB)"
+      resolve_app "$ev"
+      cmd_stop >/dev/null 2>&1 || true
+      resolve_app "$target_app"
+      ram_ok && break
+    done
+    if ! ram_ok; then
+      echo "error: RAM budget ( $(budget_gb) GB ) exceeded — stop another app or raise it: menagerie budget" >&2
+      return 1
+    fi
+  fi
+  cmd_start
 }
 
 cmd_start() {
   if is_running && health; then
-    echo "menagerie [$PROFILE] already running at $URL"
+    echo "menagerie [$APP] already running at $URL"
     return 0
-  fi
-  # if something else holds the port, stop our profile's pid first
-  if is_running; then
-    cmd_stop >/dev/null || true
   fi
   local srv
   if ! srv=$(find_server); then
     echo "error: llama-server not found." >&2
     return 1
   fi
-  if [[ ! -e "$MODEL" ]]; then
-    echo "error: model not found: $MODEL" >&2
-    echo "  expected under $MODEL_DIR" >&2
+  if [[ ! -e "$MODEL_PATH" ]]; then
+    echo "error: model file missing: $MODEL_PATH" >&2
+    echo "  add one:  menagerie models add <path>  or  menagerie models add --hf <repo> <file>" >&2
     ls -lh "$MODEL_DIR" 2>/dev/null || true
     return 1
   fi
+  if port_busy && ! is_running; then
+    echo "error: port ${PORT} is held by another process — not ours, refusing to touch it" >&2
+    return 1
+  fi
 
-  local model_path
-  model_path=$(readlink -f "$MODEL" 2>/dev/null || echo "$MODEL")
-
-  echo "starting llama.cpp [$PROFILE] on ${HOST}:${PORT} …"
-  echo "  model: $model_path"
+  echo "summoning llama.cpp [$APP] on ${URL} …"
+  echo "  model: $MODEL_PATH"
   echo "  ctx=$CTX threads=$THREADS alias=$ALIAS"
-  nohup "$srv" \
-    -m "$MODEL" \
-    --host "$HOST" \
-    --port "$PORT" \
-    -c "$CTX" \
-    -t "$THREADS" \
-    -ngl "$NGL" \
-    --alias "$ALIAS" \
-    --sleep-idle-seconds "$SLEEP_IDLE" \
-    --jinja \
-    --chat-template gemma2 \
-    >"$LOG_FILE" 2>&1 &
+  nohup env \
+    PIXIE_LLM_MODEL="$MODEL_PATH" \
+    PIXIE_LLM_HOST="$HOST" \
+    PIXIE_LLM_PORT="$PORT" \
+    PIXIE_LLM_CTX="$CTX" \
+    PIXIE_LLM_THREADS="$THREADS" \
+    PIXIE_LLM_NGL="$NGL" \
+    PIXIE_LLM_ALIAS="$ALIAS" \
+    "$RUNNER" >"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
 
   local i
   for i in $(seq 1 90); do
     if health; then
-      echo "ready: $URL  (pid $(cat "$PID_FILE"))  [$PROFILE]"
+      echo "ready: $URL (pid $(cat "$PID_FILE" 2>/dev/null || echo "?")) [$APP]"
       echo "logs:  $LOG_FILE"
       return 0
     fi
@@ -255,42 +211,107 @@ cmd_start() {
 }
 
 cmd_stop() {
+  local stopped=0
   if [[ -f "$PID_FILE" ]]; then
     local pid
-    pid=$(cat "$PID_FILE")
-    if kill -0 "$pid" 2>/dev/null; then
+    pid=$(cat "$PID_FILE" 2>/dev/null || true)
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
-      sleep 0.4
+      local i
+      for i in 1 2 3 4 5; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2
+      done
       kill -9 "$pid" 2>/dev/null || true
-      echo "stopped [$PROFILE] pid $pid"
+      echo "stopped [$APP] pid $pid"
+      stopped=1
     fi
     rm -f "$PID_FILE"
   fi
-  if command -v fuser >/dev/null 2>&1; then
-    fuser -k "${PORT}/tcp" 2>/dev/null || true
+  if port_busy && [[ "$stopped" == "0" ]]; then
+    echo "warning: ${URL} still answers — another process holds the port (not ours); leaving it alone" >&2
+  elif [[ "$stopped" == "1" ]]; then
+    echo "menagerie [$APP] stopped"
+  else
+    echo "menagerie [$APP] not running"
   fi
-  echo "menagerie [$PROFILE] stopped"
 }
 
-cmd_stop_all() {
-  local p
-  for p in qwen kur imp; do
-    resolve_profile "$p"
-    cmd_stop 2>/dev/null || true
+cmd_status() {
+  local srv
+  srv=$(find_server 2>/dev/null || echo "(llama-server not found)")
+  echo "app:      $APP"
+  echo "model:    $MODEL"
+  echo "listen:   ${HOST}:${PORT}  (localhost only)"
+  echo "url:      $URL"
+  echo "ctx/thr:  $CTX / $THREADS"
+  echo "budget:   $(budget_gb) GB (loaded now: $(reg est-loaded))"
+  echo "backend:  $srv"
+  if is_running && health; then
+    echo "status:   loaded"
+    [[ -f "$PID_FILE" ]] && echo "pid:      $(cat "$PID_FILE")"
+    return 0
+  elif is_running && is_asleep; then
+    echo "status:   asleep (model unloaded — next request reloads it)"
+    [[ -f "$PID_FILE" ]] && echo "pid:      $(cat "$PID_FILE")"
+    return 0
+  elif is_running; then
+    echo "status:   loading…"
+    return 1
+  else
+    echo "status:   stopped"
+    return 1
+  fi
+}
+
+cmd_status_all() {
+  local app model port status pid line
+  printf '%-8s %-34s %-5s %-9s %s\n' "APP" "MODEL" "PORT" "STATUS" "PID"
+  printf '%-8s %-34s %-5s %-9s %s\n' "----" "-----" "----" "------" "---"
+  for app in $(all_apps); do
+    resolve_app "$app"
+    if is_running && health; then status=loaded
+    elif is_running && is_asleep; then status=asleep
+    elif is_running; then status=loading
+    else status=stopped; fi
+    pid=$([[ -f "$PID_FILE" ]] && cat "$PID_FILE" || echo "-")
+    model="${MODEL_PATH:-$MODEL}"
+    printf '%-8s %-34s %-5s %-9s %s\n' "$app" "${MODEL:0:33}" "$PORT" "$status" "$pid"
   done
-  # legacy single pid file
-  if [[ -f "$CACHE_DIR/llama-server.pid" ]]; then
-    local pid
-    pid=$(cat "$CACHE_DIR/llama-server.pid" 2>/dev/null || true)
-    [[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true
-    rm -f "$CACHE_DIR/llama-server.pid"
+  echo
+  echo "RAM budget: $(budget_gb) GB  ·  loaded now: $(reg est-loaded) GB"
+}
+
+cmd_set() {
+  local app="$1" model="$2"
+  reg set-app "$app" "$model"
+  echo "menagerie: $app now uses $model"
+  if resolve_app "$app" && is_running; then
+    echo "restarting $app to apply…"
+    cmd_stop >/dev/null 2>&1 || true
+    cmd_ensure || true
+  fi
+}
+
+cmd_models() {
+  reg models
+}
+
+cmd_budget() {
+  if [[ $# -gt 0 ]]; then
+    reg budget "$1"
+    echo "suggestion for this machine: $(reg suggest-budget)"
+  else
+    reg budget
+    echo "suggestion for this machine: $(reg suggest-budget)"
+    echo "set:  menagerie budget <GB>"
   fi
 }
 
 cmd_chat() {
   local prompt="${*:-hello}"
   if ! health; then
-    echo "server not up — try: menagerie start $PROFILE" >&2
+    echo "server not up — try: menagerie ensure $APP" >&2
     return 1
   fi
   curl -fsS --max-time 300 "${URL}/v1/chat/completions" \
@@ -305,7 +326,7 @@ print(json.dumps({
   'stream': False,
 }))
 " "$prompt" "$ALIAS")" \
-  | python3 -c "
+    | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 print((d.get('choices') or [{}])[0].get('message',{}).get('content','') or d)
@@ -313,28 +334,26 @@ print((d.get('choices') or [{}])[0].get('message',{}).get('content','') or d)
 }
 
 cmd_path() {
-  echo "PROFILE=$PROFILE"
+  echo "APP=$APP"
   echo "MODEL=$MODEL"
+  echo "MODEL_PATH=$MODEL_PATH"
   echo "URL=$URL"
   echo "LOG=$LOG_FILE"
   echo "PID=$PID_FILE"
   find_server || true
 }
 
-cmd_models() {
-  echo "models in $MODEL_DIR:"
-  ls -lh "$MODEL_DIR"/*.gguf 2>/dev/null || echo "  (none)"
-}
-
 # ── argv ──────────────────────────────────────────────────────────────
-cmd="${1:-status}"
+cmd="${1:-tui}"
 shift || true
 
-# commands that take optional profile as first remaining arg
 case "$cmd" in
-  start|stop|restart|status|logs|chat|path)
-    prof=default
-    if [[ "${1:-}" =~ ^(qwen|kur|imp|default|pixie|all)$ ]]; then
+  tui|""|-i|--interactive)
+    exec python3 "$SELF_DIR/menagerie-tui.py" "$@"
+    ;;
+  ensure|start|stop|restart|status|chat|logs|path)
+    prof=pixie
+    if [[ "${1:-}" =~ ^(pixie|ask|magpie|imp|kur|qwen|default|all)$ ]]; then
       prof="$1"
       shift || true
     fi
@@ -343,41 +362,77 @@ case "$cmd" in
       exit 0
     fi
     if [[ "$cmd" == "stop" && "$prof" == "all" ]]; then
-      cmd_stop_all
-      exit 0
+      local app rc=0
+      for app in $(all_apps); do
+        resolve_app "$app"
+        cmd_stop || rc=1
+      done
+      exit "$rc"
     fi
-    resolve_profile "$prof"
+    resolve_app "$prof" || exit 1
     case "$cmd" in
+      ensure)  cmd_ensure ;;
       start)   cmd_start ;;
       stop)    cmd_stop ;;
-      restart) cmd_stop; cmd_start ;;
+      restart) cmd_stop >/dev/null 2>&1 || true; cmd_start ;;
       status)  cmd_status ;;
-      logs)    tail -n "${1:-80}" "$LOG_FILE" 2>/dev/null || echo "(no log yet)" ;;
       chat)    cmd_chat "$@" ;;
+      logs)    tail -n "${1:-80}" "$LOG_FILE" 2>/dev/null || echo "(no log yet)" ;;
       path)    cmd_path ;;
     esac
     ;;
-  models|ls)
-    cmd_models
+  set)
+    [[ $# -ge 2 ]] || { echo "usage: menagerie set <app> <model>" >&2; exit 1; }
+    cmd_set "$1" "$2"
+    ;;
+  models|model|ls)
+    case "${1:-}" in
+      add)
+        [[ -n "${2:-}" ]] || { echo "usage: menagerie models add <path> | add --hf <repo> <file>" >&2; exit 1; }
+        if [[ "$2" == "--hf" ]]; then
+          [[ -n "${4:-}" ]] || { echo "usage: menagerie models add --hf <repo> <file>" >&2; exit 1; }
+          reg add-model-hf "$3" "$4"
+        else
+          reg add-model "$2"
+        fi
+        ;;
+      rm|remove)
+        [[ -n "${2:-}" ]] || { echo "usage: menagerie models rm <name>" >&2; exit 1; }
+        reg remove-model "$2"
+        ;;
+      *) cmd_models ;;
+    esac
+    ;;
+  budget)
+    cmd_budget "$@"
+    ;;
+  restart-llm)
+    resolve_app pixie
+    cmd_stop >/dev/null 2>&1 || true
+    cmd_start
     ;;
   -h|--help|help)
     cat <<'H'
-menagerie — offline llama.cpp profiles
+menagerie — the AI control center (per-app llama.cpp critters)
 
-  menagerie start [qwen|kur|imp]         start a profile (default: qwen if present)
-  menagerie stop  [qwen|kur|imp|all]
-  menagerie status [profile|all]
-  menagerie restart [profile]
-  menagerie chat [profile] "hello"
-  menagerie models
+  menagerie                       interactive TUI (models, apps, budget)
+  menagerie ensure <app>          summon an app's model if not healthy
+  menagerie start|stop|restart|status|chat|logs|path <app>
+  menagerie status all            table: app | model | port | status
+  menagerie set <app> <model>     switch the model an app uses (restarts it)
+  menagerie models                list registered models
+  menagerie models add <path>     register a local .gguf
+  menagerie models add --hf <repo> <file>   download a model from HF
+  menagerie models rm <name>      unregister (refuses if an app uses it)
+  menagerie budget [GB]           RAM budget for loaded models
 
-Ports:  qwen → 8080    kur → 8081    imp → 8082
-Idle RAM: models unload after PIXIE_LLM_SLEEP_IDLE seconds of inactivity
-          (default 300; set 0 to keep the model loaded, like before)
+Apps (each owns its own llama-server instance):
+  pixie→8080  ask→8090  magpie→8091  imp→8082  kur→8081
+Legacy aliases: qwen|default = pixie, all = every app.
 H
     ;;
   *)
-    echo "Usage: menagerie {start|stop|restart|status|logs|chat|path|models}" >&2
+    echo "Usage: menagerie {tui|ensure|start|stop|restart|status|set|models|budget|chat|logs|path}" >&2
     exit 1
     ;;
 esac

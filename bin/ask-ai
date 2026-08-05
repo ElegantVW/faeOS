@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 echo "ask-ai is retired. Use:" >&2
-echo "  menagerie start   # offline llama.cpp" >&2
-echo "  pixie \"…\"         local agent" >&2
-echo "  ask \"…\"           same engine" >&2
-echo "  duck -a \"…\"       search + AI comment" >&2
+echo "  menagerie status all   # AI control center (each app its own model)" >&2
+echo "  pixie \"…\"              local agent (summons its own instance)" >&2
+echo "  ask \"…\"                same engine" >&2
+echo "  duck -a \"…\"            search + AI comment" >&2
 exit 1

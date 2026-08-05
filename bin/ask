@@ -7,8 +7,8 @@ Usage:
   ask --web "latest Arch security news"
   ask --search-only "query"          # snippets only, no model
 
-Requires: menagerie start   (llama.cpp on 127.0.0.1:8080)
-Env: PIXIE_LLM_URL=http://127.0.0.1:8080
+Requires: menagerie ensure ask   (ask's own llama.cpp on 127.0.0.1:8090)
+Env: PIXIE_LLM_URL=http://127.0.0.1:8090
 """
 from __future__ import annotations
 
@@ -41,8 +41,8 @@ from fae_termart import Palette as P, PIXIE_WAIT, PIXIE_SCREEN
 os.environ["PIXIE_UNICODE"] = "1"
 
 HOME = Path.home().resolve()
-# Offline llama.cpp only (menagerie)
-LLAMA = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
+# Offline llama.cpp only (menagerie — ask owns its instance on 8090)
+LLAMA = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8090").rstrip("/")
 DEFAULT_MODEL = os.environ.get(
     "ASK_MODEL",
     os.environ.get("ASK_WEB_MODEL", os.environ.get("PIXIE_LLM_ALIAS", "qwen")),
@@ -354,12 +354,13 @@ def llm_up() -> bool:
 
 
 def ensure_llm_up() -> bool:
-    """Start menagerie.service (qwen on 8080) and wait for it to answer."""
+    """Summon ask's own critter (menagerie ensure ask, port 8090) and wait."""
     import subprocess
     import time
     try:
-        subprocess.run(["systemctl", "--user", "start", "menagerie.service"],
-                       capture_output=True, timeout=15)
+        subprocess.run(
+            [str(Path.home() / "bin" / "menagerie"), "ensure", "ask"],
+            capture_output=True, timeout=240)
     except Exception:
         pass
     for _ in range(90):
@@ -423,7 +424,7 @@ def llm_chat(model: str, messages: list[dict], temperature: float = 0.2) -> str:
     """Chat via offline llama.cpp (OpenAI-compatible, localhost only)."""
     if not llm_up():
         raise RuntimeError(
-            f"no local LLM: start offline server with `menagerie start` ({LLAMA})"
+            f"no local LLM: summon it with `menagerie ensure ask` ({LLAMA})"
         )
     normalized = normalize_chat_messages(messages)
     body = {
@@ -881,7 +882,7 @@ def tool_grep(fs: FSSession, pattern: str, path: str | None = None, max_hits: in
 # --- Mail (aerc IMAP → ~/.cache/goblin/mail/{unread,read,trash}/*.txt) ---
 
 GOBLIN = Path.home() / "bin" / "goblin"
-MAIL_ROOT = Path.home() / ".cache" / "pixie" / "mail"
+MAIL_ROOT = Path.home() / ".cache" / "goblin" / "mail"
 
 
 def _run_goblin(argv: list[str], timeout: int = 120) -> str:
@@ -1635,11 +1636,11 @@ def main() -> int:
         return 0
 
     if not llm_up():
-        eprint("No local LLM is running — starting the menagerie service (qwen) …")
+        eprint("No local LLM is running — summoning ask's critter …")
         ensure_llm_up()
     if not llm_up():
         eprint("Could not start the local LLM.")
-        eprint("  Start offline server:  menagerie start")
+        eprint("  Summon it:  menagerie ensure ask")
         eprint(f"  Expected URL:          {LLAMA}")
         return 1
 

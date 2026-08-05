@@ -23,9 +23,9 @@ Usage: ./install.sh [options]
 
 After install:
   1. Put a GGUF model at:
-       ~/.local/share/pixie/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf
+       ~/.local/share/pixie/models/qwen3-4b-instruct-q4_k_m.gguf
   2. Open a new terminal (or: source ~/.config/pixie/pixie.zsh)
-  3. menagerie start   # or --enable-llm
+  3. menagerie status all     # or just run any AI app — it summons its own
   4. pixie "hello"
 EOF
 }
@@ -58,7 +58,9 @@ cp -a "$ROOT/shell/pixie.zsh" "$PIXIE_CFG/pixie.zsh"
 if [[ ! -f "$PIXIE_CFG/tick" ]]; then
   cp -a "$ROOT/config/tick.default" "$PIXIE_CFG/tick"
 fi
-cp -a "$ROOT/systemd/menagerie.service" "$HOME/.config/systemd/user/menagerie.service"
+
+echo "==> AI registry (menagerie: models + per-app bindings)"
+"$BIN_DST/menagerie-registry.py" seed || true
 
 if (( WITH_LIBS )); then
   echo "==> llama.cpp libs → ~/.local/lib/pixie"
@@ -97,15 +99,12 @@ EOF
 fi
 
 if (( ENABLE_LLM )); then
-  echo "==> enable menagerie user service"
-  systemctl --user daemon-reload
-  systemctl --user enable --now menagerie.service || {
-    echo "    service failed to start — is the GGUF model installed?"
-    echo "    Place model, then: systemctl --user restart menagerie"
-  }
+  echo "==> AI is summoned on demand — no boot service anymore"
+  echo "    (each app owns its own llama-server; menagerie manages them)"
+  echo "    try:  menagerie status all   or   pixie \"hello\""
 fi
 
-MODEL="$HOME/.local/share/pixie/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
+MODEL="$HOME/.local/share/pixie/models/qwen3-4b-instruct-q4_k_m.gguf"
 echo
 echo "Done."
 echo "  tools:   $BIN_DST"

@@ -8,8 +8,9 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 
 | Command | Purpose |
 |---------|---------|
-| `pixie "…"` | Local agent (files + tools); needs `menagerie` |
-| `menagerie start\|stop\|status` | AI brain: hosts Pixie (8080), Kur (8081), Imp (8082) |
+| `pixie "…"` | Local agent (files + tools); summons its own llama-server |
+| `menagerie` | AI control center (TUI): models, per-app bindings, RAM budget |
+| `menagerie status all` / `set <app> <model>` / `models` / `budget` | Which model each app uses, switching, add/remove models |
 | `siren` | Interactive media player TUI (arrow keys) |
 | `siren play` / `next` / `prev` / `stop` / `pause` / `now` | Music controls (recursive `~/Music`) |
 | `siren trove 10 music lofi` | Free & legal media (Internet Archive) |
@@ -54,10 +55,13 @@ exec zsh
 ### Model (Pixie)
 
 ```text
-~/.local/share/pixie/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf
+~/.local/share/pixie/models/qwen3-4b-instruct-q4_k_m.gguf
 ```
 
-Then: `menagerie start` and `pixie "hello"`.
+Then: `menagerie status all` and `pixie "hello"`. Each AI app owns its own
+llama-server instance on its own port (pixie 8080 · ask 8090 · magpie 8091 ·
+imp 8082 · kur 8081), bound to a model of its own — switch with
+`menagerie set <app> <model>`, add models with `menagerie models add`.
 
 ## Notes
 

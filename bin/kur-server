@@ -3,6 +3,7 @@ import sys
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -73,11 +74,16 @@ class KurRequestHandler(BaseHTTPRequestHandler):
                             haiku_text = res_json.get("content", "").strip()
                             break
                     except Exception:
-                        # our own model may have been unloaded when kur quit last
+                        # our own model may have been unloaded when kur quit last;
+                        # ensure kur's instance, then give it time to load (~20s)
                         subprocess.run(
-                            [_menagerie(), "start", "kur"],
-                            capture_output=True, timeout=100
+                            [_menagerie(), "ensure", "kur"],
+                            capture_output=True, timeout=120
                         )
+                        for _wait in range(25):
+                            if urllib.request.urlopen(f"{LLM_URL}/health", timeout=2).status in (200, 503):
+                                break
+                            time.sleep(1)
                 
                 if not haiku_text:
                     haiku_text = f"Silent mountains stand,\n{prompt} echoes through the mist,\nPeace returns again."
