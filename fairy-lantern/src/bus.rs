@@ -1,6 +1,7 @@
 //! GBA memory map (simplified waitstates).
 
 use crate::cart::Cart;
+use crate::dma;
 
 pub const EWRAM_SIZE: usize = 256 * 1024;
 pub const IWRAM_SIZE: usize = 32 * 1024;
@@ -22,6 +23,8 @@ pub struct Bus {
     pub sram: Vec<u8>,
     /// KEYINPUT active-low bits (0 = pressed)
     pub keyinput: u16,
+    /// Timer reload shadow (synced from Emu.timers on write)
+    pub timer_reload: [u16; 4],
 }
 
 impl Bus {
@@ -36,11 +39,11 @@ impl Bus {
             oam: vec![0; OAM_SIZE],
             rom: cart.data.clone(),
             sram: vec![0xFF; 64 * 1024],
-            keyinput: 0x03FF, // all released
+            keyinput: 0x03FF,
+            timer_reload: [0; 4],
         };
-        // Sensible power-on IO defaults
-        b.write16(0x0400_0130, 0x03FF); // KEYINPUT
-        b.write16(0x0400_0000, 0x0080); // DISPCNT forced blank until game sets it
+        b.write16_raw(0x0400_0130, 0x03FF);
+        b.write16_raw(0x0400_0000, 0x0080);
         b
     }
 
@@ -59,7 +62,10 @@ impl Bus {
                         (v >> 8) as u8
                     }
                 } else {
-                    self.io.get((a as usize) & (IO_SIZE - 1)).copied().unwrap_or(0)
+                    self.io
+                        .get((a as usize) & (IO_SIZE - 1))
+                        .copied()
+                        .unwrap_or(0)
                 }
             }
             0x05 => self.pal[(a as usize) & (PAL_SIZE - 1)],
@@ -82,6 +88,7 @@ impl Bus {
             0x04 => {
                 let i = (a as usize) & (IO_SIZE - 1);
                 if i < self.io.len() {
+                    // 16-bit side effects go through write16; byte path still stores
                     self.io[i] = val;
                 }
             }
@@ -98,11 +105,58 @@ impl Bus {
         u16::from_le_bytes([self.read8(a), self.read8(a.wrapping_add(1))])
     }
 
-    pub fn write16(&mut self, addr: u32, val: u16) {
+    /// Write without IO side effects (used by PPU/timer internals).
+    pub fn write16_raw(&mut self, addr: u32, val: u16) {
         let a = addr & !1;
         let b = val.to_le_bytes();
+        let i0 = (a as usize) & (IO_SIZE - 1);
+        if (a >> 24) == 0x04 && i0 + 1 < self.io.len() {
+            self.io[i0] = b[0];
+            self.io[i0 + 1] = b[1];
+            return;
+        }
         self.write8(a, b[0]);
         self.write8(a.wrapping_add(1), b[1]);
+    }
+
+    pub fn write16(&mut self, addr: u32, val: u16) {
+        let a = addr & !1;
+        // IO side effects
+        if (a >> 24) == 0x04 {
+            match a {
+                // IF — write 1 to clear
+                0x0400_0202 => {
+                    let cur = self.read16(0x0400_0202);
+                    self.write16_raw(a, cur & !val);
+                    return;
+                }
+                // Timer reloads
+                0x0400_0100 | 0x0400_0104 | 0x0400_0108 | 0x0400_010C => {
+                    let idx = ((a - 0x0400_0100) / 4) as usize;
+                    if idx < 4 {
+                        self.timer_reload[idx] = val;
+                    }
+                    self.write16_raw(a, val);
+                    return;
+                }
+                // DMA CNT_H
+                0x0400_00BA | 0x0400_00C6 | 0x0400_00D2 | 0x0400_00DE => {
+                    self.write16_raw(a, val);
+                    let ch = match a {
+                        0x0400_00BA => 0,
+                        0x0400_00C6 => 1,
+                        0x0400_00D2 => 2,
+                        _ => 3,
+                    };
+                    if val & 0x8000 != 0 {
+                        dma::try_start(self, ch);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.write16_raw(a, val);
     }
 
     pub fn read32(&self, addr: u32) -> u32 {
@@ -118,22 +172,17 @@ impl Bus {
     pub fn write32(&mut self, addr: u32, val: u32) {
         let a = addr & !3;
         let b = val.to_le_bytes();
-        self.write8(a, b[0]);
-        self.write8(a.wrapping_add(1), b[1]);
-        self.write8(a.wrapping_add(2), b[2]);
-        self.write8(a.wrapping_add(3), b[3]);
+        // route through write16 for side effects on halfwords
+        self.write16(a, u16::from_le_bytes([b[0], b[1]]));
+        self.write16(a.wrapping_add(2), u16::from_le_bytes([b[2], b[3]]));
     }
 
     pub fn dispcnt(&self) -> u16 {
         self.read16(0x0400_0000)
     }
 
-    pub fn vcount(&self) -> u16 {
-        self.read16(0x0400_0006)
-    }
-
     pub fn set_vcount(&mut self, v: u16) {
-        self.write16(0x0400_0006, v);
+        self.write16_raw(0x0400_0006, v);
     }
 
     pub fn dispstat(&self) -> u16 {
@@ -141,13 +190,18 @@ impl Bus {
     }
 
     pub fn set_dispstat(&mut self, v: u16) {
-        self.write16(0x0400_0004, v);
+        self.write16_raw(0x0400_0004, v);
+    }
+
+    /// Set keypad from emulator UI (bits 0=pressed active-low mask already).
+    pub fn set_keys_pressed(&mut self, pressed_mask: u16) {
+        // pressed_mask: bit set = button pressed
+        self.keyinput = (!pressed_mask) & 0x03FF;
     }
 }
 
 fn vram_index(addr: u32) -> usize {
     let a = (addr as usize) & 0x1FFFF;
-    // mirrors
     if a < VRAM_SIZE {
         a
     } else {

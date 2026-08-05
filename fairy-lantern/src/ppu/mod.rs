@@ -39,27 +39,25 @@ impl Ppu {
         self.line_cycles += cycles;
         while self.line_cycles >= CYCLES_PER_LINE {
             self.line_cycles -= CYCLES_PER_LINE;
+            let entering_vblank = self.line == HEIGHT as u16;
             if self.line < HEIGHT as u16 {
                 render::render_scanline(bus, self.line as usize, &mut self.frame);
             }
             self.line += 1;
-            bus.set_vcount(self.line);
-            // DISPSTAT VBlank flag
-            let mut ds = bus.dispstat() & !0x3;
-            if self.line >= HEIGHT as u16 {
-                ds |= 1; // VBlank
+            if self.line >= LINES_PER_FRAME as u16 {
+                self.line = 0;
+                self.frame_ready = true;
             }
-            if self.line_cycles < 960 {
-                // HBlank approx later
+            bus.set_vcount(self.line);
+
+            let mut ds = bus.dispstat() & !1;
+            if self.line >= HEIGHT as u16 {
+                ds |= 1; // VBlank flag while lines 160..227
             }
             bus.set_dispstat(ds);
 
-            if self.line >= LINES_PER_FRAME as u16 {
-                self.line = 0;
-                bus.set_vcount(0);
-                let ds = bus.dispstat() & !1;
-                bus.set_dispstat(ds);
-                self.frame_ready = true;
+            if entering_vblank {
+                crate::irq::raise(bus, crate::irq::IRQ_VBLANK);
             }
         }
         self.frame_ready

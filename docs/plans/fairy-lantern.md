@@ -25,15 +25,15 @@ fairy-lantern run <rom.gba> …
 
 ## Current
 - [x] ROM/header load (`info`)
-- [x] ARM interpreter subset (data-proc, B/BL, LDR/STR, LDM/STM, BX, MUL…)
+- [x] ARM interpreter subset (data-proc, B/BL, LDR/STR/LDRH/STRH, LDM/STM, BX, MUL…)
 - [x] Thumb interpreter subset (ALU, imm, load/store, push/pop, B/BL, BX…)
-- [x] Bus map (BIOS/EWRAM/IWRAM/IO/PAL/VRAM/OAM/ROM/SRAM)
-- [x] PPU Mode 3/4 scanlines + PPM dump / chafa `--present`
+- [x] Bus map + KEYINPUT + DMA enable + timer reloads + IF clear
+- [x] PPU Mode 3/4 + VBlank flag/IRQ raise
+- [x] **Interactive window** (`minifb`) — `fairy-lantern spark` / `play`
+- [x] **Built-in SPARK fable** — Mode 3 pixel you steer (100% playable on this emu)
 - [x] Self-tests (`fairy-lantern test`)
-- [ ] Full interactive input loop
-- [ ] VBlank IRQ / timers / DMA
-- [ ] Mode 0 tiles + sprites
-- [ ] Saves
+- [ ] Mode 0 tiles + sprites (commercial ROMs)
+- [ ] Saves / fuller BIOS HLE
 
 ## Data
 `$XDG_DATA_HOME/faeos/fairy-lantern/` · env `FAIRY_LANTERN_ROMS`, `FAIRY_LANTERN_BIOS`

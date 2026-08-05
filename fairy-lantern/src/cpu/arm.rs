@@ -61,9 +61,11 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         let imm = (imm << 8) >> 8;
         let offset = (imm * 4) as u32;
         // PC already advanced by 4; ARM says offset from PC+8 = (PC_after_fetch)+4
+        // r15 already advanced to next insn (PC+4 from original)
         let target = cpu.r[15].wrapping_add(4).wrapping_add(offset);
         if link {
-            cpu.r[14] = cpu.r[15].wrapping_sub(4); // return to next insn
+            // LR = address of next instruction (already in r15 after fetch advance)
+            cpu.r[14] = cpu.r[15];
         }
         cpu.r[15] = target;
         return 3;
@@ -103,7 +105,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         return 1;
     }
 
-    // Multiply
+    // Multiply: xxxx0000_00AS_...._1001
     if (op & 0x0FC0_00F0) == 0x0000_0090 {
         let rd = ((op >> 16) & 0xF) as usize;
         let rn = ((op >> 12) & 0xF) as usize;
@@ -122,6 +124,12 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             cpu.cpsr.set_nz(result);
         }
         return 2;
+    }
+
+    // Halfword / signed byte transfer: ....000P_UWI_L...._1SH1
+    // (must not be confused with data-processing; bit7=1 bit4=1)
+    if (op & 0x0E00_0090) == 0x0000_0090 {
+        return ldrh_strh(cpu, bus, op);
     }
 
     // Single data transfer LDR/STR
@@ -375,6 +383,74 @@ fn data_processing(cpu: &mut Cpu, _bus: &mut Bus, op: u32) -> u32 {
     }
 
     1
+}
+
+fn ldrh_strh(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
+    let p = (op & (1 << 24)) != 0;
+    let u = (op & (1 << 23)) != 0;
+    let i = (op & (1 << 22)) != 0; // imm offset when set for halfword form
+    let w = (op & (1 << 21)) != 0;
+    let l = (op & (1 << 20)) != 0;
+    let s = (op & (1 << 6)) != 0;
+    let h = (op & (1 << 5)) != 0;
+    let rn_i = ((op >> 16) & 0xF) as usize;
+    let rd = ((op >> 12) & 0xF) as usize;
+    let base = if rn_i == 15 {
+        cpu.pc_arm_read()
+    } else {
+        cpu.r[rn_i]
+    };
+    let offset = if i {
+        ((op >> 4) & 0xF0) | (op & 0xF)
+    } else {
+        let rm = (op & 0xF) as usize;
+        cpu.r[rm]
+    };
+    let offset = if u {
+        offset
+    } else {
+        (0u32).wrapping_sub(offset)
+    };
+    let addr = if p {
+        base.wrapping_add(offset)
+    } else {
+        base
+    };
+
+    if l {
+        let val = if h && !s {
+            // LDRH
+            bus.read16(addr & !1) as u32
+        } else if !h && s {
+            // LDRSB
+            bus.read8(addr) as i8 as i32 as u32
+        } else if h && s {
+            // LDRSH
+            bus.read16(addr & !1) as i16 as i32 as u32
+        } else {
+            bus.read8(addr) as u32
+        };
+        if rd != 15 {
+            cpu.r[rd] = val;
+        }
+    } else if h && !s {
+        // STRH
+        let val = if rd == 15 {
+            cpu.pc_arm_read()
+        } else {
+            cpu.r[rd]
+        };
+        bus.write16(addr & !1, val as u16);
+    }
+
+    if (w || !p) && rn_i != 15 {
+        if p {
+            cpu.r[rn_i] = addr;
+        } else {
+            cpu.r[rn_i] = base.wrapping_add(offset);
+        }
+    }
+    2
 }
 
 fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
