@@ -16,6 +16,7 @@ Keys:
   s                       sort size ↔ name
   r                       reverse order
   R                       rescan this directory
+  d                       delete selected (y/n confirm)
   /                       filter
   .                       toggle hidden
   q / esc                 leave
@@ -24,6 +25,7 @@ Keys:
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import sys
 import time
@@ -246,6 +248,42 @@ def invalidate(path: Path | None = None) -> None:
         return
     key = str(path.resolve())
     _CACHE.pop(key, None)
+    # parent listing is stale too (sizes changed)
+    try:
+        parent = path.resolve().parent
+        _CACHE.pop(str(parent), None)
+    except OSError:
+        pass
+
+
+def delete_entry(entry: Entry) -> str:
+    """Remove file, symlink, or directory tree. Returns status message."""
+    path = entry.path
+    try:
+        # never follow links into other trees
+        if path.is_symlink():
+            path.unlink()
+            return f"unlinked {entry.name}@ · freed {fmt_bytes(entry.size)}"
+        if path.is_file():
+            path.unlink()
+            return f"deleted {entry.name} · freed {fmt_bytes(entry.size)}"
+        if path.is_dir():
+            # safety: must stay under its stated path (no .. surprises)
+            resolved = path.resolve()
+            if resolved == Path("/"):
+                return "refused: will not delete /"
+            shutil.rmtree(resolved)
+            mark = "~" if entry.partial else ""
+            return f"deleted {entry.name}/ · freed {fmt_bytes(entry.size)}{mark}"
+        # fifo/socket/etc.
+        path.unlink()
+        return f"deleted {entry.name}"
+    except FileNotFoundError:
+        return f"already gone: {entry.name}"
+    except PermissionError:
+        return f"permission denied: {entry.name}"
+    except OSError as e:
+        return f"delete failed: {e}"
 
 
 # ── sort / filter ──────────────────────────────────────────────────────
@@ -317,6 +355,7 @@ def frame(
     show_hidden: bool,
     status: str,
     scanning: str,
+    confirm: str = "",
 ) -> str:
     tw = art.term_width()
     th = art.term_height()
@@ -355,12 +394,14 @@ def frame(
     ]
     if status:
         head_lines.append(_fit(status, body_w))
+    if confirm:
+        head_lines.append(art.paint(_fit(art.strip_ansi(confirm), body_w), P.WARN))
     head = art.box(head_lines, title=NAME.upper(), width=tw, body_style=(P.MUTED,))
 
     runes = art.box(
         [
             _fit("↑↓ move · enter dive · h parent · s sort · r rev · R rescan", body_w),
-            _fit("/ filter · . hidden · q leave", body_w),
+            _fit("d delete · / filter · . hidden · q leave", body_w),
         ],
         title="runes",
         width=tw,
@@ -452,18 +493,21 @@ def run_tui(start: Path) -> int:
     sort_key = "size"
     reverse = True
     filt = ""
-    mode = "nav"
+    mode = "nav"  # nav | filter | confirm
     show_hidden = False
     sel = 0
     sel_name: str | None = None
     status = ""
+    confirm_msg = ""
+    pending: Entry | None = None
     entries: list[Entry] = []
     parent_total = 0
     stick = True
     stack: list[Path] = []  # for reference; parent via cwd.parent
 
-    def paint(msg: str = "", scanning: str = "") -> None:
-        visible = filter_sort(entries, filt, sort_key, reverse)
+    def paint(msg: str = "", scanning: str = "", confirm: str = "") -> None:
+        base = entries if show_hidden else [e for e in entries if not e.name.startswith(".")]
+        visible = filter_sort(base, filt, sort_key, reverse)
         nonlocal sel, sel_name, stick
         if stick and sel_name is not None:
             for i, e in enumerate(visible):
@@ -479,7 +523,7 @@ def run_tui(start: Path) -> int:
             sel_name = None
         body = frame(
             cwd, visible, sel, parent_total, sort_key, reverse, filt, mode,
-            show_hidden, msg or status, scanning,
+            show_hidden, msg or status, scanning, confirm=confirm or confirm_msg,
         )
         try:
             art.paint_frame(fd, body)
@@ -489,7 +533,6 @@ def run_tui(start: Path) -> int:
     def do_scan() -> None:
         nonlocal entries, parent_total, status
         status = ""
-        note_holder = [""]
 
         def prog(i: int, n: int, name: str) -> None:
             paint(scanning=f"weighing {i + 1}/{n} {_fit(name, 20)}")
@@ -498,13 +541,33 @@ def run_tui(start: Path) -> int:
         entries, parent_total, note = scan_dir(
             cwd, show_hidden=True, timeout_s=180.0, progress=prog,
         )
-        # show_hidden filter applied in loop via filter on display list
-        if not show_hidden:
-            # sizes still from full scan; display filters dots
-            pass
-        note_holder[0] = note
         if note:
             status = note
+
+    def ask_delete(e: Entry) -> None:
+        nonlocal mode, pending, confirm_msg, status
+        try:
+            resolved = e.path.resolve()
+        except OSError:
+            resolved = e.path
+        if resolved == Path("/"):
+            status = "refused: will not delete /"
+            return
+        # refuse deleting the live home directory tree as a whole if selected somehow
+        try:
+            if e.kind == "dir" and resolved == Path.home().resolve():
+                status = "refused: will not delete your home"
+                return
+        except OSError:
+            pass
+        kind = "dir" if e.kind == "dir" else ("link" if e.kind == "link" else "file")
+        rough = " ~" if e.partial else ""
+        mode = "confirm"
+        pending = e
+        confirm_msg = (
+            f"delete {kind} {e.name}{'/' if e.kind == 'dir' else ''} "
+            f"({fmt_bytes(e.size)}{rough})?  y / n"
+        )
 
     try:
         do_scan()
@@ -527,7 +590,7 @@ def run_tui(start: Path) -> int:
 
             body = frame(
                 cwd, visible, sel, parent_total, sort_key, reverse, filt, mode,
-                show_hidden, status, "",
+                show_hidden, status, "", confirm=confirm_msg,
             )
             status = ""
             try:
@@ -536,6 +599,30 @@ def run_tui(start: Path) -> int:
                 art.tty_write(fd, art.clear_screen() + body + "\n")
 
             key = art.tui_read_key(fd)
+
+            # ── confirm delete ──
+            if mode == "confirm":
+                if key in ("y", "Y"):
+                    if pending is not None:
+                        paint(confirm=f"deleting {pending.name}…")
+                        status = delete_entry(pending)
+                        invalidate(cwd)
+                        do_scan()
+                        stick = True
+                        if sel >= len(
+                            entries if show_hidden
+                            else [e for e in entries if not e.name.startswith(".")]
+                        ):
+                            sel = max(0, sel - 1)
+                    mode = "nav"
+                    pending = None
+                    confirm_msg = ""
+                elif key in ("n", "N", "esc", "q"):
+                    mode = "nav"
+                    pending = None
+                    confirm_msg = ""
+                    status = "delete cancelled"
+                continue
 
             if mode == "filter":
                 if key in ("esc", "enter"):
@@ -621,6 +708,11 @@ def run_tui(start: Path) -> int:
                 do_scan()
                 stick = True
                 status = "rescanned"
+            elif key in ("d", "D", "delete"):
+                if not visible:
+                    status = "nothing to delete"
+                else:
+                    ask_delete(visible[sel])
             elif key == "/":
                 mode = "filter"
             elif key == ".":

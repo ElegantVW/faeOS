@@ -8,7 +8,7 @@
 - `vault [path]` — TUI at path (default `$HOME`); hold name `vault`
 - Header: path · this-dir total · disk used/total bar · free
 - Table: SIZE · % of parent · name (`/` dirs, `@` links); `~` size if scan timed out
-- Keys: ↑↓ dive (enter/l/→) · parent (h/←/backspace) · `s` size↔name · `r` reverse · `R` rescan · `/` filter · `.` hidden · `q`
+- Keys: ↑↓ dive (enter/l/→) · parent (h/←/backspace) · `s` size↔name · `r` reverse · `R` rescan · **`d` delete (y/n confirm)** · `/` filter · `.` hidden · `q`
 - Recursive weigh: no symlink follow; hardlink de-dupe within a tree; unreadable skipped
 - Cache: `path → (mtime, entries, total)` so re-entry is instant until dir mtime changes
 - Progress while scanning; 180s budget with partial mark
@@ -19,7 +19,7 @@
 - Open/edit/rename/delete files, shared `--pick` dialog
 
 ## Next
-- [ ] Delete selected (with confirm) — free space without leaving Vault
+- [x] Delete selected (with confirm) — `d` → y/n; rmtree/unlink; refuse `/` and `$HOME`; rescan after
 - [ ] Skip other mount points (`st_dev` change)
 - [ ] Parallel or incremental rescan of one child
 - [ ] Export report (`vault list > report.txt` already works)
