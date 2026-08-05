@@ -88,21 +88,21 @@ pub fn run_tour(term: &mut crate::tui::Term) -> Result<bool> {
             }
             crate::tui::Key::Char('\n')
             | crate::tui::Key::Char('\r')
-            | crate::tui::Key::Enter => {
+            | crate::tui::Key::Enter
+            | crate::tui::Key::Right
+            | crate::tui::Key::Down
+            | crate::tui::Key::Char('n')
+            | crate::tui::Key::Char(' ') => {
                 if page + 1 >= PAGES.len() {
                     words::mark_tutorial_done();
                     return Ok(true);
                 }
                 page += 1;
             }
-            crate::tui::Key::Char('n') | crate::tui::Key::Char(' ') => {
-                if page + 1 >= PAGES.len() {
-                    words::mark_tutorial_done();
-                    return Ok(true);
-                }
-                page += 1;
-            }
-            crate::tui::Key::Char('b') | crate::tui::Key::Char('p') => {
+            crate::tui::Key::Char('b')
+            | crate::tui::Key::Char('p')
+            | crate::tui::Key::Left
+            | crate::tui::Key::Up => {
                 page = page.saturating_sub(1);
             }
             _ => {}
