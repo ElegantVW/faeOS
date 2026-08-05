@@ -1,0 +1,11 @@
+# Bulwark Aegis policy — server with SSH
+table bulwark
+family inet
+
+default input drop
+default output accept
+default forward drop
+
+allow lo
+allow established
+allow in tcp 22

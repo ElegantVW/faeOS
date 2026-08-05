@@ -36,6 +36,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | `quests` / `quests add …` | Quests — todo.txt log (independent) |
 | `hourglass` / `hourglass 25` | Hourglass — timer / pomodoro (independent) |
 | `almanac` / `almanac today` | Almanac — calendar hub (reads quests + hourglass) |
+| `bulwark` / `bulwark status` | Bulwark — first-party firewall, integrity, hunt |
 | `spellbook` | File-manager TUI (j/k move, ? help, n/d/r/e dialogs) |
 | `tick` / `termfix` | Screen tick + TTY line-edit recovery |
 
@@ -57,6 +58,7 @@ Works on **Linux** (Arch + kmscon tested). Scripts + shell hooks + configs — n
 | **Quests** | Todos (todo.txt) |
 | **Hourglass** | Timer / pomodoro |
 | **Almanac** | Calendar hub |
+| **Bulwark** | Protection (firewall / FIM / hunt) |
 
 Prompt: framed pink status box (user · mood · music · RAM/CPU/HDD/temp) + `>`.
 

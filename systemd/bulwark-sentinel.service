@@ -1,0 +1,11 @@
+[Unit]
+Description=Bulwark Sentinel (faeOS host watch)
+After=default.target
+
+[Service]
+Type=oneshot
+# Path filled by bulwark install; this file is a template reference
+ExecStart=%h/bin/bulwark sentinel
+
+[Install]
+WantedBy=default.target

@@ -33,3 +33,7 @@ vendor/lib-pixie/llama-server
 **/*netherweave*
 auth.json
 **/accounts.conf
+
+# bulwark rust build
+bulwark/target/
+

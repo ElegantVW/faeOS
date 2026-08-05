@@ -44,6 +44,7 @@
 | **Quests** | Todos (todo.txt) — independent | new | [docs/plans/quests.md](docs/plans/quests.md) |
 | **Hourglass** | Timer / pomodoro — independent | new | [docs/plans/hourglass.md](docs/plans/hourglass.md) |
 | **Almanac** | Calendar hub (feeds: quests + hourglass) | new | [docs/plans/almanac.md](docs/plans/almanac.md) |
+| **Bulwark** | Host protection (Aegis/Purity/Sentinel/Ward) — first-party Rust | new | [docs/plans/bulwark.md](docs/plans/bulwark.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -80,7 +81,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 | Archive manager | Coffer | zip/tar/7z with preview |
 | Log viewer | Chronicle | journalctl, plain words |
 | Backups | Phylactery | snapshots + restore |
-| Firewall | Bulwark | rules menu |
+| Firewall / protection | Bulwark ✅ | first-party firewall + FIM + hunt |
 | Bookmarks | Lore | front-end for Magpie |
 | eBook reader | Tome ✅ (docs now; epub next) | reads markdown/text, epub planned |
 | QR codes | Sigil | wifi creds etc. in seconds |
@@ -113,6 +114,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-05 (bulwark)** — **Bulwark v0.1 (Rust):** zero runtime security-package deps. Sentinel (`/proc/net` listeners→PID), Aegis (own policy DSL + raw NETLINK_NETFILTER nf_tables apply/undo + deadman), Purity (SHA-256 baseline), Ward (hostile pattern hunt), install/uninstall user timer, ANSI TUI. Build: `bulwark/build.sh install`. Not ufw/nft/clamav. [docs/plans/bulwark.md](docs/plans/bulwark.md).
 - **2026-08-05 (calendar system)** — **Quests + Hourglass + Almanac.** Three apps: **Quests** (todo.txt, fully independent), **Hourglass** (timer/pomodoro + sessions.jsonl, independent), **Almanac** (month/day calendar hub that *reads* quest due: dates and hourglass sessions, owns its own events.json; keys Q/H launch the peers). No reverse dependency — peers run alone. Plans under docs/plans/{quests,hourglass,almanac}.md; Tier-1 Quests/Hourglass and Tier-2 Almanac marked done.
 - **2026-08-05 (abacus)** — **Abacus v1: safe calculator.** AST-only arithmetic (+ − * / // % ** ^, unary, sqrt/sin/cos/log/pi/e…). TUI tape + history ↑↓ under `╭─ ✦ Abacus ✦ calc ✦ ─╮` + Runes; one-shot `abacus "2+2"`. Tier-1 Abacus marked done · [docs/plans/abacus.md](docs/plans/abacus.md).
 - **2026-08-05 (grimoire)** — **Grimoire v1: markdown notes.** Pages in `~/notes` (or `$GRIMOIRE_DIR`): TUI list by mtime, filter, new/edit via `$EDITOR`/`nano`, in-app view, burn (delete) with y/n. CLI: `list` `new` `edit` `show`. Height-budgeted. Registered scroll + [docs/plans/grimoire.md](docs/plans/grimoire.md); Tier-1 Grimoire marked done.

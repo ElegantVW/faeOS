@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# bulwark — launcher for the first-party protection binary
+set -euo pipefail
+CANDIDATES=(
+  "${BULWARK_BIN:-}"
+  "$HOME/faeos/bulwark/target/release/bulwark"
+  "$HOME/.local/lib/faeos/bulwark"
+  "$(cd "$(dirname "$0")/.." && pwd)/bulwark/target/release/bulwark"
+)
+for c in "${CANDIDATES[@]}"; do
+  [[ -n "$c" && -x "$c" ]] || continue
+  exec "$c" "$@"
+done
+echo "bulwark: engine not built yet." >&2
+echo "  build:  cd ~/faeos/bulwark && ./build.sh install" >&2
+exit 127

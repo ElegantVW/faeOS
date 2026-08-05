@@ -1,0 +1,12 @@
+# Bulwark Aegis policy — strict
+# deny all inbound except loopback; outbound ok
+
+table bulwark
+family inet
+
+default input drop
+default output accept
+default forward drop
+
+allow lo
+allow established
