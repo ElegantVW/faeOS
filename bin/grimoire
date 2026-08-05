@@ -185,12 +185,25 @@ def create_note(title: str) -> Path:
 
 
 def edit_note(path: Path) -> int:
+    """Open path in $EDITOR on a fully cooked controlling tty.
+
+    Must not run under cbreak — otherwise nano/vim see Ctrl-G as literal ^G
+    and Esc inserts bytes into the buffer instead of commands.
+    """
+    art.force_sane_tty()
     cmd = _editor() + [str(path)]
     try:
-        return int(subprocess.call(cmd))
+        # Bind the editor to /dev/tty so it never inherits a half-raw stdin
+        # left over from the TUI's separate /dev/tty fd.
+        with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
+            return int(subprocess.call(cmd, stdin=tin, stdout=tout, stderr=tout))
     except OSError as e:
-        print(f"grimoire: editor failed: {e}", file=sys.stderr)
-        return 1
+        # fallback: whatever stdio we have, still after force_sane_tty
+        try:
+            return int(subprocess.call(cmd))
+        except OSError as e2:
+            print(f"grimoire: editor failed: {e2}", file=sys.stderr)
+            return 1
 
 
 def delete_note(path: Path) -> str:
@@ -346,15 +359,16 @@ def frame(
 
 def _prompt_title(fd: int) -> str | None:
     """Cooked input for a new title. Returns None if cancelled."""
-    art.tui_suspend()
+    art.tui_suspend()  # includes force_sane_tty
     try:
-        sys.stdout.write(art.paint("\n  ✦ title of the new page: ", P.PINK))
-        sys.stdout.flush()
-        line = sys.stdin.readline()
-        if not line:
-            return None
-        return line.strip()
-    except (EOFError, KeyboardInterrupt):
+        with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
+            tout.write(art.paint("\n  ✦ title of the new page: ", P.PINK))
+            tout.flush()
+            line = tin.readline()
+            if not line:
+                return None
+            return line.strip()
+    except (EOFError, KeyboardInterrupt, OSError):
         return None
     finally:
         art.tui_resume()
@@ -441,14 +455,21 @@ def run_tui() -> int:
         return filter_notes(all_notes, filt)
 
     def leave_edit(path: Path) -> None:
-        """Drop TUI, run editor, come back."""
+        """Drop TUI completely, run editor on a cooked tty, re-enter TUI."""
         nonlocal status
+        # Full cleanup (leave alt screen + restore termios + force_sane_tty)
         art.tui_cleanup()
         print(art.paint(f"\n  ✦ opening {path.name} …\n", P.PINK))
+        sys.stdout.flush()
         rc = edit_note(path)
+        art.force_sane_tty()
         try:
-            input(art.paint("  press Enter to return to grimoire… ", P.MUTED))
-        except EOFError:
+            # read from /dev/tty so a messy stdin doesn't block forever
+            with open("/dev/tty", "r") as tin, open("/dev/tty", "w") as tout:
+                tout.write(art.paint("  press Enter to return to grimoire… ", P.MUTED))
+                tout.flush()
+                tin.readline()
+        except (EOFError, OSError):
             pass
         new_fd = art.tui_open_tty()
         if new_fd is None:

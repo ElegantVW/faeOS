@@ -598,6 +598,9 @@ def tui_cleanup() -> None:
             pass
     _tui_fd = None
     _tui_old = None
+    # Guarantee a cooked terminal for anything that runs after the TUI
+    # (editors, sudo, shells). Critical when /dev/tty ≠ stdin fd.
+    force_sane_tty()
 
 
 def tui_begin(fd: int, hold_name: str = "pixie") -> None:
@@ -710,6 +713,10 @@ def tui_suspend() -> None:
             termios.tcsetattr(_tui_fd, termios.TCSADRAIN, _tui_old)
         except (termios.error, OSError):
             pass
+    # Also force a sane cooked mode on the controlling tty — editors and
+    # line-input need ICANON+ECHO+ISIG. Restoring _tui_old alone is not
+    # enough if stdin is a different fd than the TUI's /dev/tty handle.
+    force_sane_tty()
 
 
 def tui_resume() -> None:
@@ -719,3 +726,68 @@ def tui_resume() -> None:
             set_ui_mode(_tui_fd)
         except (termios.error, OSError):
             pass
+
+
+def force_sane_tty() -> None:
+    """Best-effort cooked terminal for external programs (nano/vim/sudo).
+
+    After a TUI in cbreak, Ctrl keys must be signals again (ISIG) and the
+    line discipline must be canonical (ICANON+ECHO). Call this before any
+    interactive child that expects a normal terminal.
+    """
+    # Leave alt-screen / show cursor / re-enable wrap — harmless if already off
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.write("\033[?25h\033[?7h\033[?1049l\033[0m")
+            stream.flush()
+        except Exception:
+            pass
+
+    def _sane(fd: int) -> None:
+        try:
+            if not os.isatty(fd):
+                return
+            attrs = termios.tcgetattr(fd)
+            # iflag
+            attrs[0] |= termios.BRKINT | termios.ICRNL | termios.IXON
+            attrs[0] &= ~(termios.IGNBRK | termios.INLCR | termios.IGNCR | termios.ISTRIP)
+            # oflag
+            attrs[1] |= termios.OPOST
+            if hasattr(termios, "ONLCR"):
+                attrs[1] |= termios.ONLCR
+            # lflag — the important ones for nano/vim
+            attrs[3] |= (
+                termios.ISIG
+                | termios.ICANON
+                | termios.ECHO
+                | termios.ECHOE
+                | termios.ECHOK
+                | termios.IEXTEN
+            )
+            attrs[3] &= ~getattr(termios, "ECHONL", 0)
+            # c_cc: make sure VINTR is Ctrl-C
+            try:
+                attrs[6][termios.VINTR] = b"\x03"
+                attrs[6][termios.VEOF] = b"\x04"
+                attrs[6][termios.VKILL] = b"\x15"
+            except Exception:
+                pass
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        except (termios.error, OSError, ValueError):
+            pass
+
+    for fd in (0, 1, 2):
+        _sane(fd)
+    try:
+        tfd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+    except OSError:
+        tfd = -1
+    if tfd >= 0:
+        try:
+            _sane(tfd)
+        finally:
+            if tfd not in (0, 1, 2):
+                try:
+                    os.close(tfd)
+                except OSError:
+                    pass
