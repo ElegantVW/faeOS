@@ -43,6 +43,12 @@ cd ~/faeos/bulwark && ./build.sh install
 ## State
 `$XDG_DATA_HOME/faeos/bulwark/` (or `BULWARK_DIR`)
 
+## Everyday TUI (friendly)
+
+Home screen shows **SAFE / CARE / DANGER** plus Aegis · Purity · Ward · Sentinel
+with plain one-liners. Numbered menu `1`–`7`. Optional first-run **tour**
+(`bulwark tour`, or menu 7). Themed names kept; no netlink jargon on home.
+
 ## Next
 - [ ] IPv6 rule parity tests in netns
 - [ ] Address-from match in Aegis (src IP)

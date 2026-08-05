@@ -44,3 +44,7 @@ pub fn purity_baseline_path() -> PathBuf {
 pub fn sentinel_last_path() -> PathBuf {
     data_dir().join("sentinel").join("last.json")
 }
+
+pub fn tutorial_done_path() -> PathBuf {
+    data_dir().join("tutorial_done")
+}

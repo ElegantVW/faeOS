@@ -7,7 +7,9 @@ mod paths;
 mod purity;
 mod sentinel;
 mod tui;
+mod tutorial;
 mod ward;
+mod words;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -57,8 +59,12 @@ enum Commands {
         #[arg(long)]
         purge: bool,
     },
-    /// Interactive TUI
+    /// Interactive TUI (friendly home screen)
     Tui,
+    /// Short first-time style tour (themed names explained)
+    Tour,
+    /// Alias for Tour
+    Tutorial,
 }
 
 #[derive(Subcommand, Debug)]
@@ -116,7 +122,21 @@ fn real_main() -> Result<()> {
         Commands::Install { system } => cmd_install(system),
         Commands::Uninstall { purge } => cmd_uninstall(purge),
         Commands::Tui => tui::run(),
+        Commands::Tour | Commands::Tutorial => cmd_tour(),
     }
+}
+
+fn cmd_tour() -> Result<()> {
+    let _ = paths::ensure_dirs()?;
+    // Force tour even if already done: remove marker temporarily? Plan says re-run shows tour.
+    // Don't delete marker permanently until finished — tour marks done at end.
+    let mut term = tui::Term::new()?;
+    let ok = tutorial::run_tour(&mut term)?;
+    term.restore()?;
+    if ok {
+        println!("✦ tour finished — open: bulwark");
+    }
+    Ok(())
 }
 
 fn cmd_status() -> Result<()> {
