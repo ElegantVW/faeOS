@@ -1,6 +1,6 @@
 # FaeOS Plan
 
-**Last updated:** 2026-08-05
+**Last updated:** 2026-08-06
 **Status:** Active build toward v1.0 (Arch distro)
 **Location:** This file is the *single* main plan. Each app has its own short plan in `docs/plans/`; this file stays concise.
 
@@ -28,7 +28,7 @@
 | **Scroll** | Help menu / command directory (TUI picker) | stable | [docs/plans/scroll.md](docs/plans/scroll.md) |
 | **Spellbook** | File manager (TUI) | stable | [docs/plans/spellbook.md](docs/plans/spellbook.md) |
 | **Ether** | Network manager (bt/wifi/lan, veil VPN, bridge hotspot) | stable | [docs/plans/ether.md](docs/plans/ether.md) |
-| **Siren** | Media player (mpv, queue, playlists, trove) | stable | [docs/plans/siren.md](docs/plans/siren.md) |
+| **Siren** | Media player (single-file v2: mpv, fuzzy search, queue, playlists, config, trove) | stable | [docs/plans/siren.md](docs/plans/siren.md) |
 | **Pixie** | Local AI assistant with tools (qwen3-4b) | stable | [docs/plans/pixie.md](docs/plans/pixie.md) |
 | **Kur** | Haiku dragon — **easter egg, hidden from scroll** | stable | [docs/plans/kur.md](docs/plans/kur.md) |
 | **Imp** | Terminal art generator (pixie-art lineage) | in dev (separate instance) | [docs/plans/imp.md](docs/plans/imp.md) |
@@ -117,6 +117,8 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-06 (fairy-lantern)** — **PC-relative addressing fixed** in ARM7TDMI core. ARM state LDR/STR/LDRH/STRH now use PC+8 (`pc_arm_read() + 4`); Thumb state LDR PC-relative + ADD PC-relative now use PC+4 (`pc_arm_read()`). Removed incorrect `& !2` masks and wrong `pc_thumb_read()` uses. Liquid Crystal ROM (FireRed-based hack) now boots past the `BX` into real Thumb code in ROM instead of jumping to nonsense (0xE4A1…). [docs/plans/fairy-lantern.md](docs/plans/fairy-lantern.md) updated.
+- **2026-08-05 (siren v2)** — **Siren reworked into a single-file app** (`bin/siren`, faeOS house pattern). `siren_player.py` + `siren_waves.py` merged + deleted. New: **config persistence** (`siren config get|set` → `~/.config/siren/config.json`: default_volume, library_roots, fuzzy_search/waves/gapless/normalize/cache_meta, wave_bands; sanitized on load, atomic tmp+replace write), **tiered fuzzy search** (exact→prefix→substring→all-tokens→subsequence, no deps; unmatched `play` now errors instead of playing the whole library), **metadata cache** (`~/.cache/siren/meta.json`, path+mtime keyed, atexit save, lazy mutagen w/ filename fallback), **gapless + ReplayGain normalization** applied at spawn (volume only on fresh spawn so live tweaks survive). `trove` stays delegated to shared `ia.py`. Fixed `kur_voice.py` stale `/tmp/mpv-music.sock` default → `SIREN_SOCK`/`/tmp/siren-mpv.sock`. Socket contract unchanged for starship-music/faectl/tick. **`tests/test_siren.py` added (31 cases)** — config round-trip, fuzzy tiers, meta cache, queue, playlists, resolve, dead-socket player safety, `fmt_clock`; full suite 78 passing (47 fae_termart + 31 siren). [docs/plans/siren.md](docs/plans/siren.md) → v2.0.
 - **2026-08-05 (bulwark)** — **Bulwark v0.1 (Rust):** zero runtime security-package deps. Sentinel (`/proc/net` listeners→PID), Aegis (own policy DSL + raw NETLINK_NETFILTER nf_tables apply/undo + deadman), Purity (SHA-256 baseline), Ward (hostile pattern hunt), install/uninstall user timer, ANSI TUI. Build: `bulwark/build.sh install`. Not ufw/nft/clamav. [docs/plans/bulwark.md](docs/plans/bulwark.md).
 - **2026-08-05 (calendar system)** — **Quests + Hourglass + Almanac.** Three apps: **Quests** (todo.txt, fully independent), **Hourglass** (timer/pomodoro + sessions.jsonl, independent), **Almanac** (month/day calendar hub that *reads* quest due: dates and hourglass sessions, owns its own events.json; keys Q/H launch the peers). No reverse dependency — peers run alone. Plans under docs/plans/{quests,hourglass,almanac}.md; Tier-1 Quests/Hourglass and Tier-2 Almanac marked done.
 - **2026-08-05 (abacus)** — **Abacus v1: safe calculator.** AST-only arithmetic (+ − * / // % ** ^, unary, sqrt/sin/cos/log/pi/e…). TUI tape + history ↑↓ under `╭─ ✦ Abacus ✦ calc ✦ ─╮` + Runes; one-shot `abacus "2+2"`. Tier-1 Abacus marked done · [docs/plans/abacus.md](docs/plans/abacus.md).

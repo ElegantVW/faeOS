@@ -11,11 +11,11 @@
 # See what files exist
 ls -la ~/bin/siren*
 
-# Check the main entry point
-head -20 ~/bin/siren
+# Check the main entry point (single file — CLI + TUI + engine + waves)
+head -30 ~/bin/siren
 
 # See what music is available
-ls ~/Music/siren/
+ls ~/Music/
 ```
 
 ### 2. Test Current Functionality
@@ -23,8 +23,9 @@ ls ~/Music/siren/
 # Start the interactive TUI
 siren
 
-# Play some music
-siren play ~/Music/siren/pkmn-rse-soundtrack/
+# Play some music (fuzzy — matches any track/album/path tokens)
+siren play lofi
+siren play "BLESS"
 
 # Try free archive
 siren trove 10 music lofi   # search Internet Archive + pick
@@ -32,41 +33,71 @@ siren trove get <id>        # download one item to ~/Music/trove or ~/Videos/tro
 
 # Check help
 siren --help
+siren about
 ```
 
 ---
 
-## 🎯 PICK A FEATURE TO IMPLEMENT
+## 🎯 CURRENT STATE (v2.0 — 2026-08-05)
 
-### Quick Wins (Can do in 1 session)
+Siren is now a **single-file app** (`bin/siren`): `siren_player.py` and `siren_waves.py`
+were merged in and deleted. New since v1.1:
 
-#### 🔹 Feature: Tab Completion (P1-001)
-**Goal:** Add tab completion for commands and file paths
+- **Config persistence** — `siren config get|set <key> <value>`, stored at
+  `~/.config/siren/config.json` (volume, library roots, toggles, wave bands).
+- **Fuzzy search** — tiered matcher (exact → prefix → substring → all-tokens →
+  subsequence) over filenames + metadata; unmatched queries now error instead of
+  playing the whole library.
+- **Metadata cache** — `~/.cache/siren/meta.json` (path + mtime keyed); mutagen is
+  optional/lazy; filename fallback otherwise.
+- **Gapless + normalization** — `gapless` (mpv `--gapless-audio=yes`) and `normalize`
+  (ReplayGain-track mode) config toggles, applied at spawn.
+- **Tests** — `tests/test_siren.py` (31 cases); run `python3 -m pytest tests/`.
 
+### Quick reference
 ```bash
-# Install dependency
-pip install argcomplete
-
-# Edit siren file - add at top:
-import argcomplete
-
-# Add to main() function:
-argcomplete.autocomplete(ap)
-
-# Test: Type 'siren play ' then TAB should show suggestions
+siren queue add|list|clear|play|next|remove|move
+siren playlist save|load|list|remove <name>
+siren config get default_volume; siren config set default_volume 90
+siren play /path/to/file.flac      # direct file
+siren play <playlist-name>         # saved playlist wins over fuzzy
+siren random                       # shuffle the whole library
 ```
 
-#### 🔹 Feature: Queue System (P1-003 — already built)
-**Siren already has a queue** (added 2026-08-03) — play with it before building more:
+### TUI keys
+- browser: `↑↓/jk` move · `o/enter/p/space` open/play · `backspace` up · `a` add · `/` filter
+- queue: `↑↓/jk` · `enter/space` play from · `d` remove · `c` clear
+- EQ: `p/space` play/pause · `n/b` next/prev · `s` shuffle · `r` repeat · `w` show/hide EQ · `W` bands · `+/-`
+- global: `Tab` focus cycle · `S` save · `L` load&play · `R` rm playlist · `g` go-to · `q/esc` quit
+- spellbook bridge: `f` open a file · `F` open a directory (plays all its audio) — both pick via Spellbook (`p` inside picks the current dir)
 
-```bash
-siren queue add ~/Music/album/*.flac
-siren queue list
-siren queue next
-siren queue clear
+---
+
+## 🛠️ COMMON TASKS
+
+### Add a New Command
+```python
+# In bin/siren, main() dispatch (around line 2063):
+if cmd == "mycommand":
+    return my_command_handler(rest)
 ```
 
-The TUI has a queue panel too (press `1` to focus it). No work needed here — pick an open feature instead (see Phase 1 below).
+### Add a Config Key
+```python
+# 1. Add the field to the SirenConfig dataclass (line ~83).
+# 2. Add validation in SirenConfig.load() and a branch in cli_set_config().
+# 3. Document in the plan doc + quick start.
+```
+
+### Add Error Handling
+```python
+# Player.send/get already swallow OSError and return defaults — never spawn
+# mpv on reads. New IO should follow the same pattern:
+try:
+    ...
+except OSError:
+    return default
+```
 
 ---
 
@@ -75,245 +106,113 @@ The TUI has a queue panel too (press `1` to focus it). No work needed here — p
 ### Current (What You Have)
 ```
 bin/
-├── siren           # Main script (CLI + TUI + trove) - edit this
-├── siren_player.py # Playback logic (mpv IPC)
-└── siren_waves.py  # Visualization
-```
+├── siren           # Single file: CLI + TUI + playback engine + waves EQ
+├── fae_termart.py  # Shared TUI layer (frames, paint, tui_* helpers)
+├── ia.py           # Shared Internet Archive engine (siren trove delegates here)
+└── kur_voice.py    # Piper TTS via the same mpv socket (SIREN_SOCK override)
 
-### Target (What to Build Toward)
-```
-bin/
-├── siren/          # Package directory
-│   ├── __init__.py
-│   ├── __main__.py  # CLI entry
-│   ├── core/
-│   │   ├── player.py
-│   │   ├── library.py
-│   │   └── queue.py
-│   └── utils/
-│       └── config.py
-└── siren           # Symlink to siren/__main__.py
-```
+~/.config/siren/
+├── config.json     # user prefs
+├── playlists/*.json
+└── voices/         # piper voices
 
----
-
-## 🛠️ COMMON TASKS
-
-### Add a New Command
-```python
-# In siren file, add to subparsers:
-sub.add_parser("mycommand", help="My new command")
-
-# Add handler:
-if cmd == "mycommand":
-    return my_command_handler(args)
-```
-
-### Add Configuration
-```python
-# In siren file, add at top:
-import json
-from pathlib import Path
-
-CONFIG_PATH = Path.home() / ".config" / "siren" / "config.json"
-
-def load_config():
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {}
-
-def save_config(config):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2)
-```
-
-### Add Error Handling
-```python
-# Wrap mpv calls:
-try:
-    # mpv command here
-    pass
-except subprocess.CalledProcessError as e:
-    print(f"Error: {e}")
-    return 1
-except Exception as e:
-    print(f"Unexpected error: {e}")
-    return 1
+~/.cache/siren/meta.json   # metadata cache
 ```
 
 ---
 
 ## 🎯 PRIORITY FEATURES TO IMPLEMENT
 
-### Phase 1 (Do These First)
+### Open (next candidates)
 1. **P1-001: Tab Completion** - Easy, high impact
-2. **P1-006: Error Handling** - Improves reliability
-3. **P1-004: Fuzzy Search** - Better UX
-4. **P1-005: Metadata Caching** - Faster browsing
+2. **P2-004: Color Themes** - Custom TUI schemes
+3. **P3-007: Play Counts & Ratings** - sqlite3
+4. **P3-008: Smart Playlists** - generated from metadata/history
 
-(Queue P1-003 and Playlists P1-002 are already shipped — see current-state checklist.)
-
-### Phase 2 (Do These Next)
-1. **P2-001: Volume Normalization** - Loudness consistency
-2. **P2-007: Configuration** - User customization
-3. **P2-002: Gapless Playback** - Seamless transitions
+### Shipped (do not re-implement)
+- Queue system (P1-003) · Playlists (P1-002) · Fuzzy search (P1-004)
+- Metadata caching (P1-005) · Error handling pass (P1-006)
+- Volume normalization (P2-001) · Gapless (P2-002) · Config system (P2-007)
+- Repeat modes (P2-003) · Progress bars (P2-005) · FFT EQ (P3-005)
 
 ---
 
 ## 📚 ESSENTIAL FILES TO READ
 
-### 1. Main Entry Point (`siren`)
-- Understand command parsing
-- See how subcommands work
-- Learn the TUI structure
+### 1. Main Entry Point (`bin/siren`)
+- Single file; section banners: config / fuzzy / metadata / library / mpv client /
+  queue+playlists / playback / waves / TUI / CLI main.
+- mpv IPC contract: JSON over `/tmp/siren-mpv.sock` (idle mpv spawned with
+  `--idle=yes --no-video --gapless-audio=yes --volume-max=150`).
 
-### 2. Player Module (`siren_player.py`)
-- Core playback logic
-- mpv integration
-- Track management
+### 2. Shared Layer (`bin/fae_termart.py`)
+- `box`, `paint_frame`, `tui_begin/tui_read_key/tui_cleanup`, `pad_vis`, `vis_len`.
 
 ### 3. Development Plan (`docs/plans/siren.md`)
-- Full roadmap
-- Technical specifications
-- Implementation guidance
-
----
-
-## 🚀 DEVELOPMENT CHECKLIST
-
-### Before Starting
-- [ ] Read this quick start guide
-- [ ] Read the development plan
-- [ ] Test current functionality
-- [ ] Pick a feature to implement
-
-### During Development
-- [ ] Follow code style guidelines
-- [ ] Add proper error handling
-- [ ] Test each change
-- [ ] Document new functionality
-
-### Before Committing
-- [ ] Update development plan status
-- [ ] Add to changelog
-- [ ] Test with real music files
-- [ ] Clean up temporary files
+- Full roadmap, technical specs, changelog.
 
 ---
 
 ## 💡 TIPS FOR SUCCESS
 
 ### 1. Start Small
-- Pick one feature from Phase 1
-- Implement it completely
-- Test thoroughly
-- Document it
+- Pick one open feature; implement completely; test; document.
 
 ### 2. Test Often
 ```bash
-# Test basic playback
-siren play ~/Music/siren/pkmn-rse-soundtrack/54\ -\ Slateport\ City\ \[Bonus\ Track\].flac
-
-# Test your new feature
-siren mycommand
+python3 -m py_compile bin/siren && python3 -m pytest tests/   # 78 tests
+siren play "Bury the Past"    # fuzzy smoke
+siren status                  # socket/queue/mode report
 ```
 
-### 3. Use Version Control
-```bash
-# If using git:
-git add .
-git commit -m "Add tab completion feature"
-git push
-```
-
-### 4. Document Everything
-- Update `docs/plans/siren.md`
-- Add comments in code
-- Write usage examples
+### 3. Keep the IPC Contract
+- Any change touching the socket must keep `starship-music`, `faectl`, the prompt
+  tick (`shell/pixie.zsh`), and `kur_voice.py` working. Socket path:
+  `/tmp/siren-mpv.sock` (override via `SIREN_SOCK`).
 
 ---
 
 ## 🆘 TROUBLESHOOTING
 
-### Common Issues
-
 **Issue: mpv not found**
 ```bash
-# Install mpv
 sudo pacman -S mpv  # Arch
-sudo apt install mpv  # Debian/Ubuntu
 ```
 
-**Issue: Python module not found**
+**Issue: TUI broken/blank**
 ```bash
-pip install missing-module
+# Siren needs a real TTY; from a pipe it exits 2 with a message.
+# If it hangs, ensure fae_termart is on PATH (~/bin) and PIXIE_UNICODE=1.
 ```
 
-**Issue: Audio not playing**
+**Issue: stale socket**
 ```bash
-# Test mpv directly
-mpv ~/Music/siren/pkmn-rse-soundtrack/*.flac
+pkill -x mpv; rm -f /tmp/siren-mpv.sock   # next command respawns idle mpv
 ```
 
-**Issue: TUI not working**
+**Issue: metadata shows filenames instead of Artist - Title**
 ```bash
-# Check terminal support
-python3 -c "import curses; print('curses OK')"
-```
-
----
-
-## 📞 GETTING HELP
-
-### Resources
-1. **This file** - Quick start guide
-2. **docs/plans/siren.md** - Full roadmap
-3. **Existing code** - Learn from current implementation
-4. **Python docs** - For language questions
-5. **mpv docs** - For playback questions
-
-### Debug Commands
-```bash
-# Verbose mode
-siren -v play ~/Music/siren/pkmn-rse-soundtrack/*.flac
-
-# Check mpv version
-mpv --version
-
-# Check Python version
-python3 --version
+# mutagen is optional; install it to get tagged metadata:
+pip install mutagen
 ```
 
 ---
 
 ## 🎉 FIRST FEATURE IMPLEMENTATION
 
-### Suggested: Add Tab Completion (P1-001)
+### Suggested: Tab Completion (P1-001)
 
 **Time needed:** 1-2 hours  
 **Impact:** High  
 **Difficulty:** Medium
 
 #### Steps:
-1. **Read** `siren` to find the subparser setup and `main()`
-2. **Add** `import argcomplete` and `argcomplete.autocomplete(ap)` before `args = ap.parse_args()`
-3. **Add** a completion function for the `play` command that lists `~/Music/**/*.{mp3,flac,ogg,…}`
-4. **Test** with `siren play <TAB><TAB>`
-5. **Document** in the development plan
-
-#### Code sketch:
-```python
-# In siren, near the top:
-import argcomplete
-
-# In main(), right before parse_args():
-argcomplete.autocomplete(ap)
-```
+1. **Read** `main()` in `bin/siren` to see the manual dispatch (no argparse).
+2. **Add** a small completer for `play`/`queue add` that lists `~/Music/**/*.{mp3,flac,ogg,…}`
+   (e.g. via a `complete()` helper + `readline`), or add a `siren complete` command.
+3. **Test** with `siren play <TAB><TAB>`
+4. **Document** in the development plan
 
 ---
 
-**Ready to start?** Pick a feature from Phase 1 and begin! The development plan has all the details you need.
-
-*Last updated: 2026-08-03*
+*Last updated: 2026-08-05*

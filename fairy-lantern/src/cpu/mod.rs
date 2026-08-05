@@ -47,13 +47,14 @@ impl Cpu {
     ///
     /// After fetch we already advanced R15 to next insn (A+4). Architectural
     /// PC for the insn at A is A+8, so return R15+4.
+    /// This is the base PC used by ARM state data-processing and loading/storing.
     pub fn pc_arm_read(&self) -> u32 {
         self.r[15].wrapping_add(4)
     }
 
-    /// PC as seen by Thumb (A+4). After fetch R15=A+2 → return R15+2.
+    /// PC as seen by Thumb (A+4). After fetch R15=A+2 → return R15+4 for PC-relative loads.
     pub fn pc_thumb_read(&self) -> u32 {
-        self.r[15].wrapping_add(2)
+        self.r[15].wrapping_add(4)
     }
 
     pub fn step(&mut self, bus: &mut Bus) -> u32 {

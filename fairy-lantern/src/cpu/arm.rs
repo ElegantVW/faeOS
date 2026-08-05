@@ -189,7 +189,7 @@ fn barrel_shift(cpu: &Cpu, op: u32, carry_in: bool) -> (u32, bool) {
     // register
     let rm = (op & 0xF) as usize;
     let mut val = if rm == 15 {
-        cpu.pc_arm_read()
+        cpu.pc_arm_read() + 4
     } else {
         cpu.r[rm]
     };
@@ -394,7 +394,7 @@ fn ldrh_strh(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     let rn_i = ((op >> 16) & 0xF) as usize;
     let rd = ((op >> 12) & 0xF) as usize;
     let base = if rn_i == 15 {
-        cpu.pc_arm_read()
+        cpu.pc_arm_read() + 4
     } else {
         cpu.r[rn_i]
     };
@@ -434,7 +434,7 @@ fn ldrh_strh(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     } else if h && !s {
         // STRH
         let val = if rd == 15 {
-            cpu.pc_arm_read()
+            cpu.pc_arm_read() + 4
         } else {
             cpu.r[rd]
         };
@@ -461,7 +461,7 @@ fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     let rn_i = ((op >> 16) & 0xF) as usize;
     let rd = ((op >> 12) & 0xF) as usize;
     let mut base = if rn_i == 15 {
-        cpu.pc_arm_read()
+        cpu.pc_arm_read() + 4
     } else {
         cpu.r[rn_i]
     };

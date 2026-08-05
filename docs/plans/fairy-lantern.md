@@ -28,6 +28,7 @@ fairy info / test / run …
 ## Current
 - [x] ROM/header load (`info`)
 - [x] ARM interpreter subset (data-proc, B/BL, LDR/STR/LDRH/STRH, LDM/STM, BX, MUL…)
+- [x] **PC-relative addressing fixed** — ARM LDR/STR/LDRH/STRH and Thumb LDR/ADD PC-relative now use correct PC+8 (ARM) / PC+4 (Thumb) base; Liquid Crystal boots into real Thumb
 - [x] Thumb interpreter subset (ALU, imm, load/store, push/pop, B/BL, BX…)
 - [x] Bus map + KEYINPUT + DMA enable + timer reloads + IF clear
 - [x] PPU Mode 3/4 + VBlank flag/IRQ raise

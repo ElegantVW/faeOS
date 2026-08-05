@@ -6,8 +6,8 @@ import sys
 import time
 
 class KurVoice:
-    def __init__(self, socket_path="/tmp/mpv-music.sock"):
-        self.socket_path = socket_path
+    def __init__(self, socket_path=None):
+        self.socket_path = socket_path or os.environ.get("SIREN_SOCK", "/tmp/siren-mpv.sock")
         self.model_path = os.path.expanduser("~/.config/siren/voices/en_US-danny-low.onnx")
         self.output_wav = "/tmp/kur_voice_output.wav"
         

@@ -202,24 +202,6 @@ class FileManager:
             sub = f"vision {top + 1}-{min(n, top + max_rows)} of {n} scrolls"
         return tui_frame(rows, title="the scrolls", subtitle=sub, width=tw)
 
-    def draw_ui(self) -> str:
-        """Draw the complete UI."""
-        header = self.draw_header()
-        files = self.get_files()
-        file_list = self.draw_file_list(files)
-        footer = tui_frame(
-            [
-                (
-                    "j/k move · enter/l/o open · h parent · ? help · s sort · . hidden · "
-                    "n new · d delete · r rename · e edit · q quit",
-                    (P.PINK_DIM,),
-                )
-            ],
-            title="runes",
-            width=art.term_width(),
-        )
-        return "\n".join([header, "", file_list, "", footer])
-
     def draw_help(self) -> str:
         """Draw the help screen."""
         help_text = f"""
@@ -276,10 +258,16 @@ class FileManager:
         header = self.draw_header()
         files = self.get_files()
         file_list = self.draw_file_list(files)
-        
-        # Combine header and file list
-        ui_parts = [header, file_list]
-        return "\n".join(ui_parts)
+        hint = (
+            "j/k move · enter/l/o open · h parent · ? help · s sort · . hidden · "
+            "n new · d delete · r rename · e edit · q quit"
+            + (" · p pick this dir" if self.pick_mode else "")
+        )
+        tw = art.term_width()
+        body_w = max(30, min(tw, 96) - 4)
+        rows = [(ln, (P.PINK_DIM,)) for ln in art.wrap_plain(art.strip_ansi(hint), body_w)]
+        footer = tui_frame(rows, title="runes", width=tw)
+        return "\n".join([header, "", file_list, "", footer])
 
     def open_file(self, file: Path):
         """Open a file or directory."""
@@ -385,6 +373,10 @@ class FileManager:
         elif key == 'G':  # Last file
             self.selected_index = max(0, len(files) - 1)
             self.offset = max(0, self.selected_index - self._max_rows() + 1)
+        elif key == 'p' and self.pick_mode:  # Pick the current directory
+            self.chosen_path = self.current_path
+            self.status = narrate(f"pick {self.current_path.name or self.current_path}/",
+                                  "this tome is the chosen one")
         elif key == '?':  # Help
             self.clear_screen()
             print(self.draw_help())

@@ -60,7 +60,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     if (op & 0xF800) == 0x4800 {
         let rd = ((op >> 8) & 7) as usize;
         let imm = (op & 0xFF) << 2;
-        let addr = (cpu.pc_thumb_read() & !2).wrapping_add(imm);
+        let addr = (cpu.pc_arm_read()).wrapping_add(imm);
         cpu.r[rd] = bus.read32(addr);
         return 2;
     }
@@ -87,7 +87,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         let base = if sp {
             cpu.r[13]
         } else {
-            cpu.pc_thumb_read() & !2
+            cpu.pc_arm_read()
         };
         cpu.r[rd] = base.wrapping_add(imm);
         return 1;
@@ -235,7 +235,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         let rd = (((op >> 4) & 8) | (op & 7)) as usize;
         let rs = ((op >> 3) & 0xF) as usize;
         let rs_v = if rs == 15 {
-            cpu.pc_thumb_read()
+            cpu.pc_arm_read()
         } else {
             cpu.r[rs]
         };
@@ -243,7 +243,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             0 => {
                 // ADD
                 let d = if rd == 15 {
-                    cpu.pc_thumb_read()
+                    cpu.pc_arm_read()
                 } else {
                     cpu.r[rd]
                 };
@@ -257,7 +257,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             1 => {
                 // CMP
                 let d = if rd == 15 {
-                    cpu.pc_thumb_read()
+                    cpu.pc_arm_read()
                 } else {
                     cpu.r[rd]
                 };
