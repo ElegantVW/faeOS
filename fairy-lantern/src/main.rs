@@ -9,7 +9,9 @@ mod fable;
 mod irq;
 mod play;
 mod ppu;
+mod recents;
 mod timers;
+mod tui;
 mod video;
 
 use anyhow::{Context, Result};
@@ -23,6 +25,7 @@ use std::path::PathBuf;
     name = "fairy-lantern",
     about = "Fairy Lantern — GBA emulator from scratch (faeOS)",
     long_about = "Light a fable; play a pocket world.\n\
+                  Bare `fairy` / `fairy-lantern` opens the home TUI.\n\
                   From-scratch ARM7TDMI + PPU. No mGBA/libretro."
 )]
 struct Cli {
@@ -68,6 +71,11 @@ enum Commands {
         #[arg(long)]
         bios: Option<PathBuf>,
     },
+    /// Re-open the last fable
+    Last {
+        #[arg(long)]
+        bios: Option<PathBuf>,
+    },
     /// Headless run
     Run {
         rom: PathBuf,
@@ -80,7 +88,7 @@ enum Commands {
         #[arg(long)]
         bios: Option<PathBuf>,
     },
-    /// List fables in a directory
+    /// Home TUI (same as bare command)
     Tui {
         #[arg(long)]
         dir: Option<PathBuf>,
@@ -110,11 +118,14 @@ fn real_main() -> Result<()> {
         Some(Commands::Spark { bios }) => {
             play_spark(bios.as_ref())?;
         }
+        Some(Commands::Last { bios }) => {
+            play_last(bios.as_ref())?;
+        }
         Some(Commands::Play { rom, bios }) => {
             if let Some(rom) = rom {
                 play_rom(&rom, bios.as_ref())?;
             } else {
-                play_spark(bios.as_ref())?;
+                run_home_tui(bios.as_ref())?;
             }
         }
         Some(Commands::Run {
@@ -126,7 +137,9 @@ fn real_main() -> Result<()> {
         }) => {
             run_rom(&rom, frames, dump.as_ref(), present, bios.as_ref())?;
         }
-        Some(Commands::Tui { dir }) => tui_list(dir)?,
+        Some(Commands::Tui { dir: _ }) => {
+            run_home_tui(None)?;
+        }
         None => {
             if let Some(rom) = cli.rom {
                 if let Some(frames) = cli.frames {
@@ -141,27 +154,32 @@ fn real_main() -> Result<()> {
                     play_rom(&rom, cli.bios.as_ref())?;
                 }
             } else {
-                println!(
-                    "✦ Fairy Lantern — light a fable; play a pocket world\n\
-                     \n\
-                     Ready to play (built-in):\n\
-                       fairy-lantern spark\n\
-                     \n\
-                     Your ROM:\n\
-                       fairy-lantern play game.gba\n\
-                       fairy-lantern game.gba\n\
-                     \n\
-                     Headless:\n\
-                       fairy-lantern run game.gba --frames 3 --dump out.ppm\n\
-                       fairy-lantern info game.gba\n\
-                       fairy-lantern test\n\
-                     \n\
-                     Controls: arrows/WASD · Z/X A/B · Enter Start · P pause · Esc quit\n"
-                );
+                // bare `fairy` / `fairy-lantern` → home TUI
+                run_home_tui(cli.bios.as_ref())?;
             }
         }
     }
     Ok(())
+}
+
+fn run_home_tui(bios: Option<&PathBuf>) -> Result<()> {
+    match tui::run_home()? {
+        tui::Choice::Quit => Ok(()),
+        tui::Choice::Spark => play_spark(bios),
+        tui::Choice::Rom(p) => play_rom(&p, bios),
+    }
+}
+
+fn play_last(bios: Option<&PathBuf>) -> Result<()> {
+    match recents::last_rom() {
+        Some(p) => play_rom(&p, bios),
+        None => {
+            eprintln!("fairy-lantern: no last fable yet — open one from the TUI or:");
+            eprintln!("  fairy-lantern play game.gba");
+            eprintln!("  fairy-lantern spark");
+            anyhow::bail!("no last fable")
+        }
+    }
 }
 
 fn play_spark(bios: Option<&PathBuf>) -> Result<()> {
@@ -174,6 +192,10 @@ fn play_spark(bios: Option<&PathBuf>) -> Result<()> {
 fn play_rom(rom: &PathBuf, bios: Option<&PathBuf>) -> Result<()> {
     let cart = Cart::load(rom)?;
     cart::print_info(&cart);
+    // remember for "last" / home TUI
+    if let Err(e) = recents::remember(rom) {
+        eprintln!("fairy-lantern: could not save recents ({e})");
+    }
     let mut emu = Emu::from_cart(cart, bios.map(|p| p.as_path()));
     let title = if emu.cart_title.is_empty() {
         rom.file_name()
@@ -214,56 +236,6 @@ fn run_rom(
     }
     Ok(())
 }
-
-fn tui_list(dir: Option<PathBuf>) -> Result<()> {
-    let dir = dir.unwrap_or_else(|| {
-        std::env::var("FAIRY_LANTERN_ROMS")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let base = std::env::var_os("XDG_DATA_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                            .join(".local/share")
-                    });
-                base.join("faeos/fairy-lantern/roms")
-            })
-    });
-    println!("✦ Fairy Lantern — fables in {}", dir.display());
-    println!("  (built-in)  SPARK   fairy-lantern spark");
-    if !dir.is_dir() {
-        println!("  (no dir yet — mkdir or set FAIRY_LANTERN_ROMS)");
-        return Ok(());
-    }
-    let mut paths: Vec<_> = std::fs::read_dir(&dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.eq_ignore_ascii_case("gba"))
-                .unwrap_or(false)
-        })
-        .collect();
-    paths.sort();
-    for (i, p) in paths.iter().enumerate() {
-        match Cart::load(p) {
-            Ok(c) => println!(
-                "  {:3}. {:12}  {}",
-                i + 1,
-                c.game_code,
-                if c.title.is_empty() {
-                    p.file_name().and_then(|s| s.to_str()).unwrap_or("?")
-                } else {
-                    &c.title
-                }
-            ),
-            Err(e) => println!("  ??? {}", e),
-        }
-    }
-    Ok(())
-}
-
 
 fn debug_spark(steps: u32) {
     let cart = fable::spark_rom();
