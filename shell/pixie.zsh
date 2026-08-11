@@ -39,7 +39,6 @@ _pixie_print_box() {
 
 _precmd_prompt() {
   print
-  _pixie_print_box
 }
 
 # ── Music (Siren) ─────────────────────────────────────────────
@@ -149,7 +148,6 @@ zle -N accept-line _pixie_accept_line
 _tick_refresh() {
   # Idle tick only: wipe screen and redraw prompt
   clear
-  _pixie_print_box
   if zle; then
     zle reset-prompt
     zle -R
@@ -162,6 +160,7 @@ _preexec_clear() {
   [[ -n "${1//[$' \t']/}" ]] || return 0
   _pixie_busy && return 0
   clear
+  _pixie_print_box
 }
 _precmd_tick_arm() {
   # Full idle interval to read output before tick wipe
@@ -172,6 +171,7 @@ precmd_functions=(${precmd_functions:#_precmd_clear})
 precmd_functions=(_precmd_tick_arm ${precmd_functions:#_precmd_tick_arm})
 precmd_functions=(_precmd_prompt ${precmd_functions:#_precmd_prompt})
 preexec_functions=(_preexec_clear ${preexec_functions:#_preexec_clear})
+
 
 tick() {
   local sub="${1:-status}" n="${2:-}"
@@ -343,3 +343,4 @@ if _tick_enabled; then
 else
   PERIOD=0
 fi
+export LESS="-F -X"

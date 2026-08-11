@@ -1,4 +1,4 @@
-//! Cartridge battery saves (SRAM / Flash) + paths for .sav files.
+//! Cartridge battery saves (SRAM / Flash / EEPROM) + paths for .sav files.
 
 use crate::recents;
 use anyhow::{Context, Result};
@@ -14,6 +14,10 @@ pub enum SaveType {
     Flash64,
     /// 128 KiB flash (banked)
     Flash128,
+    /// 512-byte EEPROM (6-bit address)
+    Eeprom512,
+    /// 8 KiB EEPROM (14-bit address)
+    Eeprom8K,
 }
 
 impl SaveType {
@@ -23,6 +27,8 @@ impl SaveType {
             SaveType::Sram(n) => n,
             SaveType::Flash64 => 64 * 1024,
             SaveType::Flash128 => 128 * 1024,
+            SaveType::Eeprom512 => 512,
+            SaveType::Eeprom8K => 8 * 1024,
         }
     }
 
@@ -33,7 +39,13 @@ impl SaveType {
             SaveType::Sram(_) => "SRAM 64K",
             SaveType::Flash64 => "FLASH 64K",
             SaveType::Flash128 => "FLASH 128K",
+            SaveType::Eeprom512 => "EEPROM 512B",
+            SaveType::Eeprom8K => "EEPROM 8K",
         }
+    }
+
+    pub fn is_eeprom(self) -> bool {
+        matches!(self, SaveType::Eeprom512 | SaveType::Eeprom8K)
     }
 }
 
@@ -52,9 +64,9 @@ pub fn detect(rom: &[u8]) -> SaveType {
         return SaveType::Sram(64 * 1024);
     }
     if s.contains("EEPROM_V") {
-        // Bit-bang EEPROM not fully emulated yet — still allocate a small buffer
-        // so games that also touch SRAM-ish space don't crash; real EEPROM later.
-        return SaveType::Sram(8 * 1024);
+        // Size is often only known after first transfer bit-length; default 8K
+        // and auto-narrow on short address streams (see EepromChip).
+        return SaveType::Eeprom8K;
     }
     // Default: many homebrew / unknown — give SRAM so casual saves can work
     SaveType::Sram(64 * 1024)
@@ -239,3 +251,185 @@ impl FlashChip {
         false
     }
 }
+
+/// Serial EEPROM (512 B or 8 KiB) bit-bang on bus `0x0Dxxxxxx`.
+///
+/// Games DMA halfwords to/from the cart; only bit 0 of each halfword is the
+/// serial line. Protocol (GBATEK):
+/// - write: `1 | 10 | addr | 64 data bits | 0`
+/// - read:  `1 | 11 | addr` then read `4 dummy + 64 data bits`
+#[derive(Clone, Debug)]
+pub struct EepromChip {
+    pub data: Vec<u8>,
+    /// Address width in bits (6 → 512B, 14 → 8K). Auto-detected on first short stream.
+    addr_bits: u8,
+    bits: u64,
+    bit_count: u8,
+    /// 0 idle, 1 header, 2 write-data, 3 read-out
+    phase: u8,
+    pub dirty: bool,
+    /// 68-bit stream: 4 dummy zeros then 64 data bits (MSB first of data).
+    read_stream: u128,
+    read_left: u8,
+    write_addr: u16,
+    write_buf: u64,
+}
+
+impl Default for EepromChip {
+    fn default() -> Self {
+        Self::new(8 * 1024)
+    }
+}
+
+impl EepromChip {
+    pub fn new(size: usize) -> Self {
+        let size = if size <= 512 { 512 } else { 8 * 1024 };
+        let addr_bits = if size <= 512 { 6 } else { 14 };
+        Self {
+            data: vec![0xFF; size],
+            addr_bits,
+            bits: 0,
+            bit_count: 0,
+            phase: 0,
+            dirty: false,
+            read_stream: 0,
+            read_left: 0,
+            write_addr: 0,
+            write_buf: 0,
+        }
+    }
+
+    pub fn from_save_type(st: SaveType) -> Option<Self> {
+        match st {
+            SaveType::Eeprom512 => Some(Self::new(512)),
+            SaveType::Eeprom8K => Some(Self::new(8 * 1024)),
+            _ => None,
+        }
+    }
+
+    /// Serial read halfword (bit0 = next bit; idle returns 1).
+    /// First 4 of 68 bits are dummy zeros, then 64 data bits MSB-first.
+    pub fn read_serial(&mut self) -> u16 {
+        if self.phase != 3 || self.read_left == 0 {
+            return 1;
+        }
+        let pos = self.read_left; // 68 .. 1
+        self.read_left -= 1;
+        if self.read_left == 0 {
+            self.phase = 0;
+        }
+        if pos > 64 {
+            return 0;
+        }
+        ((self.read_stream >> (pos - 1)) & 1) as u16
+    }
+
+    /// Serial write: consume bit0 of halfword.
+    pub fn write_bit(&mut self, half: u16) {
+        let bit = (half & 1) as u64;
+        match self.phase {
+            0 => {
+                if bit == 0 {
+                    return;
+                }
+                self.phase = 1;
+                self.bits = 1;
+                self.bit_count = 1;
+            }
+            1 => {
+                self.bits = (self.bits << 1) | bit;
+                self.bit_count = self.bit_count.saturating_add(1);
+
+                // 512B devices: DMA often sends exactly 9 bits (1+2+6).
+                if self.bit_count == 9 && self.addr_bits == 14 {
+                    let cmd = (self.bits >> 6) & 3;
+                    if cmd == 0b10 || cmd == 0b11 {
+                        self.addr_bits = 6;
+                        self.finish_header();
+                        return;
+                    }
+                }
+
+                let need = 3 + self.addr_bits; // start+cmd+addr
+                if self.bit_count == need {
+                    self.finish_header();
+                }
+            }
+            2 => {
+                self.write_buf = (self.write_buf << 1) | bit;
+                self.bit_count = self.bit_count.saturating_add(1);
+                if self.bit_count >= 64 {
+                    self.commit_write();
+                    // Trailing stop bit (0) may follow; ignore via idle.
+                    self.phase = 0;
+                    self.bit_count = 0;
+                    self.bits = 0;
+                }
+            }
+            3 => {
+                // New command while reading — restart if start bit.
+                self.phase = 0;
+                self.read_left = 0;
+                self.bit_count = 0;
+                self.bits = 0;
+                if bit == 1 {
+                    self.phase = 1;
+                    self.bits = 1;
+                    self.bit_count = 1;
+                }
+            }
+            _ => self.phase = 0,
+        }
+    }
+
+    fn finish_header(&mut self) {
+        let ab = self.addr_bits as u32;
+        let cmd = ((self.bits >> ab) & 3) as u8;
+        let addr = (self.bits & ((1u64 << ab) - 1)) as u16;
+        self.write_addr = addr;
+        match cmd {
+            0b10 => {
+                self.phase = 2;
+                self.bit_count = 0;
+                self.write_buf = 0;
+            }
+            0b11 => {
+                let byte_off = (addr as usize).saturating_mul(8);
+                let mut data64 = 0u64;
+                for i in 0..8 {
+                    let b = self.data.get(byte_off + i).copied().unwrap_or(0xFF) as u64;
+                    data64 = (data64 << 8) | b;
+                }
+                // 68 bits: 0000 || data64  (MSB of stream emitted first)
+                self.read_stream = data64 as u128; // low 64 = data
+                // Position dummy zeros in bits 67..64: stream = data64, left=68
+                // When left=68..65 → bits 67..64 of a 68-bit value are 0 if we
+                // only stored 64 bits and index as (left-1) only for data portion:
+                self.read_stream = data64 as u128;
+                self.read_left = 68;
+                self.phase = 3;
+                self.bit_count = 0;
+                self.bits = 0;
+            }
+            _ => {
+                self.phase = 0;
+                self.bit_count = 0;
+                self.bits = 0;
+            }
+        }
+    }
+
+    fn commit_write(&mut self) {
+        let byte_off = (self.write_addr as usize).saturating_mul(8);
+        for i in 0..8 {
+            let shift = (7 - i) * 8;
+            let b = ((self.write_buf >> shift) & 0xFF) as u8;
+            if byte_off + i < self.data.len() {
+                self.data[byte_off + i] = b;
+            }
+        }
+        self.dirty = true;
+    }
+}
+
+

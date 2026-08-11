@@ -97,13 +97,23 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         let rm = (op & 0xF) as usize;
         let spsr = (op & (1 << 22)) != 0;
         let v = cpu.r[rm];
-        // only flags for now if bit 19 (field_mask flags)
         let mask = (op >> 16) & 0xF;
         apply_msr(cpu, spsr, mask, v);
         return 1;
     }
 
-    // Multiply: xxxx0000_00AS_...._1001
+    // MSR (imm): xxxx00110_R10_field_1111_rot_imm
+    if (op & 0x0DB0_F000) == 0x0320_F000 {
+        let spsr = (op & (1 << 22)) != 0;
+        let mask = (op >> 16) & 0xF;
+        let imm = op & 0xFF;
+        let rot = ((op >> 8) & 0xF) * 2;
+        let v = imm.rotate_right(rot);
+        apply_msr(cpu, spsr, mask, v);
+        return 1;
+    }
+
+    // Multiply: xxxx0000_00AS_...._1001  (MUL/MLA)
     if (op & 0x0FC0_00F0) == 0x0000_0090 {
         let rd = ((op >> 16) & 0xF) as usize;
         let rn = ((op >> 12) & 0xF) as usize;
@@ -120,6 +130,61 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         }
         if s {
             cpu.cpsr.set_nz(result);
+        }
+        return 2;
+    }
+
+    // Long multiply: xxxx0000_1UAS_...._1001  (UMULL/UMLAL/SMULL/SMLAL)
+    if (op & 0x0F80_00F0) == 0x0080_0090 {
+        let rd_hi = ((op >> 16) & 0xF) as usize;
+        let rd_lo = ((op >> 12) & 0xF) as usize;
+        let rs = ((op >> 8) & 0xF) as usize;
+        let rm = (op & 0xF) as usize;
+        let signed = (op & (1 << 22)) == 0; // U bit 0 = signed
+        let accumulate = (op & (1 << 21)) != 0;
+        let s = (op & (1 << 20)) != 0;
+        let product = if signed {
+            (cpu.r[rm] as i32 as i64).wrapping_mul(cpu.r[rs] as i32 as i64) as u64
+        } else {
+            (cpu.r[rm] as u64).wrapping_mul(cpu.r[rs] as u64)
+        };
+        let mut result = product;
+        if accumulate {
+            let acc = ((cpu.r[rd_hi] as u64) << 32) | (cpu.r[rd_lo] as u64);
+            result = result.wrapping_add(acc);
+        }
+        if rd_lo != 15 {
+            cpu.r[rd_lo] = result as u32;
+        }
+        if rd_hi != 15 {
+            cpu.r[rd_hi] = (result >> 32) as u32;
+        }
+        if s {
+            cpu.cpsr.n = (result >> 63) != 0;
+            cpu.cpsr.z = result == 0;
+        }
+        return 3;
+    }
+
+    // SWP / SWPB
+    if (op & 0x0FB0_0FF0) == 0x0100_0090 {
+        let b = (op & (1 << 22)) != 0;
+        let rn = ((op >> 16) & 0xF) as usize;
+        let rd = ((op >> 12) & 0xF) as usize;
+        let rm = (op & 0xF) as usize;
+        let addr = cpu.r[rn];
+        if b {
+            let old = bus.read8(addr) as u32;
+            bus.write8(addr, cpu.r[rm] as u8);
+            if rd != 15 {
+                cpu.r[rd] = old;
+            }
+        } else {
+            let old = bus.read32(addr & !3).rotate_right((addr & 3) * 8);
+            bus.write32(addr & !3, cpu.r[rm]);
+            if rd != 15 {
+                cpu.r[rd] = old;
+            }
         }
         return 2;
     }
@@ -149,28 +214,40 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         return data_processing(cpu, bus, op);
     }
 
-    // Unknown — soft NOP (log in debug builds later)
+    // Unknown — soft NOP
+    cpu.unknown_ops = cpu.unknown_ops.wrapping_add(1);
+    cpu.last_unknown = op;
     1
 }
 
 fn apply_msr(cpu: &mut Cpu, spsr: bool, field_mask: u32, v: u32) {
-    let dest = if spsr {
-        &mut cpu.spsr
-    } else {
-        &mut cpu.cpsr
-    };
-    if field_mask & 8 != 0 {
-        // flags
-        dest.n = v & (1 << 31) != 0;
-        dest.z = v & (1 << 30) != 0;
-        dest.c = v & (1 << 29) != 0;
-        dest.v = v & (1 << 28) != 0;
+    if spsr {
+        if field_mask & 8 != 0 {
+            cpu.spsr.n = v & (1 << 31) != 0;
+            cpu.spsr.z = v & (1 << 30) != 0;
+            cpu.spsr.c = v & (1 << 29) != 0;
+            cpu.spsr.v = v & (1 << 28) != 0;
+        }
+        if field_mask & 1 != 0 {
+            cpu.spsr.mode = (v & 0x1F) as u8;
+            cpu.spsr.thumb = v & (1 << 5) != 0;
+            cpu.spsr.fiq_disable = v & (1 << 6) != 0;
+            cpu.spsr.irq_disable = v & (1 << 7) != 0;
+        }
+        return;
     }
-    if field_mask & 1 != 0 && !spsr {
-        dest.mode = (v & 0x1F) as u8;
-        dest.thumb = v & (1 << 5) != 0;
-        dest.fiq_disable = v & (1 << 6) != 0;
-        dest.irq_disable = v & (1 << 7) != 0;
+    if field_mask & 8 != 0 {
+        cpu.cpsr.n = v & (1 << 31) != 0;
+        cpu.cpsr.z = v & (1 << 30) != 0;
+        cpu.cpsr.c = v & (1 << 29) != 0;
+        cpu.cpsr.v = v & (1 << 28) != 0;
+    }
+    if field_mask & 1 != 0 {
+        let new_mode = (v & 0x1F) as u8;
+        cpu.set_mode(new_mode);
+        cpu.cpsr.thumb = v & (1 << 5) != 0;
+        cpu.cpsr.fiq_disable = v & (1 << 6) != 0;
+        cpu.cpsr.irq_disable = v & (1 << 7) != 0;
     }
 }
 
@@ -353,8 +430,19 @@ fn data_processing(cpu: &mut Cpu, _bus: &mut Bus, op: u32) -> u32 {
     if write && rd != 15 {
         cpu.r[rd] = result;
     } else if write && rd == 15 {
-        cpu.r[15] = result & !3;
-        // if S and rd==15, would restore SPSR — skip for now
+        // MOV/SUB/… to PC. With S bit: restore SPSR (IRQ/SVC return).
+        if s {
+            let thumb = cpu.spsr.thumb;
+            cpu.restore_spsr();
+            if thumb {
+                cpu.r[15] = result & !1;
+            } else {
+                cpu.r[15] = result & !3;
+            }
+        } else {
+            cpu.r[15] = result & !3;
+        }
+        return 3;
     }
 
     if s && rd != 15 {
@@ -393,8 +481,9 @@ fn ldrh_strh(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     let h = (op & (1 << 5)) != 0;
     let rn_i = ((op >> 16) & 0xF) as usize;
     let rd = ((op >> 12) & 0xF) as usize;
+    // Rn=PC → PC+8 (not PC+12; that applies only to Rm in shifts)
     let base = if rn_i == 15 {
-        cpu.pc_arm_read() + 4
+        cpu.pc_arm_read()
     } else {
         cpu.r[rn_i]
     };
@@ -432,9 +521,9 @@ fn ldrh_strh(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             cpu.r[rd] = val;
         }
     } else if h && !s {
-        // STRH
+        // STRH — Rd=PC stores PC+12
         let val = if rd == 15 {
-            cpu.pc_arm_read() + 4
+            cpu.pc_arm_read().wrapping_add(4)
         } else {
             cpu.r[rd]
         };
@@ -460,8 +549,9 @@ fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     let l = (op & (1 << 20)) != 0; // load
     let rn_i = ((op >> 16) & 0xF) as usize;
     let rd = ((op >> 12) & 0xF) as usize;
+    // Rn=PC → PC+8
     let mut base = if rn_i == 15 {
-        cpu.pc_arm_read() + 4
+        cpu.pc_arm_read()
     } else {
         cpu.r[rn_i]
     };
@@ -498,8 +588,9 @@ fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             cpu.r[rd] = val;
         }
     } else {
+        // STR Rd=PC stores PC+12
         let val = if rd == 15 {
-            cpu.pc_arm_read()
+            cpu.pc_arm_read().wrapping_add(4)
         } else {
             cpu.r[rd]
         };
@@ -525,36 +616,52 @@ fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
 fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     let p = (op & (1 << 24)) != 0;
     let u = (op & (1 << 23)) != 0;
+    let s = (op & (1 << 22)) != 0; // PSR / user-bank
     let w = (op & (1 << 21)) != 0;
     let l = (op & (1 << 20)) != 0;
     let rn = ((op >> 16) & 0xF) as usize;
-    let list = (op & 0xFFFF) as u16;
-    if list == 0 {
-        return 1;
+    let mut list = (op & 0xFFFF) as u16;
+    // Empty rlist: transfer R15 only, writeback ±0x40 (ARMv4 empty-list quirk)
+    let empty = list == 0;
+    if empty {
+        list = 1 << 15;
     }
-    let count = list.count_ones();
+    let count = if empty { 16 } else { list.count_ones() };
     let addr = cpu.r[rn];
     // IB/IA/DB/DA start address
     let start = match (p, u) {
-        (true, true) => addr.wrapping_add(4),                          // IB
-        (false, true) => addr,                                         // IA
-        (true, false) => addr.wrapping_sub(4 * count),                 // DB
+        (true, true) => addr.wrapping_add(4),                           // IB
+        (false, true) => addr,                                          // IA
+        (true, false) => addr.wrapping_sub(4 * count),                  // DB
         (false, false) => addr.wrapping_sub(4 * count).wrapping_add(4), // DA
     };
     let mut a = start;
+    let load_pc = l && (list & (1 << 15)) != 0;
     for i in 0..16 {
         if list & (1 << i) != 0 {
             if l {
                 let v = bus.read32(a);
                 if i == 15 {
-                    cpu.cpsr.thumb = (v & 1) != 0;
-                    cpu.r[15] = v & !1;
+                    // Exception return: LDM with S and PC restores SPSR
+                    if s {
+                        let thumb = cpu.spsr.thumb;
+                        cpu.restore_spsr();
+                        if thumb {
+                            cpu.r[15] = v & !1;
+                        } else {
+                            cpu.r[15] = v & !3;
+                        }
+                    } else {
+                        cpu.cpsr.thumb = (v & 1) != 0;
+                        cpu.r[15] = v & !1;
+                    }
                 } else {
                     cpu.r[i] = v;
                 }
             } else {
                 let v = if i == 15 {
-                    cpu.pc_arm_read()
+                    // STM PC stores PC+12
+                    cpu.pc_arm_read().wrapping_add(4)
                 } else {
                     cpu.r[i]
                 };
@@ -563,7 +670,7 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             a = a.wrapping_add(4);
         }
     }
-    if w && rn != 15 {
+    if w && rn != 15 && !(s && !load_pc) {
         let final_base = if u {
             addr.wrapping_add(4 * count)
         } else {
@@ -571,5 +678,6 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         };
         cpu.r[rn] = final_base;
     }
+    let _ = s;
     count + 1
 }

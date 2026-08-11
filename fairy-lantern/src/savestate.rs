@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
-const MAGIC: &[u8; 8] = b"FAELST01";
+const MAGIC: &[u8; 8] = b"FAELST02";
 
 pub fn save(emu: &Emu, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -22,6 +22,15 @@ pub fn save(emu: &Emu, path: &Path) -> Result<()> {
     f.write_all(&emu.cpu.spsr.to_u32().to_le_bytes())?;
     f.write_all(&emu.cpu.cycles.to_le_bytes())?;
     f.write_all(&[emu.cpu.halted as u8])?;
+    // Banked R13/R14 + SPSR (v2)
+    f.write_all(&emu.cpu.r13_usr.to_le_bytes())?;
+    f.write_all(&emu.cpu.r14_usr.to_le_bytes())?;
+    f.write_all(&emu.cpu.r13_irq.to_le_bytes())?;
+    f.write_all(&emu.cpu.r14_irq.to_le_bytes())?;
+    f.write_all(&emu.cpu.spsr_irq.to_u32().to_le_bytes())?;
+    f.write_all(&emu.cpu.r13_svc.to_le_bytes())?;
+    f.write_all(&emu.cpu.r14_svc.to_le_bytes())?;
+    f.write_all(&emu.cpu.spsr_svc.to_u32().to_le_bytes())?;
     // timers
     for c in &emu.timers.counter {
         f.write_all(&c.to_le_bytes())?;
@@ -74,6 +83,14 @@ pub fn load(emu: &mut Emu, path: &Path) -> Result<()> {
     let mut h = [0u8; 1];
     f.read_exact(&mut h)?;
     emu.cpu.halted = h[0] != 0;
+    emu.cpu.r13_usr = read_u32(&mut f)?;
+    emu.cpu.r14_usr = read_u32(&mut f)?;
+    emu.cpu.r13_irq = read_u32(&mut f)?;
+    emu.cpu.r14_irq = read_u32(&mut f)?;
+    emu.cpu.spsr_irq = crate::cpu::Cpsr::from_u32(read_u32(&mut f)?);
+    emu.cpu.r13_svc = read_u32(&mut f)?;
+    emu.cpu.r14_svc = read_u32(&mut f)?;
+    emu.cpu.spsr_svc = crate::cpu::Cpsr::from_u32(read_u32(&mut f)?);
     for c in &mut emu.timers.counter {
         *c = read_u32(&mut f)?;
     }
@@ -81,6 +98,10 @@ pub fn load(emu: &mut Emu, path: &Path) -> Result<()> {
         *r = read_u16(&mut f)?;
     }
     emu.bus.timer_reload = emu.timers.reload;
+    // Rebuild the timer ctrl shadow from the restored IO block.
+    for i in 0..4 {
+        emu.bus.timer_ctrl_prev[i] = emu.bus.read16(0x0400_0102 + i as u32 * 4);
+    }
     emu.ppu.line = read_u16(&mut f)?;
     emu.ppu.line_cycles = read_u32(&mut f)?;
     emu.bus.ewram = read_blob(&mut f)?;

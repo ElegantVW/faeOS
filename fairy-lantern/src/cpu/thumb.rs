@@ -29,17 +29,22 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         return 3;
     }
 
-    // BL high / low
+    // BL high / low (two halfwords). High: LR = (A+4) + SignExtend(imm11)<<12
+    // After fetch R15 = A+2, so LR = R15+2 + (imm<<12).
     if (op & 0xF800) == 0xF000 {
         let imm = (op & 0x7FF) as i32;
         let imm = (imm << 21) >> 21;
-        cpu.r[14] = cpu.r[15].wrapping_add((imm << 12) as u32);
+        cpu.r[14] = cpu
+            .r[15]
+            .wrapping_add(2)
+            .wrapping_add((imm << 12) as u32);
         return 1;
     }
     if (op & 0xF800) == 0xF800 {
         let imm = op & 0x7FF;
         let target = cpu.r[14].wrapping_add(imm << 1);
-        cpu.r[14] = (cpu.r[15].wrapping_sub(2)) | 1; // return thumb
+        // After fetch of BL-low at A+2, R15=A+4 = return address
+        cpu.r[14] = cpu.r[15] | 1;
         cpu.r[15] = target & !1;
         return 3;
     }
@@ -56,11 +61,11 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         return 1;
     }
 
-    // PC-relative load
+    // PC-relative load: addr = (PC+4) word-aligned + imm*4
     if (op & 0xF800) == 0x4800 {
         let rd = ((op >> 8) & 7) as usize;
         let imm = (op & 0xFF) << 2;
-        let addr = (cpu.pc_arm_read()).wrapping_add(imm);
+        let addr = (cpu.pc_thumb_read() & !2).wrapping_add(imm);
         cpu.r[rd] = bus.read32(addr);
         return 2;
     }
@@ -87,7 +92,8 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         let base = if sp {
             cpu.r[13]
         } else {
-            cpu.pc_arm_read()
+            // ADD rd, PC, #imm — PC+4, bit 1 cleared
+            cpu.pc_thumb_read() & !2
         };
         cpu.r[rd] = base.wrapping_add(imm);
         return 1;
@@ -182,7 +188,8 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             cpu.r[rd] = if b {
                 bus.read8(addr) as u32
             } else {
-                bus.read32(addr & !3)
+                // Unaligned LDR rotates like ARM
+                bus.read32(addr & !3).rotate_right((addr & 3) * 8)
             };
         } else if b {
             bus.write8(addr, cpu.r[rd] as u8);
@@ -207,35 +214,50 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         return 2;
     }
 
-    // Load/store reg offset
-    if (op & 0xF200) == 0x5000 {
-        let l = (op & 0x0800) != 0;
-        let b = (op & 0x0400) != 0;
+    // Load/store with register offset — all 0101_xxx forms:
+    // 000 STR, 001 STRH, 010 STRB, 011 LDRSB, 100 LDR, 101 LDRH, 110 LDRB, 111 LDRSH
+    if (op & 0xF000) == 0x5000 {
+        let opc = (op >> 9) & 7;
         let ro = ((op >> 6) & 7) as usize;
         let rb = ((op >> 3) & 7) as usize;
         let rd = (op & 7) as usize;
         let addr = cpu.r[rb].wrapping_add(cpu.r[ro]);
-        if l {
-            cpu.r[rd] = if b {
-                bus.read8(addr) as u32
-            } else {
-                bus.read32(addr & !3)
-            };
-        } else if b {
-            bus.write8(addr, cpu.r[rd] as u8);
-        } else {
-            bus.write32(addr & !3, cpu.r[rd]);
+        match opc {
+            0 => bus.write32(addr & !3, cpu.r[rd]),                 // STR
+            1 => bus.write16(addr & !1, cpu.r[rd] as u16),          // STRH
+            2 => bus.write8(addr, cpu.r[rd] as u8),                 // STRB
+            3 => {
+                // LDRSB
+                cpu.r[rd] = bus.read8(addr) as i8 as i32 as u32;
+            }
+            4 => {
+                // LDR — unaligned rotates
+                cpu.r[rd] = bus.read32(addr & !3).rotate_right((addr & 3) * 8);
+            }
+            5 => cpu.r[rd] = bus.read16(addr & !1) as u32, // LDRH
+            6 => cpu.r[rd] = bus.read8(addr) as u32,       // LDRB
+            7 => {
+                // LDRSH — unaligned: sign-extend byte pair from aligned half
+                let v = bus.read16(addr & !1) as i16 as i32 as u32;
+                cpu.r[rd] = if addr & 1 != 0 {
+                    // GBA: LDRSH unaligned forces LDRSB of that byte
+                    bus.read8(addr) as i8 as i32 as u32
+                } else {
+                    v
+                };
+            }
+            _ => {}
         }
         return 2;
     }
 
-    // Hi register ops / BX
+    // Hi register ops / BX — R15 reads as PC+4
     if (op & 0xFC00) == 0x4400 {
         let op_h = (op >> 8) & 3;
         let rd = (((op >> 4) & 8) | (op & 7)) as usize;
         let rs = ((op >> 3) & 0xF) as usize;
         let rs_v = if rs == 15 {
-            cpu.pc_arm_read()
+            cpu.pc_thumb_read()
         } else {
             cpu.r[rs]
         };
@@ -243,7 +265,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             0 => {
                 // ADD
                 let d = if rd == 15 {
-                    cpu.pc_arm_read()
+                    cpu.pc_thumb_read()
                 } else {
                     cpu.r[rd]
                 };
@@ -257,7 +279,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             1 => {
                 // CMP
                 let d = if rd == 15 {
-                    cpu.pc_arm_read()
+                    cpu.pc_thumb_read()
                 } else {
                     cpu.r[rd]
                 };
@@ -544,6 +566,8 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         return 1;
     }
 
+    cpu.unknown_ops = cpu.unknown_ops.wrapping_add(1);
+    cpu.last_unknown = op;
     1
 }
 

@@ -1,52 +1,63 @@
 # Fairy Lantern — GBA emulator from scratch
 
-**Role:** Light a fable; play a pocket world. From-scratch Game Boy Advance emulator for the wizard’s leisure.
+**Role:** Light a fable; play a pocket world. From-scratch Game Boy Advance emulator.
 
-**Status:** v0.1 scaffold (Phase 0–3 started)
-
-## Metaphor
-- You are a Wizard. Fairy Lantern is the little light when work can wait.
-- Each `.gba` is a **fable**; saves will be **bookmarks**.
-- Not ancient “relic” hardware — living stories on glass.
+**Status:** v0.10 — dual-rate FIFO (no sticky SFX), OBJ mosaic, semi-OBJ blend, battle UI
 
 ## Directives
 - **From scratch** — own ARM7TDMI + bus + PPU. No mGBA / libretro cores.
-- Rust single binary: `fairy-lantern`
+- Rust: `fairy-lantern` / `fairy`
 - ROMs user-supplied only
 
-## CLI
+## Play
 ```
-fairy                 # home TUI — last / SPARK / roms / open path
-fairy-lantern         # same
-fairy last            # re-open last .gba
-fairy spark           # built-in SPARK
-fairy play game.gba   # play + remember as last
-fairy game.gba        # same
-fairy info / test / run …
+fairy play game.gba
 ```
+| Key | Action |
+|-----|--------|
+| Arrows / WASD | D-pad |
+| Z / Space | A |
+| X | B |
+| Enter | Start |
+| P / F5 / F7 / Esc | Pause / savestate / load / quit |
 
-## Current
-- [x] ROM/header load (`info`)
-- [x] ARM interpreter subset (data-proc, B/BL, LDR/STR/LDRH/STRH, LDM/STM, BX, MUL…)
-- [x] **PC-relative addressing fixed** — ARM LDR/STR/LDRH/STRH and Thumb LDR/ADD PC-relative now use correct PC+8 (ARM) / PC+4 (Thumb) base; Liquid Crystal boots into real Thumb
-- [x] Thumb interpreter subset (ALU, imm, load/store, push/pop, B/BL, BX…)
-- [x] Bus map + KEYINPUT + DMA enable + timer reloads + IF clear
-- [x] PPU Mode 3/4 + VBlank flag/IRQ raise
-- [x] **Interactive window** (`minifb`) — `fairy spark` / `play`
-- [x] **Built-in SPARK fable** — Mode 3 pixel you steer
-- [x] **Home TUI** on bare `fairy` — Last, SPARK, roms/, recents; **new ROMs via Spellbook** (`--pick`, arrow keys) — never type a path
-- [x] **Battery saves** — detect SRAM/FLASH from ROM tags; `.sav` next to ROM; autosave dirty + flush on exit
-- [x] **Savestates** — F5 save / F7 load (`.flst` under data dir)
-- [x] Self-tests (`fairy test`)
-- [ ] Mode 0 tiles + sprites (commercial ROMs)
-- [ ] Full EEPROM bit-bang / fuller BIOS HLE
+## Core surface (robustness targets)
+- [x] ARM + Thumb interpreter (commercial-class subset)
+- [x] IRQ banking + BIOS IRQ HLE + IntrWait/Halt
+- [x] DMA imm / VBlank / HBlank / FIFO special
+- [x] Timers with prescale remainder + cascade
+- [x] BIOS SWI: memory, decompress (LZ/RL/Huff), Div, ArcTan, AffineSet, SoundBias, m4a sound-driver family (silent)
+- [x] Sound FIFO A/B sinks + SOUNDCNT master bit (silent audio, games keep running)
+- [x] PPU Mode 0–5, priority composite, alpha + brightness, WIN0/1 + OBJ window, mosaic BG
+- [x] FLASH1M / FLASH / SRAM battery + savestates
+- [x] Keypad IRQ (KEYCNT)
+- [x] DirectSound FIFO → host audio (`aplay`/`pw-cat` at GBA rate, ALSA resamples)
+- [x] 1:1 sample path + silence on underrun (no held/repeated samples)
+- [x] Cartridge GPIO RTC (SIIRTC) + window title clock
+- [x] GBA frame pacing (~59.73 Hz)
+- [x] EEPROM bit-bang (512B / 8K, auto address width)
+- [x] PSG square / wave / noise mixed with DirectSound
+- [x] Approximate fetch waitstates (WAITCNT + EWRAM)
+- [x] Open-bus on unmapped / past-ROM reads
+- [x] Halt wakes on any IE∧IF (not VBlank-only); IntrWait early-out
+- [x] Timer enable 0→1 reloads counter; multi-overflow tick
+- [x] Affine OBJ-window pixel-accurate mask
+- [x] Dual-timer DirectSound A/B + underrun silence (no sticky SFX hold)
+- [x] OBJ mosaic + identity-affine fallback (HP bars / battle HUD)
+- [ ] Sequential ROM timing / remaining battle edge cases
 
-## Data
-`$XDG_DATA_HOME/faeos/fairy-lantern/` · `last.txt` · `recents.txt` · `roms/` · `saves/` · `states/`  
-Battery: `<rom>.sav` beside the cart when possible.  
-env: `FAIRY_LANTERN_ROMS`, `FAIRY_LANTERN_BIOS`, `FAIRY_LANTERN_DIR`
+## Liquid Crystal (BPRE) checkpoint
+| Feature | Status |
+|---------|--------|
+| Title art | ✓ |
+| Dialogue | ✓ |
+| Walk + camera | ✓ |
+| Sound systems m4a | DirectSound FIFO → host (~13.4 kHz for BPRE) |
+| unk_ops / unknown SWI | 0 on boot→play path |
+| Full playthrough | in progress |
 
 ## Build
 ```
 cd ~/faeos/fairy-lantern && ./build.sh install
 ```
+env: `FAIRY_DEBUG=1` for PPU register dump on headless runs.

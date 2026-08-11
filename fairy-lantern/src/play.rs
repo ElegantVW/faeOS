@@ -32,20 +32,31 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("window: {e}"))?;
 
-    window.set_target_fps(60);
+    // GBA vertical rate ≈ 59.7275 Hz
+    const GBA_FPS_NUM: u64 = 16_777_216;
+    const GBA_FPS_DEN: u64 = 280_896; // cycles per frame
+    let frame_budget = Duration::from_nanos(1_000_000_000 * GBA_FPS_DEN / GBA_FPS_NUM);
 
     let mut fb = vec![0u32; ppu::WIDTH * ppu::HEIGHT];
-    let frame_budget = Duration::from_nanos(1_000_000_000 / 60);
     let mut paused = false;
     let mut status = String::new();
+    let mut frame_n: u64 = 0;
+    let clock_start = Instant::now();
+
+    // DirectSound → speakers (bare `fairy` TUI and `fairy play` both use this path)
+    emu.bus.sound.start_host();
+    if emu.bus.rtc.present {
+        eprintln!("  clock: cartridge RTC present ({})", emu.bus.rtc.clock_string());
+    } else {
+        eprintln!("  clock: host wall clock ({})", emu.bus.rtc.clock_string());
+    }
 
     println!("✦ Fairy Lantern lit — {title}");
-    println!("  arrows/WASD · Z/X A/B · Enter Start · P pause · Esc snuff");
-    println!("  F5 savestate · F7 loadstate · battery autosaves to .sav");
+    println!("  arrows/WASD move · Z/Space=A · X=B · Enter=Start · P pause · Esc snuff");
+    println!("  F5 savestate · F7 loadstate · battery autosaves to .sav · audio+clock on");
 
+    let mut next_frame = Instant::now();
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        let t0 = Instant::now();
-
         if window.is_key_pressed(Key::P, KeyRepeat::No) {
             paused = !paused;
             status = if paused {
@@ -53,6 +64,7 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             } else {
                 "resumed".into()
             };
+            next_frame = Instant::now();
         }
 
         // Savestate
@@ -93,11 +105,31 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
         emu.bus.set_keys_pressed(keys);
 
         if !paused {
-            let mut guard = 0u32;
-            while !emu.step_cycles(1) {
-                guard += 1;
-                if guard > 500_000 {
-                    bail!("frame watchdog — CPU stuck (pc=0x{:08X})", emu.cpu.pc());
+            if !emu.run_one_frame() {
+                bail!("frame watchdog — CPU stuck (pc=0x{:08X})", emu.cpu.pc());
+            }
+            frame_n += 1;
+            if frame_n == 60 || frame_n == 300 || frame_n == 900 {
+                let peak = emu.bus.sound.peak_abs();
+                let backend = emu.bus.sound.backend_name();
+                let fa = emu.bus.sound.fifo_a_len();
+                let fb_ = emu.bus.sound.fifo_b_len();
+                let ring = emu.bus.sound.ring_len();
+                let from = emu.bus.sound.samples_from_fifo;
+                eprintln!(
+                    "  audio@{frame_n}: backend={backend} peak={peak} fifoA={fa} fifoB={fb_} ring={ring} from_fifo={from}"
+                );
+                if frame_n == 300 {
+                    let wav = std::env::temp_dir().join("fairy-lantern-audio.wav");
+                    if let Err(e) = emu.bus.sound.dump_wav(&wav) {
+                        eprintln!("  audio: wav dump failed: {e}");
+                    } else {
+                        eprintln!(
+                            "  audio: wrote {} (play with: aplay {})",
+                            wav.display(),
+                            wav.display()
+                        );
+                    }
                 }
             }
         }
@@ -109,10 +141,17 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             fb[i] = (r << 16) | (g << 8) | b;
         }
 
-        let win_title = if status.is_empty() {
-            format!("Fairy Lantern — {title}")
+        // Title: fable · RTC/clock · status
+        let clk = if frame_n % 30 == 0 || status.is_empty() {
+            emu.bus.rtc.clock_string()
         } else {
-            format!("Fairy Lantern — {title} · {status}")
+            emu.bus.rtc.clock_string()
+        };
+        let elapsed = clock_start.elapsed().as_secs();
+        let win_title = if status.is_empty() {
+            format!("Fairy Lantern — {title} · {clk} · t={elapsed}s")
+        } else {
+            format!("Fairy Lantern — {title} · {clk} · {status}")
         };
         window.set_title(&win_title);
 
@@ -120,12 +159,18 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             .update_with_buffer(&fb, ppu::WIDTH, ppu::HEIGHT)
             .map_err(|e| anyhow::anyhow!("present: {e}"))?;
 
-        let spent = t0.elapsed();
-        if spent < frame_budget {
-            std::thread::sleep(frame_budget - spent);
+        // Pace to GBA frame clock
+        next_frame += frame_budget;
+        let now = Instant::now();
+        if next_frame > now {
+            std::thread::sleep(next_frame - now);
+        } else {
+            // fell behind — resync
+            next_frame = now;
         }
     }
 
+    emu.bus.sound.stop_host();
     emu.flush_battery();
     println!("  lantern snuffed (battery flushed).");
     Ok(())
@@ -133,7 +178,7 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
 
 fn poll_keys(window: &Window) -> u16 {
     let mut m = 0u16;
-    if window.is_key_down(Key::Z) || window.is_key_down(Key::J) {
+    if window.is_key_down(Key::Z) || window.is_key_down(Key::J) || window.is_key_down(Key::Space) {
         m |= KEY_A;
     }
     if window.is_key_down(Key::X) || window.is_key_down(Key::K) {
