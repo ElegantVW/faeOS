@@ -149,10 +149,11 @@ def run_tui() -> int:
     users = discover_users()
 
     sel = 0
-    mode = "nav"
+    mode = "nav"        # nav | edit_str | confirm_remove
     edit_buf = ""
     edit_user = ""
     status = ""
+    pending_remove = ""
 
     btn_idx = len(KEYS)
     user_btn_start = btn_idx + len(BUTTONS)
@@ -238,11 +239,15 @@ def run_tui() -> int:
             if status:
                 rows.append(art.pad_vis(art.paint(status, P.WARN), body_w))
 
+            if mode == "confirm_remove" and pending_remove:
+                confirm_line = f"  delete user '{pending_remove}' and all files? y / n"
+                rows.append(art.pad_vis(art.paint(confirm_line, P.WARN), body_w))
+
             body = art.box(rows, title="Lock", width=tw, body_style=(P.SILVER,))
 
             runes = art.box(
                 [
-                    art.pad_vis("j/k move · space toggle/hide · enter edit · h hide user", body_w),
+                    art.pad_vis("j/k move · space toggle · enter edit · h hide · r delete", body_w),
                     art.pad_vis("n add user · s save · L lock · R restart · q quit", body_w),
                 ],
                 title="runes",
@@ -255,17 +260,25 @@ def run_tui() -> int:
 
             key = art.tui_read_key(fd, timeout=1.0)
 
-            # Handle new user input completion
+            # Handle new user input completion — actually create system user
             if mode == "edit_str" and edit_user == "__new__":
                 if key == "enter":
                     if edit_buf and valid_username(edit_buf):
-                        if edit_buf not in overrides or not isinstance(overrides[edit_buf], dict):
-                            overrides[edit_buf] = {}
-                        overrides[edit_buf]["display"] = edit_buf
-                        overrides[edit_buf]["hidden"] = "false"
-                        status = f"added {edit_buf}"
+                        try:
+                            subprocess.run(
+                                ["sudo", "useradd", "-m", "-s", "/usr/bin/zsh", edit_buf],
+                                capture_output=True, check=True
+                            )
+                            if edit_buf not in overrides or not isinstance(overrides[edit_buf], dict):
+                                overrides[edit_buf] = {}
+                            overrides[edit_buf]["display"] = edit_buf
+                            overrides[edit_buf]["hidden"] = "false"
+                            save_json(HEARTH, overrides)
+                            status = f"created user {edit_buf}"
+                        except subprocess.CalledProcessError as e:
+                            status = f"failed: {e.stderr.decode()[:60] if e.stderr else 'permission denied'}"
                     else:
-                        status = "invalid username"
+                        status = "invalid username (a-z, 0-9, _ -)"
                     mode = "nav"
                     edit_user = ""
                 elif key == "esc":
@@ -295,6 +308,27 @@ def run_tui() -> int:
                     edit_buf = edit_buf[:-1]
                 elif len(key) == 1 and key.isprintable():
                     edit_buf += key
+                continue
+
+            # ── confirm_remove mode ──
+            if mode == "confirm_remove":
+                if key in ("y", "Y"):
+                    if pending_remove:
+                        try:
+                            subprocess.run(
+                                ["sudo", "userdel", "-r", pending_remove],
+                                capture_output=True, check=True
+                            )
+                            if pending_remove in overrides:
+                                del overrides[pending_remove]
+                            save_json(HEARTH, overrides)
+                            status = f"deleted user {pending_remove}"
+                        except subprocess.CalledProcessError as e:
+                            status = f"failed: {e.stderr.decode()[:60] if e.stderr else 'permission denied'}"
+                    mode = "nav"
+                elif key in ("n", "N", "esc", "q"):
+                    mode = "nav"
+                    status = "cancelled"
                 continue
 
             # ── nav mode ──
@@ -356,12 +390,18 @@ def run_tui() -> int:
                             edit_user = "__new__"
                             status = "enter username"
                         elif action == "rem_user":
-                            if users:
-                                user_name = users[0]["name"]
-                                if user_name not in overrides or not isinstance(overrides[user_name], dict):
-                                    overrides[user_name] = {}
-                                overrides[user_name]["hidden"] = "true"
-                                status = f"removed {user_name}"
+                            # Delete last selected user (or first visible)
+                            target = None
+                            if sel >= user_list_start and sel < total_rows:
+                                target = users[sel - user_list_start]["name"]
+                            elif users:
+                                target = users[0]["name"]
+                            if target:
+                                mode = "confirm_remove"
+                                pending_remove = target
+                                status = ""
+                            else:
+                                status = "no users"
                 elif sel >= user_list_start and sel < total_rows:
                     user_idx = sel - user_list_start
                     if user_idx < len(users):
@@ -389,6 +429,13 @@ def run_tui() -> int:
                         cur = overrides[user_name].get("hidden", "false")
                         overrides[user_name]["hidden"] = "false" if cur == "true" else "true"
                         status = f"{'hidden' if overrides[user_name]['hidden'] == 'true' else 'shown'} {user_name}"
+            elif key in ("r", "d"):
+                if sel >= user_list_start and sel < total_rows:
+                    user_idx = sel - user_list_start
+                    if user_idx < len(users):
+                        mode = "confirm_remove"
+                        pending_remove = users[user_idx]["name"]
+                        status = ""
             elif key == "n":
                 mode = "edit_str"
                 edit_buf = ""
