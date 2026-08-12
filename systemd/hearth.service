@@ -4,7 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/bin/hearth --daemon
+ExecStart=%h/bin/hearth daemon
 Restart=on-failure
 RestartSec=3
 

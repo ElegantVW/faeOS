@@ -264,19 +264,13 @@ def run_tui() -> int:
             if mode == "edit_str" and edit_user == "__new__":
                 if key == "enter":
                     if edit_buf and valid_username(edit_buf):
-                        try:
-                            subprocess.run(
-                                ["sudo", "useradd", "-m", "-s", "/usr/bin/zsh", edit_buf],
-                                capture_output=True, check=True
-                            )
-                            if edit_buf not in overrides or not isinstance(overrides[edit_buf], dict):
-                                overrides[edit_buf] = {}
-                            overrides[edit_buf]["display"] = edit_buf
-                            overrides[edit_buf]["hidden"] = "false"
-                            save_json(HEARTH, overrides)
-                            status = f"created user {edit_buf}"
-                        except subprocess.CalledProcessError as e:
-                            status = f"failed: {e.stderr.decode()[:60] if e.stderr else 'permission denied'}"
+                        subprocess.run(["hearth", "add", edit_buf], capture_output=True)
+                        if edit_buf not in overrides or not isinstance(overrides[edit_buf], dict):
+                            overrides[edit_buf] = {}
+                        overrides[edit_buf]["display"] = edit_buf
+                        overrides[edit_buf]["hidden"] = "false"
+                        save_json(HEARTH, overrides)
+                        status = f"created user {edit_buf}"
                     else:
                         status = "invalid username (a-z, 0-9, _ -)"
                     mode = "nav"
@@ -314,17 +308,11 @@ def run_tui() -> int:
             if mode == "confirm_remove":
                 if key in ("y", "Y"):
                     if pending_remove:
-                        try:
-                            subprocess.run(
-                                ["sudo", "userdel", "-r", pending_remove],
-                                capture_output=True, check=True
-                            )
-                            if pending_remove in overrides:
-                                del overrides[pending_remove]
-                            save_json(HEARTH, overrides)
-                            status = f"deleted user {pending_remove}"
-                        except subprocess.CalledProcessError as e:
-                            status = f"failed: {e.stderr.decode()[:60] if e.stderr else 'permission denied'}"
+                        subprocess.run(["hearth", "remove", pending_remove], capture_output=True)
+                        if pending_remove in overrides:
+                            del overrides[pending_remove]
+                        save_json(HEARTH, overrides)
+                        status = f"deleted user {pending_remove}"
                     mode = "nav"
                 elif key in ("n", "N", "esc", "q"):
                     mode = "nav"
