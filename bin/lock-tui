@@ -1,27 +1,42 @@
 #!/usr/bin/env python3
-"""lock-tui — faeOS lock screen configurator"""
+"""lock-tui — configure pixie-lock settings (idle timeout, guest mode, etc.)
+
+    lock-tui     interactive TUI
+    lock-tui -h  help
+"""
+
+from __future__ import annotations
+
 import json
 import os
 import subprocess
 import sys
+import time
+from pathlib import Path
 
-# Shared TUI layer
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fae_termart import tui_cleanup, tui_read_key, box, paint_frame
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ["PIXIE_UNICODE"] = "1"
 
-CONFIG = os.path.expanduser("~/.config/pixie/lock.json")
-LOCKS = [
-    ("enabled",           "Auto-lock",         "bool"),
-    ("ac_idle_seconds",    "AC idle timeout",   "time"),
-    ("battery_idle_seconds", "Battery idle timeout", "time"),
-    ("dont_lock",         "Don't lock now",     "bool"),
-    ("guest_enabled",     "Guest access",       "bool"),
-    ("suspend_on_lock",   "Suspend on lock",    "bool"),
-    ("lock_message",      "Lock message",       "str"),
-]
+import fae_termart as art
+from fae_termart import Palette as P
+
+CONFIG = Path.home() / ".config" / "pixie" / "lock.json"
+
+KINDS = {
+    "enabled":             ("bool",   "Auto-lock",         10),
+    "ac_idle_seconds":     ("time",   "AC idle timeout",   600),
+    "battery_idle_seconds":("time",   "Battery idle to",   120),
+    "dont_lock":           ("bool",   "Don't lock now",    False),
+    "guest_enabled":       ("bool",   "Guest access",      False),
+    "suspend_on_lock":     ("bool",   "Suspend on lock",   False),
+    "lock_message":        ("str",    "Lock message",      ""),
+}
+KEYS = list(KINDS)
+BUTTONS = [("Lock Now", "lock"), ("Restart Daemon", "restart"),
+           ("Guest On",  "guest_on"), ("Guest Off", "guest_off")]
 
 
-def load():
+def load() -> dict:
     try:
         with open(CONFIG) as f:
             return json.load(f)
@@ -29,125 +44,215 @@ def load():
         return {}
 
 
-def save(cfg):
-    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+def save(cfg: dict):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG, "w") as f:
         json.dump(cfg, f, indent=2)
 
 
-def fmt_time(sec):
+def fmt_time(sec: int) -> str:
     if sec >= 60:
         m, s = divmod(sec, 60)
-        return f"{m}m{s:02d}s"
+        return f"{m}m {s:02d}s"
     return f"{sec}s"
 
 
-def fmt_val(key, cfg):
+def fmt_val(key: str, cfg: dict) -> str:
     v = cfg.get(key)
     if key in ("ac_idle_seconds", "battery_idle_seconds"):
-        return fmt_time(v if isinstance(v, int) else 300)
-    elif isinstance(v, bool):
-        return "On" if v else "Off"
-    elif isinstance(v, str):
+        return fmt_time(int(v) if isinstance(v, (int, float)) else KINDS[key][2])
+    if isinstance(v, bool):
+        return f"{P.OK}On{P.RESET}" if v else "Off"
+    if isinstance(v, str):
         return f'"{v}"' if v else "(default)"
     return str(v)
 
 
-def toggle(cfg, key):
-    if isinstance(cfg.get(key), bool):
-        cfg[key] = not cfg[key]
-    return cfg
-
-
-def adjust_time(cfg, key, delta):
-    v = cfg.get(key, 300)
-    if isinstance(v, (int, float)):
-        v = max(30, min(3600, int(v) + delta))
-        cfg[key] = v
-    return cfg
-
-
-def daemon_status():
+def daemon_status() -> tuple[bool, str]:
     try:
         subprocess.run(["pgrep", "-x", "pixie-lockd"], capture_output=True, check=True)
-        return "Active"
+        return True, f"{P.OK}active{P.RESET}"
     except Exception:
-        return "Stopped"
+        return False, f"{P.MUTED}stopped{P.RESET}"
 
 
 def daemon_restart():
+    subprocess.run(["systemctl", "--user", "restart", "pixie-lockd.service"],
+                   capture_output=True)
+
+
+def get_idle() -> str:
     try:
-        subprocess.run(["systemctl", "--user", "restart", "pixie-lockd.service"], check=True)
+        ms = int(subprocess.check_output(["xprintidle"], text=True).strip())
+        return fmt_time(ms // 1000)
     except Exception:
-        pass
+        return "?"
 
 
-def lock_now():
-    subprocess.Popen(["pixie-lock"])
+# ── TUI ──────────────────────────────────────────────────────────────
 
+def run_tui() -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        print("lock-tui needs a terminal", file=sys.stderr)
+        return 1
 
-def guest_toggle():
-    try:
-        subprocess.run(["fae-guest", "start"], check=True)
-    except Exception:
-        pass
+    art.tui_begin(fd, "lock-tui")
 
-
-def guest_stop():
-    try:
-        subprocess.run(["fae-guest", "stop"], check=True)
-    except Exception:
-        pass
-
-
-def main():
     cfg = load()
-    keys = [k[0] for k in LOCKS]
-    sel = 0
+    for k, v in KINDS.items():
+        if k not in cfg:
+            cfg[k] = v[2]  # default
+
+    sel = 0            # index into KEYS (rows)
+    mode = "nav"       # nav | edit_str | confirm_save
+    edit_buf = ""
+    status = ""
+    total_rows = len(KEYS) + len(BUTTONS)
 
     try:
         while True:
-            dstatus = daemon_status()
-            pw = box(f"Lock TUI  {dstatus}", list(range(len(LOCKS) + 4)))
+            d_ok, d_text = daemon_status()
+            idle_sec = get_idle()
 
-            pw[sel] = f"\033[1;38;5;168m{pw[sel]}\033[0m"
-            paint_frame(pw)
+            tw = art.term_width()
+            body_w = tw - 4
 
-            key = tui_read_key()
+            # ── build rows ──
+            rows: list[str] = []
 
-            if key == "esc" or key == "q":
+            header = f"{P.BOLD}{P.PINK}✦ Pixie Lock ✦{P.RESET}　daemon {d_text}　idle {idle_sec}"
+            rows.append(art.pad_vis(header, body_w))
+            rows.append(art.pad_vis("", body_w))
+
+            for i, key in enumerate(KEYS):
+                kind, label, _ = KINDS[key]
+                val_str = fmt_val(key, cfg)
+
+                if key == "lock_message" and mode == "edit_str" and i == sel:
+                    row = f"  {label}: {P.PINK}\"{edit_buf}_{P.RESET}\""
+                else:
+                    row = f"  {label}: {val_str}"
+
+                if i == sel:
+                    row = art.paint(art.pad_vis(row, body_w), P.PINK)
+                else:
+                    row = art.pad_vis(row, body_w)
+                rows.append(row)
+
+            rows.append(art.pad_vis("", body_w))
+
+            # ── buttons row ──
+            btn_parts: list[str] = []
+            btn_idx = len(KEYS)
+            for j, (label, _) in enumerate(BUTTONS):
+                idx = btn_idx + j
+                if idx == sel:
+                    btn_parts.append(f"{P.BOLD}{P.PINK}[ {label} ]{P.RESET}")
+                else:
+                    btn_parts.append(f"{P.MUTED}[ {label} ]{P.RESET}")
+            rows.append(art.pad_vis("  " + "  ".join(btn_parts), body_w))
+
+            if status:
+                rows.append(art.pad_vis(art.paint(status, P.WARN), body_w))
+
+            body = art.box(rows, title="Lock", width=tw, body_style=(P.SILVER,))
+
+            runes = art.box(
+                [
+                    art.pad_vis("j/k move · space toggle · ←→ adjust time · enter edit", body_w),
+                    art.pad_vis("s save · L lock now · R restart daemon · q quit", body_w),
+                ],
+                title="runes",
+                width=tw,
+                body_style=(P.MUTED,),
+            )
+
+            frame = body + "\n" + runes
+            art.paint_frame(fd, frame)
+
+            key = art.tui_read_key(fd, timeout=1.0)
+
+            # ── edit_str mode ──
+            if mode == "edit_str":
+                if key == "enter":
+                    cfg["lock_message"] = edit_buf
+                    mode = "nav"
+                elif key == "esc":
+                    mode = "nav"
+                elif key == "backspace":
+                    edit_buf = edit_buf[:-1]
+                elif len(key) == 1 and key.isprintable():
+                    edit_buf += key
+                continue
+
+            # ── nav mode ──
+            if key in ("q", "Q", "esc"):
                 break
+
+            if key in ("j", "down"):
+                sel = min(total_rows - 1, sel + 1)
             elif key in ("k", "up"):
                 sel = max(0, sel - 1)
-            elif key in ("j", "down"):
-                sel = min(len(LOCKS) + 3, sel + 1)
             elif key == "s":
                 save(cfg)
+                status = "saved"
+            elif key == "L":
+                subprocess.Popen(["pixie-lock"])
+                status = "locked"
+            elif key == "R":
+                daemon_restart()
+                status = "daemon restarted"
             elif key in (" ", "enter"):
-                if sel < len(LOCKS):
-                    k, _, kind = LOCKS[sel]
+                if sel < len(KEYS):
+                    key_name = KEYS[sel]
+                    kind, _, _ = KINDS[key_name]
+
                     if kind == "bool":
-                        cfg = toggle(cfg, k)
+                        cfg[key_name] = not cfg.get(key_name, False)
                     elif kind == "time":
-                        if key == "enter":
-                            cfg = adjust_time(cfg, k, 30)
-                        else:
-                            cfg = adjust_time(cfg, k, 60)
-                    elif kind == "str" and key == "enter":
-                        val = input("Lock message: ").strip()
-                        if val:
-                            cfg[k] = val
-                elif sel == len(LOCKS):
-                    lock_now()
-                elif sel == len(LOCKS) + 1:
-                    daemon_restart()
-                elif sel == len(LOCKS) + 2:
-                    guest_toggle()
-                elif sel == len(LOCKS) + 3:
-                    guest_stop()
+                        cur = int(cfg.get(key_name, 300))
+                        delta = 60 if key == "enter" else 30
+                        cfg[key_name] = max(30, min(3600, cur + delta))
+                    elif kind == "str":
+                        mode = "edit_str"
+                        edit_buf = cfg.get(key_name, "")
+                        status = ""
+                else:
+                    btn_sel = sel - len(KEYS)
+                    if btn_sel < len(BUTTONS):
+                        action = BUTTONS[btn_sel][1]
+                        if action == "lock":
+                            subprocess.Popen(["pixie-lock"])
+                            status = "locked"
+                        elif action == "restart":
+                            daemon_restart()
+                            status = "daemon restarted"
+                        elif action == "guest_on":
+                            subprocess.Popen(["fae-guest", "start"])
+                            status = "guest started"
+                        elif action == "guest_off":
+                            subprocess.Popen(["fae-guest", "stop"])
+                            status = "guest stopped"
+            elif key in ("left", "right"):
+                if sel < len(KEYS):
+                    key_name = KEYS[sel]
+                    kind, _, _ = KINDS[key_name]
+                    if kind == "time":
+                        cur = int(cfg.get(key_name, 300))
+                        delta = -30 if key == "left" else 30
+                        cfg[key_name] = max(30, min(3600, cur + delta))
+
     finally:
-        tui_cleanup()
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+    else:
+        sys.exit(run_tui())
