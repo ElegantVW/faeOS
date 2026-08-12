@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,8 +34,9 @@ KINDS = {
     "lock_message":        ("str",    "Lock message",      ""),
 }
 KEYS = list(KINDS)
-BUTTONS = [("Lock Now", "lock"), ("Restart Daemon", "restart"),
+BUTTONS = [("Lock Now", "lock"), ("Restart", "restart"),
            ("Guest On",  "guest_on"), ("Guest Off", "guest_off")]
+USER_BTNS = [("Add User", "add_user"), ("Remove", "rem_user")]
 
 
 def load_json(path: Path) -> dict:
@@ -91,12 +93,8 @@ def get_idle() -> str:
 
 
 def discover_users() -> list[dict]:
-    """Read users from /etc/passwd + hearth.json overrides."""
+    """Read ALL users from /etc/passwd, flag hidden ones."""
     overrides = load_json(HEARTH)
-    hidden = {
-        name for name, v in overrides.items()
-        if isinstance(v, dict) and v.get("hidden") == "true"
-    }
     users = []
     try:
         with open("/etc/passwd") as f:
@@ -111,20 +109,25 @@ def discover_users() -> list[dict]:
                     continue
                 if "nologin" in shell or "false" in shell:
                     continue
-                if name in hidden:
-                    continue
 
-                display = name
-                if name in overrides:
-                    ov = overrides[name]
-                    if isinstance(ov, dict) and "display" in ov:
-                        display = ov["display"]
+                ov = overrides.get(name, {})
+                if not isinstance(ov, dict):
+                    ov = {}
+                hidden = ov.get("hidden", "false") == "true"
+                display = ov.get("display", name)
 
-                users.append({"name": name, "display": display, "uid": uid})
+                users.append({
+                    "name": name, "display": display,
+                    "uid": uid, "hidden": hidden,
+                })
     except Exception:
         pass
     users.sort(key=lambda u: u["uid"])
     return users
+
+
+def valid_username(name: str) -> bool:
+    return bool(re.match(r'^[a-z_][a-z0-9_-]{0,30}$', name))
 
 
 # ── TUI ──────────────────────────────────────────────────────────────
@@ -150,7 +153,12 @@ def run_tui() -> int:
     edit_buf = ""
     edit_user = ""
     status = ""
-    total_rows = len(KEYS) + len(BUTTONS) + len(users)
+
+    btn_idx = len(KEYS)
+    user_btn_start = btn_idx + len(BUTTONS)
+    user_list_start = user_btn_start + len(USER_BTNS)
+
+    total_rows = user_list_start + len(users)
 
     try:
         while True:
@@ -185,9 +193,8 @@ def run_tui() -> int:
 
             rows.append(art.pad_vis("", body_w))
 
-            # ── buttons row ──
+            # ── action buttons ──
             btn_parts: list[str] = []
-            btn_idx = len(KEYS)
             for j, (label, _) in enumerate(BUTTONS):
                 idx = btn_idx + j
                 if idx == sel:
@@ -198,25 +205,35 @@ def run_tui() -> int:
             rows.append(art.pad_vis("", body_w))
 
             # ── users section ──
-            user_start = btn_idx + len(BUTTONS)
-            if users:
-                rows.append(art.pad_vis(art.paint("Users", P.PINK_DIM), body_w))
-                for i, user in enumerate(users):
-                    idx = user_start + i
-                    hidden = overrides.get(user["name"], {}).get("hidden") == "true" if isinstance(overrides.get(user["name"]), dict) else False
-                    mark = " " if not hidden else "x"
-                    display = user["display"]
+            rows.append(art.pad_vis(art.paint("Users", P.PINK_DIM), body_w))
 
-                    if mode == "edit_str" and edit_user == user["name"]:
-                        row = f"  [{mark}] {user['name']}: \"{edit_buf}_\""
-                    else:
-                        row = f"  [{mark}] {user['name']}: {display}"
+            # User action buttons
+            ubtn_parts: list[str] = []
+            for j, (label, _) in enumerate(USER_BTNS):
+                idx = user_btn_start + j
+                if idx == sel:
+                    ubtn_parts.append(f"{P.BOLD}{P.PINK}[ {label} ]{P.RESET}")
+                else:
+                    ubtn_parts.append(f"{P.MUTED}[ {label} ]{P.RESET}")
+            rows.append(art.pad_vis("  " + "  ".join(ubtn_parts), body_w))
 
-                    if idx == sel:
-                        row = art.paint(art.pad_vis(row, body_w), P.PINK)
-                    else:
-                        row = art.pad_vis(row, body_w)
-                    rows.append(row)
+            # User list
+            for i, user in enumerate(users):
+                idx = user_list_start + i
+                mark = " " if not user["hidden"] else "x"
+
+                if mode == "edit_str" and edit_user == user["name"]:
+                    row = f"  [{mark}] {user['name']}: \"{edit_buf}_\""
+                else:
+                    row = f"  [{mark}] {user['name']}: {user['display']}"
+
+                if user["hidden"]:
+                    row = art.paint(art.pad_vis(row, body_w), P.MUTED)
+                elif idx == sel:
+                    row = art.paint(art.pad_vis(row, body_w), P.PINK)
+                else:
+                    row = art.pad_vis(row, body_w)
+                rows.append(row)
 
             if status:
                 rows.append(art.pad_vis(art.paint(status, P.WARN), body_w))
@@ -225,8 +242,8 @@ def run_tui() -> int:
 
             runes = art.box(
                 [
-                    art.pad_vis("j/k move · space toggle · enter edit · h hide user", body_w),
-                    art.pad_vis("s save · L lock now · R restart daemon · q quit", body_w),
+                    art.pad_vis("j/k move · space toggle/hide · enter edit · h hide user", body_w),
+                    art.pad_vis("n add user · s save · L lock · R restart · q quit", body_w),
                 ],
                 title="runes",
                 width=tw,
@@ -237,6 +254,28 @@ def run_tui() -> int:
             art.paint_frame(fd, frame)
 
             key = art.tui_read_key(fd, timeout=1.0)
+
+            # Handle new user input completion
+            if mode == "edit_str" and edit_user == "__new__":
+                if key == "enter":
+                    if edit_buf and valid_username(edit_buf):
+                        if edit_buf not in overrides or not isinstance(overrides[edit_buf], dict):
+                            overrides[edit_buf] = {}
+                        overrides[edit_buf]["display"] = edit_buf
+                        overrides[edit_buf]["hidden"] = "false"
+                        status = f"added {edit_buf}"
+                    else:
+                        status = "invalid username"
+                    mode = "nav"
+                    edit_user = ""
+                elif key == "esc":
+                    mode = "nav"
+                    edit_user = ""
+                elif key == "backspace":
+                    edit_buf = edit_buf[:-1]
+                elif len(key) == 1 and key.isprintable():
+                    edit_buf += key
+                continue
 
             # ── edit_str mode ──
             if mode == "edit_str":
@@ -291,7 +330,7 @@ def run_tui() -> int:
                         edit_buf = cfg.get(key_name, "")
                         edit_user = ""
                         status = ""
-                elif btn_idx <= sel < user_start:
+                elif btn_idx <= sel < user_btn_start:
                     btn_sel = sel - btn_idx
                     if btn_sel < len(BUTTONS):
                         action = BUTTONS[btn_sel][1]
@@ -307,8 +346,24 @@ def run_tui() -> int:
                         elif action == "guest_off":
                             subprocess.Popen(["hearth-guest", "stop"])
                             status = "guest stopped"
-                elif sel >= user_start and sel < total_rows:
-                    user_idx = sel - user_start
+                elif user_btn_start <= sel < user_list_start:
+                    ubtn_sel = sel - user_btn_start
+                    if ubtn_sel < len(USER_BTNS):
+                        action = USER_BTNS[ubtn_sel][1]
+                        if action == "add_user":
+                            mode = "edit_str"
+                            edit_buf = ""
+                            edit_user = "__new__"
+                            status = "enter username"
+                        elif action == "rem_user":
+                            if users:
+                                user_name = users[0]["name"]
+                                if user_name not in overrides or not isinstance(overrides[user_name], dict):
+                                    overrides[user_name] = {}
+                                overrides[user_name]["hidden"] = "true"
+                                status = f"removed {user_name}"
+                elif sel >= user_list_start and sel < total_rows:
+                    user_idx = sel - user_list_start
                     if user_idx < len(users):
                         user_name = users[user_idx]["name"]
                         if key == "enter":
@@ -318,14 +373,15 @@ def run_tui() -> int:
                             edit_buf = ov.get("display", user_name) if isinstance(ov, dict) else user_name
                             status = ""
                         elif key == " ":
+                            # toggle hidden
                             if user_name not in overrides or not isinstance(overrides[user_name], dict):
                                 overrides[user_name] = {}
                             cur = overrides[user_name].get("hidden", "false")
                             overrides[user_name]["hidden"] = "false" if cur == "true" else "true"
-                            status = f"{'hid' if overrides[user_name]['hidden'] == 'true' else 'shown'} {user_name}"
+                            status = f"{'hidden' if overrides[user_name]['hidden'] == 'true' else 'shown'} {user_name}"
             elif key == "h":
-                if sel >= user_start and sel < total_rows:
-                    user_idx = sel - user_start
+                if sel >= user_list_start and sel < total_rows:
+                    user_idx = sel - user_list_start
                     if user_idx < len(users):
                         user_name = users[user_idx]["name"]
                         if user_name not in overrides or not isinstance(overrides[user_name], dict):
@@ -333,6 +389,11 @@ def run_tui() -> int:
                         cur = overrides[user_name].get("hidden", "false")
                         overrides[user_name]["hidden"] = "false" if cur == "true" else "true"
                         status = f"{'hidden' if overrides[user_name]['hidden'] == 'true' else 'shown'} {user_name}"
+            elif key == "n":
+                mode = "edit_str"
+                edit_buf = ""
+                edit_user = "__new__"
+                status = "enter system username to add"
             elif key in ("left", "right"):
                 if sel < len(KEYS):
                     key_name = KEYS[sel]
