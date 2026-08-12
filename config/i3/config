@@ -85,7 +85,7 @@ tiling_drag modifier
 for_window [class=".*"] floating enable
 
 # start a terminal
-bindsym $mod+Return exec kitty
+bindsym $mod+Return exec rift
 
 # kill focused window
 bindsym $mod+Shift+q kill
@@ -236,8 +236,8 @@ bar {
 }
 
 
-exec --no-startup-id kitty
-exec --no-startup-id kitty
+exec --no-startup-id rift
+exec --no-startup-id rift
 
 # desktop layer: compositor + wallpaper
 exec_always --no-startup-id picom --config ~/.config/picom/picom.conf

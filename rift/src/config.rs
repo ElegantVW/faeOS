@@ -1,0 +1,34 @@
+pub struct Colors {
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub cursor: [u8; 3],
+    pub ansi: [[u8; 3]; 16],
+}
+
+impl Colors {
+    pub fn pink() -> Self {
+        Self {
+            fg: [0xff, 0x9c, 0xc4],
+            bg: [0x12, 0x08, 0x0e],
+            cursor: [0xe8, 0x79, 0xa0],
+            ansi: [
+                [0x1a, 0x0a, 0x12], // black
+                [0xff, 0x2d, 0x55], // red
+                [0x3d, 0xd6, 0x8c], // green
+                [0xff, 0xb0, 0x20], // yellow
+                [0xc4, 0x4d, 0x7a], // blue
+                [0xe8, 0x79, 0xa0], // magenta
+                [0x9d, 0x5c, 0x75], // cyan
+                [0xd8, 0xa0, 0xc0], // white
+                [0x5a, 0x3a, 0x48], // bright black
+                [0xff, 0x6b, 0x8a], // bright red
+                [0x6e, 0xec, 0xc0], // bright green
+                [0xff, 0xd0, 0x78], // bright yellow
+                [0xe8, 0x79, 0xa0], // bright blue
+                [0xf0, 0xb4, 0xc8], // bright magenta
+                [0xc4, 0x4d, 0x7a], // bright cyan
+                [0xff, 0xe3, 0xee], // bright white
+            ],
+        }
+    }
+}

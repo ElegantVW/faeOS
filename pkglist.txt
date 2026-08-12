@@ -53,3 +53,4 @@ gtk3
 gtk4
 qt5ct
 dunst
+# Terminal emulator (built from source)

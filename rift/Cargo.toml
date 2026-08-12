@@ -1,0 +1,24 @@
+[package]
+name = "rift"
+version = "0.1.0"
+edition = "2021"
+description = "faeOS terminal emulator — from-scratch Rust, pink theme"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "rift"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+rusttype = "0.9"
+portable-pty = "0.8"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
