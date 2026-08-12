@@ -121,7 +121,7 @@ def run_tui() -> int:
             # ── build rows ──
             rows: list[str] = []
 
-            header = f"{P.BOLD}{P.PINK}✦ Seal ✦{P.RESET}　daemon {d_text}　idle {idle_sec}"
+            header = f"{P.BOLD}{P.PINK}* Seal *{P.RESET} daemon {d_text} idle {idle_sec}"
             rows.append(art.pad_vis(header, body_w))
             rows.append(art.pad_vis("", body_w))
 
