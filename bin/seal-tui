@@ -363,10 +363,10 @@ def run_tui() -> int:
                             daemon_restart()
                             status = "daemon restarted"
                         elif action == "guest_on":
-                            subprocess.Popen(["hearth-guest", "start"])
+                            subprocess.Popen(["hearth", "guest", "start"])
                             status = "guest started"
                         elif action == "guest_off":
-                            subprocess.Popen(["hearth-guest", "stop"])
+                            subprocess.Popen(["hearth", "guest", "stop"])
                             status = "guest stopped"
                 elif user_btn_start <= sel < user_list_start:
                     ubtn_sel = sel - user_btn_start
