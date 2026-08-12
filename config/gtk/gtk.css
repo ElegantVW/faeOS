@@ -1,0 +1,42 @@
+/* Pixie pink GTK theme — dark variant */
+
+@define-color theme_bg_color #1a0a12;
+@define-color theme_fg_color #ffe3ee;
+@define-color theme_selected_bg_color #c44d7a;
+@define-color theme_selected_fg_color #ffe3ee;
+@define-color borders #5a3a48;
+@define-color unfocused_borders #3a2030;
+@define-color warning_color #ffb020;
+@define-color error_color #ff2d55;
+@define-color success_color #3dd68c;
+
+/* Scrollbars */
+scrollbar slider {
+  background-color: #5a3a48;
+  border-radius: 4px;
+}
+scrollbar slider:hover {
+  background-color: #c44d7a;
+}
+
+/* Header bars */
+headerbar {
+  background-color: #1a0a12;
+  border-bottom: 1px solid #5a3a48;
+}
+
+/* Entry fields */
+entry {
+  background-color: #2a1520;
+  color: #ffe3ee;
+  border: 1px solid #5a3a48;
+  border-radius: 4px;
+}
+
+/* Buttons */
+button {
+  border-radius: 4px;
+}
+button:hover {
+  background-color: #c44d7a;
+}

@@ -1,0 +1,26 @@
+#!/bin/sh
+# fae-panel <name>: focus the panel window if open, otherwise spawn it.
+# Panels run inside kitty with window title fae_panel_<name>.
+set -u
+name=$1
+title="fae_panel_$name"
+case "$name" in
+  bulwark) cmd="kitty -T $title -e $HOME/bin/bulwark tui" ;;
+  *) cmd="kitty -T $title -e python3 $HOME/bin/panels/$name.py" ;;
+esac
+id=$(DISPLAY=:1 i3-msg -t get_tree 2>/dev/null | python3 -c "
+import json,sys
+t=json.load(sys.stdin)
+out=[]
+def walk(n):
+    if n.get('window') and n.get('window_properties',{}).get('title')=='$title':
+        out.append(n['id'])
+    for ch in n.get('nodes',[])+n.get('floating_nodes',[]): walk(ch)
+walk(t)
+print(out[0] if out else '')
+")
+if [ -n "$id" ]; then
+  DISPLAY=:1 i3-msg "[con_id=\"$id\"] focus" >/dev/null
+else
+  DISPLAY=:1 setsid sh -c "$cmd" >/dev/null 2>&1 &
+fi

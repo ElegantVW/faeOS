@@ -1,0 +1,52 @@
+# faeOS Arch Linux dependencies
+# Install: sudo pacman -S --needed $(grep -v '^#' pkglist.txt)
+
+# Shell & prompt
+zsh
+starship
+
+# Terminal emulators
+kitty
+kmscon
+
+# Window manager & display
+i3-wm
+picom
+feh
+rofi
+xorg-xinit
+
+# Fonts
+ttf-dejavu
+ttf-dejavu-nerd
+
+# System services
+pipewire
+wireplumber
+
+# Core tools
+python3
+git
+openssh
+
+# AI
+llama-cpp
+
+# Media & music
+mpv
+yt-dlp
+ffmpeg
+
+# Search
+ddgr
+
+# Optional (mail, downloads)
+aerc
+aria2
+curl
+
+# Theming
+gtk3
+gtk4
+qt5ct
+dunst

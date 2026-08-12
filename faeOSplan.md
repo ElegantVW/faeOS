@@ -1,6 +1,6 @@
 # FaeOS Plan
 
-**Last updated:** 2026-08-06
+**Last updated:** 2026-08-12
 **Status:** Active build toward v1.0 (Arch distro)
 **Location:** This file is the *single* main plan. Each app has its own short plan in `docs/plans/`; this file stays concise.
 
@@ -117,6 +117,7 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-12 (bootstrap + theming)** — Created `fae-bootstrap.sh`: one command to go from fresh Arch → full faeOS (pacman deps, install.sh, desktop configs, user services). Moved all scattered configs into the repo: `kitty.conf`, `i3/config`, `picom.conf`, `crt.frag`, `kmscon.conf`, `fae-bar.sh`, `fae-panel`, `fae-win`, `wall.png`. Created pink theme configs: GTK (settings.ini + gtk.css), Rofi (pixie.rasi), Dunst (dunstrc), Qt (qt5ct.conf). Added `pkglist.txt` with all Arch dependencies. Updated `install.sh` to deploy desktop configs + wallpaper. Fixed all hardcoded paths to use `$HOME/bin/`. Fixed `.zshrc` to auto-source faeOS on every terminal.
 - **2026-08-08 (fairy-lantern audio+clock)** — DirectSound FIFO mix → host `aplay` (44.1 kHz); GPIO SIIRTC from host wall time; GBA ~59.73 Hz frame pace; window title shows RTC. Also earlier: Oak affine fix, m4a SWI surface. [docs/plans/fairy-lantern.md](docs/plans/fairy-lantern.md) → v0.5.
 - **2026-08-08 (fairy-lantern any-game surface)** — Sound FIFO A/B + m4a SWI family; timers; ArcTan/AffineSet; OBJ window + mosaic; KEYCNT; empty LDM; Thumb unaligned LDR. [docs/plans/fairy-lantern.md](docs/plans/fairy-lantern.md) → v0.4.
 - **2026-08-07 (fairy-lantern play polish)** — Priority compositing + alpha blend; OAM attr0; 32×64 screenblocks; phased auto-input. LC title/dialogue/walk. [docs/plans/fairy-lantern.md](docs/plans/fairy-lantern.md) → v0.3.
@@ -160,8 +161,26 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 ## Docs layout
 
 ```
-faeOSplan.md                 ← THIS: single main plan (goal, registry, roadmap, log)
-docs/plans/<app>.md          ← one concise plan per app
-docs/screen-policy.md        ← pixie-screen clear policy (shared infra)
-docs/SIREN_QUICK_START.md    ← siren dev onboarding (kept)
+faeos/                       ← faeOS root
+├── bin/                     ← 60+ scripts, TUIs, helpers (→ ~/bin)
+├── config/
+│   ├── starship.toml        ← prompt config
+│   ├── palette.env          ← pink color palette
+│   ├── tick.default         ← idle screen tick
+│   ├── kitty/               ← pink terminal colors
+│   ├── i3/                  ← window manager + fae-bar
+│   ├── picom/               ← compositor + CRT shader
+│   ├── kmscon/              ← TTY pink palette
+│   ├── rofi/                ← launcher theme
+│   ├── gtk/                 ← GTK pink settings
+│   ├── dunst/               ← notification daemon
+│   └── qt/                  ← Qt pink palette
+├── shell/pixie.zsh          ← shell integration (→ ~/.config/pixie)
+├── assets/wall.png          ← wallpaper (→ ~/Pictures)
+├── pkglist.txt              ← Arch dependencies
+├── install.sh               ← local install
+├── fae-bootstrap.sh         ← fresh Arch → full faeOS
+├── faeOSplan.md             ← THIS: single main plan
+├── docs/plans/<app>.md      ← per-app plans
+└── docs/screen-policy.md    ← pixie-screen clear policy
 ```

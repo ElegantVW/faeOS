@@ -59,6 +59,20 @@ if [[ ! -f "$PIXIE_CFG/tick" ]]; then
   cp -a "$ROOT/config/tick.default" "$PIXIE_CFG/tick"
 fi
 
+echo "==> desktop configs"
+for dir in kitty i3 picom kmscon rofi dunst; do
+  mkdir -p "$CFG/$dir"
+  cp -a "$ROOT/config/$dir/." "$CFG/$dir/" 2>/dev/null || true
+done
+mkdir -p "$CFG/gtk-3.0" "$CFG/gtk-4.0" "$CFG/qt5ct"
+cp -a "$ROOT/config/gtk/settings.ini" "$CFG/gtk-3.0/" 2>/dev/null || true
+cp -a "$ROOT/config/gtk/settings.ini" "$CFG/gtk-4.0/" 2>/dev/null || true
+cp -a "$ROOT/config/qt/qt5ct.conf" "$CFG/qt5ct/" 2>/dev/null || true
+
+echo "==> wallpaper"
+mkdir -p "$HOME/Pictures"
+cp -a "$ROOT/assets/wall.png" "$HOME/Pictures/" 2>/dev/null || true
+
 echo "==> AI registry (menagerie: models + per-app bindings)"
 "$BIN_DST/menagerie-registry.py" seed || true
 

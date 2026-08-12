@@ -1,0 +1,22 @@
+#!/bin/sh
+# fae-win <con_id>: focus the window; if it's in the scratchpad, show it.
+set -u
+id=$1
+case $id in
+  ''|*[!0-9]*) exit 0 ;;
+esac
+state=$(i3-msg -t get_tree | python3 -c "
+import json,sys
+t=json.load(sys.stdin)
+def walk(n):
+    if n.get('id')==$id: return n
+    for c in n.get('nodes',[])+n.get('floating_nodes',[]):
+        r=walk(c)
+        if r: return r
+n=walk(t)
+print(n['scratchpad_state'] if n else 'gone')")
+if [ "$state" = "none" ]; then
+  i3-msg "[con_id=$id] focus" >/dev/null 2>&1
+else
+  i3-msg "[con_id=$id] scratchpad show" >/dev/null 2>&1
+fi
