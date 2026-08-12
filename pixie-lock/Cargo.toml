@@ -1,8 +1,8 @@
 [package]
 name = "pixie-lock"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "faeOS lock screen — elaborate pink-themed locker with idle daemon"
+description = "faeOS lock screen — native Rust locker with animated UI and PAM auth"
 license = "MIT"
 publish = false
 
@@ -16,10 +16,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rusttype = "0.9"
 rand = "0.8"
-ctrlc = "3.4"
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "xinput", "randr", "dpms"] }
 
 [profile.release]
 lto = true

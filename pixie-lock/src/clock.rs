@@ -1,4 +1,3 @@
-use image::{Rgb, RgbImage};
 use rusttype::{Font, Scale};
 
 pub struct ClockRenderer {
@@ -25,12 +24,17 @@ impl ClockRenderer {
 
     pub fn draw_text(
         &self,
-        img: &mut RgbImage,
+        buf: &mut [u8],
+        stride: u32,
+        w: u32,
+        h: u32,
         text: &str,
         x: i32,
         y: i32,
         scale: f32,
-        color: Rgb<u8>,
+        r: u8,
+        g: u8,
+        b: u8,
     ) {
         let scale = Scale::uniform(scale);
         let v_metrics = self.font.v_metrics(scale);
@@ -41,17 +45,14 @@ impl ClockRenderer {
                 glyph.draw(|gx, gy, v| {
                     let px = x + gx as i32 + bb.min.x;
                     let py = y + gy as i32 + bb.min.y;
-                    if px >= 0
-                        && py >= 0
-                        && (px as u32) < img.width()
-                        && (py as u32) < img.height()
-                    {
+                    if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
                         let a = v as f32 / 255.0;
-                        let existing = img.get_pixel(px as u32, py as u32);
-                        let r = (color[0] as f32 * a + existing[0] as f32 * (1.0 - a)) as u8;
-                        let g = (color[1] as f32 * a + existing[1] as f32 * (1.0 - a)) as u8;
-                        let b = (color[2] as f32 * a + existing[2] as f32 * (1.0 - a)) as u8;
-                        img.put_pixel(px as u32, py as u32, Rgb([r, g, b]));
+                        let idx = (py as u32 * stride + px as u32 * 3) as usize;
+                        if idx + 2 < buf.len() {
+                            buf[idx] = blend(buf[idx], r, a);
+                            buf[idx + 1] = blend(buf[idx + 1], g, a);
+                            buf[idx + 2] = blend(buf[idx + 2], b, a);
+                        }
                     }
                 });
             }
@@ -68,4 +69,8 @@ impl ClockRenderer {
         }
         width.ceil() as u32
     }
+}
+
+fn blend(existing: u8, new: u8, alpha: f32) -> u8 {
+    (new as f32 * alpha + existing as f32 * (1.0 - alpha)) as u8
 }

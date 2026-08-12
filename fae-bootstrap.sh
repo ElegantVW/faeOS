@@ -64,6 +64,12 @@ fi
 
 # ── User services (optional) ─────────────────────────────────
 echo
+# ── PAM config for pixie-lock ────────────────────────────────
+if [ -f config/pixie-lock.pam ] && [ ! -f /etc/pam.d/pixie-lock ]; then
+  echo "==> Installing PAM config for pixie-lock"
+  sudo cp config/pixie-lock.pam /etc/pam.d/pixie-lock
+fi
+
 echo "==> Enabling user services"
 systemctl --user daemon-reload 2>/dev/null || true
 

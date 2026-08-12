@@ -31,7 +31,6 @@ openssh
 
 # Lock screen
 xprintidle
-i3lock
 
 # AI
 llama-cpp
