@@ -8,6 +8,7 @@ mod x11;
 
 use clap::Parser;
 use input::PasswordInput;
+use std::panic::{self, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -46,7 +47,6 @@ fn lock_screen(cli: &Cli) -> anyhow::Result<()> {
     };
 
     let mut x11 = x11::X11Lock::new()?;
-
     x11.create_window()?;
 
     let mut frame = render::FrameRenderer::new(x11.width, x11.height)?;
@@ -58,61 +58,80 @@ fn lock_screen(cli: &Cli) -> anyhow::Result<()> {
 
     x11.grab_inputs()?;
 
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        lock_loop(&mut x11, &mut frame, &mut password, msg, guest)
+    }));
+
+    let cleanup = x11.ungrab_and_destroy();
+
+    match result {
+        Ok(Ok(authenticated)) => {
+            cleanup?;
+            if authenticated && cli.suspend {
+                std::process::Command::new("systemctl")
+                    .arg("suspend")
+                    .spawn()?;
+            }
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            cleanup?;
+            Err(e)
+        }
+        Err(panic_err) => {
+            cleanup?;
+            let msg = if let Some(s) = panic_err.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_err.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown panic".to_string()
+            };
+            Err(anyhow::anyhow!("lock loop panicked: {}", msg))
+        }
+    }
+}
+
+fn lock_loop(
+    x11: &mut x11::X11Lock,
+    frame: &mut render::FrameRenderer,
+    password: &mut PasswordInput,
+    msg: &str,
+    guest: bool,
+) -> anyhow::Result<bool> {
     let mut last_tick = Instant::now();
-    let mut authenticated = false;
+    let mut fail_count: u32 = 0;
 
     loop {
-        while let Ok(Some(event)) = x11.poll_event() {
-            use x11rb::protocol::Event;
-            match event {
-                Event::KeyPress(kp) => {
-                    let keycode = kp.detail;
-                    let state: u16 = u16::from(kp.state);
-
-                    match keycode {
-                        9 => {
-                            password.clear();
-                        }
-                        22 => {
-                            password.backspace();
-                        }
-                        36 | 104 => {
-                            let pw = password.submit();
-                            match auth::verify_password(&pw) {
-                                Ok(true) => {
-                                    authenticated = true;
-                                    break;
-                                }
-                                Ok(false) => {
-                                    password.set_error();
-                                }
-                                Err(_) => {
-                                    password.set_error();
-                                }
-                            }
-                        }
-                        66 => {
-                            password.set_caps_lock(!password.caps_lock_on());
-                        }
-                        _ => {
-                            if let Some(c) = x11.keycode_to_char(keycode, state) {
-                                if !c.is_control() {
-                                    password.push_char(c);
-                                }
-                            }
-                        }
-                    }
-
-                    let bat = battery::read();
-                    frame.render_frame(msg, &bat, &password, guest);
-                    x11.show_image(frame.raw_pixels())?;
+        match poll_events(x11) {
+            Ok(Some(EventResult::Enter)) => {
+                let pw = password.submit();
+                if auth::verify_password(&pw) {
+                    return Ok(true);
                 }
-                _ => {}
+                fail_count += 1;
+                if fail_count >= 5 {
+                    eprintln!("pixie-lock: 5 failed attempts, giving up");
+                    return Ok(false);
+                }
+                password.set_error();
             }
-        }
-
-        if authenticated {
-            break;
+            Ok(Some(EventResult::Escape)) => {
+                password.clear();
+            }
+            Ok(Some(EventResult::Backspace)) => {
+                password.backspace();
+            }
+            Ok(Some(EventResult::CapsLock)) => {
+                password.set_caps_lock(!password.caps_lock_on());
+            }
+            Ok(Some(EventResult::Char(c))) => {
+                password.push_char(c);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("pixie-lock: X11 event error: {}", e);
+            }
         }
 
         let now = Instant::now();
@@ -120,22 +139,52 @@ fn lock_screen(cli: &Cli) -> anyhow::Result<()> {
             last_tick = now;
             password.tick_error();
             let bat = battery::read();
-            frame.render_frame(msg, &bat, &password, guest);
-            x11.show_image(frame.raw_pixels())?;
+            frame.render_frame(msg, &bat, password, guest);
+            if let Err(e) = x11.show_image(frame.raw_pixels()) {
+                eprintln!("pixie-lock: render error: {}", e);
+            }
         }
 
         std::thread::sleep(Duration::from_millis(50));
     }
+}
 
-    x11.ungrab_and_destroy()?;
+enum EventResult {
+    Enter,
+    Escape,
+    Backspace,
+    CapsLock,
+    Char(char),
+}
 
-    if authenticated && cli.suspend {
-        std::process::Command::new("systemctl")
-            .arg("suspend")
-            .spawn()?;
+fn poll_events(x11: &x11::X11Lock) -> anyhow::Result<Option<EventResult>> {
+    use x11rb::protocol::Event;
+
+    while let Ok(Some(event)) = x11.poll_event() {
+        match event {
+            Event::KeyPress(kp) => {
+                let keycode = kp.detail;
+                let state: u16 = u16::from(kp.state);
+
+                match keycode {
+                    36 | 104 => return Ok(Some(EventResult::Enter)),
+                    9 => return Ok(Some(EventResult::Escape)),
+                    22 => return Ok(Some(EventResult::Backspace)),
+                    66 => return Ok(Some(EventResult::CapsLock)),
+                    _ => {
+                        if let Some(c) = x11.keycode_to_char(keycode, state) {
+                            if !c.is_control() {
+                                return Ok(Some(EventResult::Char(c)));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 fn run_daemon() -> anyhow::Result<()> {
