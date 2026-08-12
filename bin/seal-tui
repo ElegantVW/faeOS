@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""seal-tui — configure seal settings (idle timeout, guest mode, etc.)
+"""seal-tui — configure seal and manage lock screen users
 
     seal-tui     interactive TUI
     seal-tui -h  help
@@ -21,6 +21,7 @@ import fae_termart as art
 from fae_termart import Palette as P
 
 CONFIG = Path.home() / ".config" / "pixie" / "seal.json"
+HEARTH = Path.home() / ".config" / "pixie" / "hearth.json"
 
 KINDS = {
     "enabled":             ("bool",   "Auto-lock",         10),
@@ -36,18 +37,18 @@ BUTTONS = [("Lock Now", "lock"), ("Restart Daemon", "restart"),
            ("Guest On",  "guest_on"), ("Guest Off", "guest_off")]
 
 
-def load() -> dict:
+def load_json(path: Path) -> dict:
     try:
-        with open(CONFIG) as f:
+        with open(path) as f:
             return json.load(f)
     except Exception:
         return {}
 
 
-def save(cfg: dict):
-    CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG, "w") as f:
-        json.dump(cfg, f, indent=2)
+def save_json(path: Path, data: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def fmt_time(sec: int) -> str:
@@ -89,6 +90,43 @@ def get_idle() -> str:
         return "?"
 
 
+def discover_users() -> list[dict]:
+    """Read users from /etc/passwd + hearth.json overrides."""
+    overrides = load_json(HEARTH)
+    hidden = {
+        name for name, v in overrides.items()
+        if isinstance(v, dict) and v.get("hidden") == "true"
+    }
+    users = []
+    try:
+        with open("/etc/passwd") as f:
+            for line in f:
+                parts = line.strip().split(":")
+                if len(parts) < 7:
+                    continue
+                name = parts[0]
+                uid = int(parts[2]) if parts[2].isdigit() else 0
+                shell = parts[6]
+                if uid < 1000 or uid >= 65534 or name == "nobody":
+                    continue
+                if "nologin" in shell or "false" in shell:
+                    continue
+                if name in hidden:
+                    continue
+
+                display = name
+                if name in overrides:
+                    ov = overrides[name]
+                    if isinstance(ov, dict) and "display" in ov:
+                        display = ov["display"]
+
+                users.append({"name": name, "display": display, "uid": uid})
+    except Exception:
+        pass
+    users.sort(key=lambda u: u["uid"])
+    return users
+
+
 # ── TUI ──────────────────────────────────────────────────────────────
 
 def run_tui() -> int:
@@ -99,37 +137,42 @@ def run_tui() -> int:
 
     art.tui_begin(fd, "seal-tui")
 
-    cfg = load()
+    cfg = load_json(CONFIG)
     for k, v in KINDS.items():
         if k not in cfg:
-            cfg[k] = v[2]  # default
+            cfg[k] = v[2]
 
-    sel = 0            # index into KEYS (rows)
-    mode = "nav"       # nav | edit_str | confirm_save
+    overrides = load_json(HEARTH)
+    users = discover_users()
+
+    sel = 0
+    mode = "nav"
     edit_buf = ""
+    edit_user = ""
     status = ""
-    total_rows = len(KEYS) + len(BUTTONS)
+    total_rows = len(KEYS) + len(BUTTONS) + len(users)
 
     try:
         while True:
             d_ok, d_text = daemon_status()
             idle_sec = get_idle()
+            users = discover_users()
 
             tw = art.term_width()
             body_w = tw - 4
 
-            # ── build rows ──
             rows: list[str] = []
 
             header = f"{P.BOLD}{P.PINK}* Seal *{P.RESET} daemon {d_text} idle {idle_sec}"
             rows.append(art.pad_vis(header, body_w))
             rows.append(art.pad_vis("", body_w))
 
+            # ── lock settings ──
             for i, key in enumerate(KEYS):
                 kind, label, _ = KINDS[key]
                 val_str = fmt_val(key, cfg)
 
-                if key == "lock_message" and mode == "edit_str" and i == sel:
+                if key == "lock_message" and mode == "edit_str" and i == sel and not edit_user:
                     row = f"  {label}: {P.PINK}\"{edit_buf}_{P.RESET}\""
                 else:
                     row = f"  {label}: {val_str}"
@@ -152,6 +195,28 @@ def run_tui() -> int:
                 else:
                     btn_parts.append(f"{P.MUTED}[ {label} ]{P.RESET}")
             rows.append(art.pad_vis("  " + "  ".join(btn_parts), body_w))
+            rows.append(art.pad_vis("", body_w))
+
+            # ── users section ──
+            user_start = btn_idx + len(BUTTONS)
+            if users:
+                rows.append(art.pad_vis(art.paint("Users", P.PINK_DIM), body_w))
+                for i, user in enumerate(users):
+                    idx = user_start + i
+                    hidden = overrides.get(user["name"], {}).get("hidden") == "true" if isinstance(overrides.get(user["name"]), dict) else False
+                    mark = " " if not hidden else "x"
+                    display = user["display"]
+
+                    if mode == "edit_str" and edit_user == user["name"]:
+                        row = f"  [{mark}] {user['name']}: \"{edit_buf}_\""
+                    else:
+                        row = f"  [{mark}] {user['name']}: {display}"
+
+                    if idx == sel:
+                        row = art.paint(art.pad_vis(row, body_w), P.PINK)
+                    else:
+                        row = art.pad_vis(row, body_w)
+                    rows.append(row)
 
             if status:
                 rows.append(art.pad_vis(art.paint(status, P.WARN), body_w))
@@ -160,7 +225,7 @@ def run_tui() -> int:
 
             runes = art.box(
                 [
-                    art.pad_vis("j/k move · space toggle · ←→ adjust time · enter edit", body_w),
+                    art.pad_vis("j/k move · space toggle · enter edit · h hide user", body_w),
                     art.pad_vis("s save · L lock now · R restart daemon · q quit", body_w),
                 ],
                 title="runes",
@@ -176,10 +241,17 @@ def run_tui() -> int:
             # ── edit_str mode ──
             if mode == "edit_str":
                 if key == "enter":
-                    cfg["lock_message"] = edit_buf
+                    if edit_user:
+                        if edit_user not in overrides or not isinstance(overrides[edit_user], dict):
+                            overrides[edit_user] = {}
+                        overrides[edit_user]["display"] = edit_buf
+                    else:
+                        cfg["lock_message"] = edit_buf
                     mode = "nav"
+                    edit_user = ""
                 elif key == "esc":
                     mode = "nav"
+                    edit_user = ""
                 elif key == "backspace":
                     edit_buf = edit_buf[:-1]
                 elif len(key) == 1 and key.isprintable():
@@ -195,7 +267,8 @@ def run_tui() -> int:
             elif key in ("k", "up"):
                 sel = max(0, sel - 1)
             elif key == "s":
-                save(cfg)
+                save_json(CONFIG, cfg)
+                save_json(HEARTH, overrides)
                 status = "saved"
             elif key == "L":
                 subprocess.Popen(["seal"])
@@ -207,7 +280,6 @@ def run_tui() -> int:
                 if sel < len(KEYS):
                     key_name = KEYS[sel]
                     kind, _, _ = KINDS[key_name]
-
                     if kind == "bool":
                         cfg[key_name] = not cfg.get(key_name, False)
                     elif kind == "time":
@@ -217,9 +289,10 @@ def run_tui() -> int:
                     elif kind == "str":
                         mode = "edit_str"
                         edit_buf = cfg.get(key_name, "")
+                        edit_user = ""
                         status = ""
-                else:
-                    btn_sel = sel - len(KEYS)
+                elif btn_idx <= sel < user_start:
+                    btn_sel = sel - btn_idx
                     if btn_sel < len(BUTTONS):
                         action = BUTTONS[btn_sel][1]
                         if action == "lock":
@@ -229,11 +302,37 @@ def run_tui() -> int:
                             daemon_restart()
                             status = "daemon restarted"
                         elif action == "guest_on":
-                            subprocess.Popen(["fae-guest", "start"])
+                            subprocess.Popen(["hearth-guest", "start"])
                             status = "guest started"
                         elif action == "guest_off":
-                            subprocess.Popen(["fae-guest", "stop"])
+                            subprocess.Popen(["hearth-guest", "stop"])
                             status = "guest stopped"
+                elif sel >= user_start and sel < total_rows:
+                    user_idx = sel - user_start
+                    if user_idx < len(users):
+                        user_name = users[user_idx]["name"]
+                        if key == "enter":
+                            mode = "edit_str"
+                            edit_user = user_name
+                            ov = overrides.get(user_name, {})
+                            edit_buf = ov.get("display", user_name) if isinstance(ov, dict) else user_name
+                            status = ""
+                        elif key == " ":
+                            if user_name not in overrides or not isinstance(overrides[user_name], dict):
+                                overrides[user_name] = {}
+                            cur = overrides[user_name].get("hidden", "false")
+                            overrides[user_name]["hidden"] = "false" if cur == "true" else "true"
+                            status = f"{'hid' if overrides[user_name]['hidden'] == 'true' else 'shown'} {user_name}"
+            elif key == "h":
+                if sel >= user_start and sel < total_rows:
+                    user_idx = sel - user_start
+                    if user_idx < len(users):
+                        user_name = users[user_idx]["name"]
+                        if user_name not in overrides or not isinstance(overrides[user_name], dict):
+                            overrides[user_name] = {}
+                        cur = overrides[user_name].get("hidden", "false")
+                        overrides[user_name]["hidden"] = "false" if cur == "true" else "true"
+                        status = f"{'hidden' if overrides[user_name]['hidden'] == 'true' else 'shown'} {user_name}"
             elif key in ("left", "right"):
                 if sel < len(KEYS):
                     key_name = KEYS[sel]
@@ -244,6 +343,7 @@ def run_tui() -> int:
                         cfg[key_name] = max(30, min(3600, cur + delta))
 
     finally:
+        save_json(HEARTH, overrides)
         try:
             art.tui_cleanup()
         except Exception:
