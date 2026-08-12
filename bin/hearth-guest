@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# fae-guest — temporary guest user for the faeOS lock screen
-#    fae-guest start    creates guest, switches to VT
-#    fae-guest stop     kills session, wipes, deletes user
-#    fae-guest status   check if guest is active
+# hearth-guest — temporary guest user for the faeOS lock screen
+#    hearth-guest start    creates guest, switches to VT
+#    hearth-guest stop     kills session, wipes, deletes user
+#    hearth-guest status   check if guest is active
 set -euo pipefail
 
-GUEST_USER="fae-guest"
-GUEST_HOME="/tmp/fae-guest"
+GUEST_USER="hearth-guest"
+GUEST_HOME="/tmp/hearth-guest"
 
 cmd_start() {
   if id "$GUEST_USER" &>/dev/null; then
@@ -21,7 +21,7 @@ cmd_start() {
 
   sudo tee "$GUEST_HOME/.zshrc" >/dev/null <<'EOF'
 export PATH=/usr/local/bin:/usr/bin:/bin
-export HOME=/tmp/fae-guest
+export HOME=/tmp/hearth-guest
 PS1='guest > '
 alias ls='ls --color=auto'
 echo "✦ welcome, guest ✦"
@@ -76,5 +76,5 @@ case "${1:-}" in
   start)   cmd_start ;;
   stop)    cmd_stop ;;
   status)  cmd_status ;;
-  *)       echo "usage: fae-guest {start|stop|status}" >&2; exit 1 ;;
+  *)       echo "usage: hearth-guest {start|stop|status}" >&2; exit 1 ;;
 esac

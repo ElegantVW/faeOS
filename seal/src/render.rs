@@ -1,6 +1,7 @@
 use crate::battery::BatteryInfo;
 use crate::clock::ClockRenderer;
 use crate::input::PasswordInput;
+use crate::users::User;
 use chrono::Local;
 use rand::Rng;
 
@@ -69,6 +70,8 @@ impl FrameRenderer {
         battery: &BatteryInfo,
         input: &PasswordInput,
         guest_enabled: bool,
+        user_list: &[User],
+        user_sel: usize,
     ) {
         self.tick += 1;
         let w = self.width;
@@ -93,6 +96,10 @@ impl FrameRenderer {
 
         draw_clock(&mut self.buffer, self.stride, &self.clock, w, h);
         draw_date(&mut self.buffer, self.stride, &self.clock, w, h);
+
+        if user_list.len() > 1 {
+            draw_user_panel(&mut self.buffer, self.stride, &self.clock, w, h, user_list, user_sel);
+        }
 
         let msg = if message.is_empty() {
             "away gathering moonlight..."
@@ -259,6 +266,36 @@ fn draw_message(
         buf, stride, w, h, msg, x, y, scale,
         SILVER.0, SILVER.1, SILVER.2,
     );
+}
+
+fn draw_user_panel(
+    buf: &mut [u8],
+    stride: u32,
+    cr: &ClockRenderer,
+    w: u32,
+    h: u32,
+    user_list: &[User],
+    user_sel: usize,
+) {
+    let py = (h as f32 * 0.46) as i32;
+    let scale = (w as f32 * 0.018).clamp(16.0, 26.0);
+    let line_h = (scale * 1.6) as i32;
+
+    for (i, user) in user_list.iter().enumerate() {
+        let y: i32 = py + (i as i32 * line_h) + 8;
+        let init = user.name.chars().next().unwrap_or('?').to_uppercase().collect::<String>();
+        let label = format!("{}  {}", init, user.display);
+        let tw = cr.text_width(&label, scale);
+        let x = (w as i32 - tw as i32) / 2;
+
+        let color = if i == user_sel {
+            (PINK.0, PINK.1, PINK.2)
+        } else {
+            (DIM_PINK.0, DIM_PINK.1, DIM_PINK.2)
+        };
+
+        cr.draw_text(buf, stride, w, h, &label, x, y, scale, color.0, color.1, color.2);
+    }
 }
 
 fn draw_password_box(

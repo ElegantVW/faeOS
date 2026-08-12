@@ -58,8 +58,8 @@ cp -a "$ROOT/shell/pixie.zsh" "$PIXIE_CFG/pixie.zsh"
 if [[ ! -f "$PIXIE_CFG/tick" ]]; then
   cp -a "$ROOT/config/tick.default" "$PIXIE_CFG/tick"
 fi
-if [[ ! -f "$PIXIE_CFG/lock.json" ]]; then
-  cp -a "$ROOT/config/lock.default.json" "$PIXIE_CFG/lock.json"
+if [[ ! -f "$PIXIE_CFG/seal.json" ]]; then
+  cp -a "$ROOT/config/seal.default.json" "$PIXIE_CFG/seal.json"
 fi
 
 echo "==> desktop configs"

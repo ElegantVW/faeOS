@@ -1,4 +1,0 @@
-# PAM configuration for pixie-lock
-# Same as i3lock's approach — delegates to system-auth
-
-auth include system-auth

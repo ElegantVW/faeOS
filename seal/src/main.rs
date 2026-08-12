@@ -4,6 +4,7 @@ mod clock;
 mod config;
 mod input;
 mod render;
+mod users;
 mod x11;
 
 use clap::Parser;
@@ -12,7 +13,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
-#[command(name = "pixie-lock", about = "faeOS lock screen")]
+#[command(name = "seal", about = "faeOS lock screen")]
 struct Cli {
     #[arg(long)]
     suspend: bool,
@@ -49,17 +50,31 @@ fn lock_screen(cli: &Cli) -> anyhow::Result<()> {
     let mut x11 = x11::X11Lock::new()?;
     x11.create_window()?;
 
+    let user_list = users::list_users().unwrap_or_else(|| {
+        let cur = std::env::var("USER").unwrap_or_else(|_| "user".into());
+        vec![users::User {
+            name: cur.clone(),
+            uid: 1000,
+            display: cur,
+        }]
+    });
+
+    let current_user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+    let mut user_sel = user_list.iter()
+        .position(|u| u.name == current_user)
+        .unwrap_or(0);
+
     let mut frame = render::FrameRenderer::new(x11.width, x11.height)?;
     let mut password = PasswordInput::new();
     let battery_info = battery::read();
 
-    frame.render_frame(msg, &battery_info, &password, guest);
+    frame.render_frame(msg, &battery_info, &password, guest, &user_list, user_sel);
     x11.show_image(frame.raw_pixels())?;
 
     x11.grab_inputs()?;
 
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        lock_loop(&mut x11, &mut frame, &mut password, msg, guest)
+        lock_loop(&mut x11, &mut frame, &mut password, msg, guest, &user_list, &mut user_sel)
     }));
 
     let cleanup = x11.ungrab_and_destroy();
@@ -98,6 +113,8 @@ fn lock_loop(
     password: &mut PasswordInput,
     msg: &str,
     guest: bool,
+    user_list: &[users::User],
+    user_sel: &mut usize,
 ) -> anyhow::Result<bool> {
     let mut last_tick = Instant::now();
     let mut fail_count: u32 = 0;
@@ -106,15 +123,27 @@ fn lock_loop(
         match poll_events(x11) {
             Ok(Some(EventResult::Enter)) => {
                 let pw = password.submit();
-                if auth::verify_password(&pw) {
+                let selected = &user_list[*user_sel];
+                if auth::verify_user_password(&selected.name, &pw) {
+                    let _ = users::login_user(&selected.name);
                     return Ok(true);
                 }
                 fail_count += 1;
                 if fail_count >= 5 {
-                    eprintln!("pixie-lock: 5 failed attempts, giving up");
+                    eprintln!("seal: 5 failed attempts, giving up");
                     return Ok(false);
                 }
                 password.set_error();
+            }
+            Ok(Some(EventResult::Up)) => {
+                if *user_sel > 0 {
+                    *user_sel -= 1;
+                }
+            }
+            Ok(Some(EventResult::Down)) => {
+                if *user_sel + 1 < user_list.len() {
+                    *user_sel += 1;
+                }
             }
             Ok(Some(EventResult::Escape)) => {
                 password.clear();
@@ -130,7 +159,7 @@ fn lock_loop(
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("pixie-lock: X11 event error: {}", e);
+                eprintln!("seal: X11 event error: {}", e);
             }
         }
 
@@ -139,9 +168,9 @@ fn lock_loop(
             last_tick = now;
             password.tick_error();
             let bat = battery::read();
-            frame.render_frame(msg, &bat, password, guest);
+            frame.render_frame(msg, &bat, password, guest, user_list, *user_sel);
             if let Err(e) = x11.show_image(frame.raw_pixels()) {
-                eprintln!("pixie-lock: render error: {}", e);
+                eprintln!("seal: render error: {}", e);
             }
         }
 
@@ -155,6 +184,8 @@ enum EventResult {
     Backspace,
     CapsLock,
     Char(char),
+    Up,
+    Down,
 }
 
 fn poll_events(x11: &x11::X11Lock) -> anyhow::Result<Option<EventResult>> {
@@ -171,6 +202,8 @@ fn poll_events(x11: &x11::X11Lock) -> anyhow::Result<Option<EventResult>> {
                     9 => return Ok(Some(EventResult::Escape)),
                     22 => return Ok(Some(EventResult::Backspace)),
                     66 => return Ok(Some(EventResult::CapsLock)),
+                    111 => return Ok(Some(EventResult::Up)),
+                    116 => return Ok(Some(EventResult::Down)),
                     _ => {
                         if let Some(c) = x11.keycode_to_char(keycode, state) {
                             if !c.is_control() {
@@ -219,7 +252,7 @@ fn run_daemon() -> anyhow::Result<()> {
         };
 
         if idle_ms >= timeout_ms && !locked {
-            let status = std::process::Command::new("pixie-lock")
+            let status = std::process::Command::new("seal")
                 .spawn()
                 .and_then(|mut c| c.wait());
 
@@ -256,7 +289,7 @@ fn get_idle_ms() -> u64 {
 
 fn is_screen_locked() -> bool {
     std::process::Command::new("pgrep")
-        .args(["-x", "pixie-lock"])
+        .args(["-x", "seal"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

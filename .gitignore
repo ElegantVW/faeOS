@@ -37,8 +37,11 @@ auth.json
 # bulwark rust build
 bulwark/target/
 
-# pixie-lock rust build
-pixie-lock/target/
+# seal rust build
+seal/target/
+
+# hearth rust build  
+hearth/target/
 
 
 # Fairy Lantern (GBA) — never commit carts/saves

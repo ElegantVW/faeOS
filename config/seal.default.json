@@ -5,5 +5,6 @@
   "dont_lock": false,
   "suspend_on_lock": false,
   "guest_enabled": false,
-  "lock_message": ""
+  "lock_message": "",
+  "users": {}
 }

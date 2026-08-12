@@ -29,7 +29,7 @@ impl Default for LockConfig {
 }
 
 fn config_path() -> PathBuf {
-    dirs_path().join("lock.json")
+    dirs_path().join("seal.json")
 }
 
 fn dirs_path() -> PathBuf {

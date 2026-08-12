@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""lock-tui — configure pixie-lock settings (idle timeout, guest mode, etc.)
+"""seal-tui — configure seal settings (idle timeout, guest mode, etc.)
 
-    lock-tui     interactive TUI
-    lock-tui -h  help
+    seal-tui     interactive TUI
+    seal-tui -h  help
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ os.environ["PIXIE_UNICODE"] = "1"
 import fae_termart as art
 from fae_termart import Palette as P
 
-CONFIG = Path.home() / ".config" / "pixie" / "lock.json"
+CONFIG = Path.home() / ".config" / "pixie" / "seal.json"
 
 KINDS = {
     "enabled":             ("bool",   "Auto-lock",         10),
@@ -70,14 +70,14 @@ def fmt_val(key: str, cfg: dict) -> str:
 
 def daemon_status() -> tuple[bool, str]:
     try:
-        subprocess.run(["pgrep", "-x", "pixie-lockd"], capture_output=True, check=True)
+        subprocess.run(["pgrep", "-x", "seald"], capture_output=True, check=True)
         return True, f"{P.OK}active{P.RESET}"
     except Exception:
         return False, f"{P.MUTED}stopped{P.RESET}"
 
 
 def daemon_restart():
-    subprocess.run(["systemctl", "--user", "restart", "pixie-lockd.service"],
+    subprocess.run(["systemctl", "--user", "restart", "seald.service"],
                    capture_output=True)
 
 
@@ -94,10 +94,10 @@ def get_idle() -> str:
 def run_tui() -> int:
     fd = art.tui_open_tty()
     if fd is None:
-        print("lock-tui needs a terminal", file=sys.stderr)
+        print("seal-tui needs a terminal", file=sys.stderr)
         return 1
 
-    art.tui_begin(fd, "lock-tui")
+    art.tui_begin(fd, "seal-tui")
 
     cfg = load()
     for k, v in KINDS.items():
@@ -121,7 +121,7 @@ def run_tui() -> int:
             # ── build rows ──
             rows: list[str] = []
 
-            header = f"{P.BOLD}{P.PINK}✦ Pixie Lock ✦{P.RESET}　daemon {d_text}　idle {idle_sec}"
+            header = f"{P.BOLD}{P.PINK}✦ Seal ✦{P.RESET}　daemon {d_text}　idle {idle_sec}"
             rows.append(art.pad_vis(header, body_w))
             rows.append(art.pad_vis("", body_w))
 
@@ -198,7 +198,7 @@ def run_tui() -> int:
                 save(cfg)
                 status = "saved"
             elif key == "L":
-                subprocess.Popen(["pixie-lock"])
+                subprocess.Popen(["seal"])
                 status = "locked"
             elif key == "R":
                 daemon_restart()
@@ -223,7 +223,7 @@ def run_tui() -> int:
                     if btn_sel < len(BUTTONS):
                         action = BUTTONS[btn_sel][1]
                         if action == "lock":
-                            subprocess.Popen(["pixie-lock"])
+                            subprocess.Popen(["seal"])
                             status = "locked"
                         elif action == "restart":
                             daemon_restart()

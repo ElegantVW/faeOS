@@ -1,13 +1,13 @@
 [package]
-name = "pixie-lock"
+name = "seal"
 version = "0.2.0"
 edition = "2021"
-description = "faeOS lock screen — native Rust locker with animated UI and PAM auth"
+description = "faeOS seal — native X11 screen locker with animated UI"
 license = "MIT"
 publish = false
 
 [[bin]]
-name = "pixie-lock"
+name = "seal"
 path = "src/main.rs"
 
 [dependencies]

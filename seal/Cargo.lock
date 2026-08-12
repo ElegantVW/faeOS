@@ -432,21 +432,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pixie-lock"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "image",
- "rand",
- "rusttype",
- "serde",
- "serde_json",
- "x11rb",
-]
-
-[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -550,6 +535,21 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "seal"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "image",
+ "rand",
+ "rusttype",
+ "serde",
+ "serde_json",
+ "x11rb",
+]
 
 [[package]]
 name = "serde"

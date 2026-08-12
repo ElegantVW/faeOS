@@ -1,10 +1,10 @@
 [Unit]
-Description=Pixie Lock Daemon
+Description=Seal Lock Daemon
 After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/bin/pixie-lockd
+ExecStart=%h/bin/seald
 Restart=on-failure
 RestartSec=5
 
