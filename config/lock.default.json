@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "ac_idle_seconds": 600,
+  "battery_idle_seconds": 120,
+  "dont_lock": false,
+  "suspend_on_lock": false,
+  "guest_enabled": false,
+  "lock_message": ""
+}

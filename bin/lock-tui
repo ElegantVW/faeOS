@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""lock-tui — faeOS lock screen configurator"""
+import json
+import os
+import subprocess
+import sys
+
+# Shared TUI layer
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fae_termart import tui_cleanup, tui_read_key, box, paint_frame
+
+CONFIG = os.path.expanduser("~/.config/pixie/lock.json")
+LOCKS = [
+    ("enabled",           "Auto-lock",         "bool"),
+    ("ac_idle_seconds",    "AC idle timeout",   "time"),
+    ("battery_idle_seconds", "Battery idle timeout", "time"),
+    ("dont_lock",         "Don't lock now",     "bool"),
+    ("guest_enabled",     "Guest access",       "bool"),
+    ("suspend_on_lock",   "Suspend on lock",    "bool"),
+    ("lock_message",      "Lock message",       "str"),
+]
+
+
+def load():
+    try:
+        with open(CONFIG) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save(cfg):
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    with open(CONFIG, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def fmt_time(sec):
+    if sec >= 60:
+        m, s = divmod(sec, 60)
+        return f"{m}m{s:02d}s"
+    return f"{sec}s"
+
+
+def fmt_val(key, cfg):
+    v = cfg.get(key)
+    if key in ("ac_idle_seconds", "battery_idle_seconds"):
+        return fmt_time(v if isinstance(v, int) else 300)
+    elif isinstance(v, bool):
+        return "On" if v else "Off"
+    elif isinstance(v, str):
+        return f'"{v}"' if v else "(default)"
+    return str(v)
+
+
+def toggle(cfg, key):
+    if isinstance(cfg.get(key), bool):
+        cfg[key] = not cfg[key]
+    return cfg
+
+
+def adjust_time(cfg, key, delta):
+    v = cfg.get(key, 300)
+    if isinstance(v, (int, float)):
+        v = max(30, min(3600, int(v) + delta))
+        cfg[key] = v
+    return cfg
+
+
+def daemon_status():
+    try:
+        subprocess.run(["pgrep", "-x", "pixie-lockd"], capture_output=True, check=True)
+        return "Active"
+    except Exception:
+        return "Stopped"
+
+
+def daemon_restart():
+    try:
+        subprocess.run(["systemctl", "--user", "restart", "pixie-lockd.service"], check=True)
+    except Exception:
+        pass
+
+
+def lock_now():
+    subprocess.Popen(["pixie-lock"])
+
+
+def guest_toggle():
+    try:
+        subprocess.run(["fae-guest", "start"], check=True)
+    except Exception:
+        pass
+
+
+def guest_stop():
+    try:
+        subprocess.run(["fae-guest", "stop"], check=True)
+    except Exception:
+        pass
+
+
+def main():
+    cfg = load()
+    keys = [k[0] for k in LOCKS]
+    sel = 0
+
+    try:
+        while True:
+            dstatus = daemon_status()
+            pw = box(f"Lock TUI  {dstatus}", list(range(len(LOCKS) + 4)))
+
+            pw[sel] = f"\033[1;38;5;168m{pw[sel]}\033[0m"
+            paint_frame(pw)
+
+            key = tui_read_key()
+
+            if key == "esc" or key == "q":
+                break
+            elif key in ("k", "up"):
+                sel = max(0, sel - 1)
+            elif key in ("j", "down"):
+                sel = min(len(LOCKS) + 3, sel + 1)
+            elif key == "s":
+                save(cfg)
+            elif key in (" ", "enter"):
+                if sel < len(LOCKS):
+                    k, _, kind = LOCKS[sel]
+                    if kind == "bool":
+                        cfg = toggle(cfg, k)
+                    elif kind == "time":
+                        if key == "enter":
+                            cfg = adjust_time(cfg, k, 30)
+                        else:
+                            cfg = adjust_time(cfg, k, 60)
+                    elif kind == "str" and key == "enter":
+                        val = input("Lock message: ").strip()
+                        if val:
+                            cfg[k] = val
+                elif sel == len(LOCKS):
+                    lock_now()
+                elif sel == len(LOCKS) + 1:
+                    daemon_restart()
+                elif sel == len(LOCKS) + 2:
+                    guest_toggle()
+                elif sel == len(LOCKS) + 3:
+                    guest_stop()
+    finally:
+        tui_cleanup()
+
+
+if __name__ == "__main__":
+    main()

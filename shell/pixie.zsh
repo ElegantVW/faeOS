@@ -7,6 +7,14 @@
 # ── PATH ──────────────────────────────────────────────────────
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 
+# ── SSH agent ──────────────────────────────────────────────────
+if [[ -z "$SSH_AUTH_SOCK" ]]; then
+  eval "$(ssh-agent -s)" >/dev/null 2>&1
+fi
+if [[ -f "$HOME/.ssh/faeos_push" ]]; then
+  ssh-add -l >/dev/null 2>&1 || ssh-add "$HOME/.ssh/faeos_push" >/dev/null 2>&1
+fi
+
 # ── Palette / colors ──────────────────────────────────────────
 [[ -r "$HOME/.config/palette.env" ]] && source "$HOME/.config/palette.env"
 unset NO_COLOR

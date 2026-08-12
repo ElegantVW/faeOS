@@ -1,0 +1,12 @@
+[Unit]
+Description=Pixie Lock Daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/bin/pixie-lockd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

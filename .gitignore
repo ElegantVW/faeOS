@@ -37,6 +37,9 @@ auth.json
 # bulwark rust build
 bulwark/target/
 
+# pixie-lock rust build
+pixie-lock/target/
+
 
 # Fairy Lantern (GBA) — never commit carts/saves
 *.gba

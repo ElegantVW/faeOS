@@ -29,6 +29,10 @@ python3
 git
 openssh
 
+# Lock screen
+xprintidle
+i3lock
+
 # AI
 llama-cpp
 

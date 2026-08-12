@@ -67,7 +67,7 @@ echo
 echo "==> Enabling user services"
 systemctl --user daemon-reload 2>/dev/null || true
 
-for svc in goblin-sync.timer ether-bridge.service bulwark-sentinel.timer; do
+for svc in goblin-sync.timer ether-bridge.service bulwark-sentinel.timer pixie-lockd.service; do
   if systemctl --user enable --now "$svc" 2>/dev/null; then
     echo "    enabled: $svc"
   else

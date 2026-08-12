@@ -58,6 +58,9 @@ cp -a "$ROOT/shell/pixie.zsh" "$PIXIE_CFG/pixie.zsh"
 if [[ ! -f "$PIXIE_CFG/tick" ]]; then
   cp -a "$ROOT/config/tick.default" "$PIXIE_CFG/tick"
 fi
+if [[ ! -f "$PIXIE_CFG/lock.json" ]]; then
+  cp -a "$ROOT/config/lock.default.json" "$PIXIE_CFG/lock.json"
+fi
 
 echo "==> desktop configs"
 for dir in kitty i3 picom kmscon rofi dunst; do
@@ -72,6 +75,9 @@ cp -a "$ROOT/config/qt/qt5ct.conf" "$CFG/qt5ct/" 2>/dev/null || true
 echo "==> wallpaper"
 mkdir -p "$HOME/Pictures"
 cp -a "$ROOT/assets/wall.png" "$HOME/Pictures/" 2>/dev/null || true
+
+echo "==> systemd user units"
+cp -a "$ROOT/systemd/." "$HOME/.config/systemd/user/" 2>/dev/null || true
 
 echo "==> AI registry (menagerie: models + per-app bindings)"
 "$BIN_DST/menagerie-registry.py" seed || true
