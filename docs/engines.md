@@ -72,11 +72,13 @@ Building Bulwark installs the engine only. The front-door lock stays **down** un
 ```bash
 sudo bulwark aegis apply desktop
 bulwark aegis confirm
+sudo bulwark install --system   # keep wall after reboot
 bulwark          # look — must not say SAFE if the wall is missing
 ```
 
 - **desktop** profile: no SSH; fae AI ports only on `127.0.0.1`
 - **server-ssh** if you intentionally want port 22
+- Boot: `bulwark-aegis.service` runs `aegis restore` from `/var/lib/bulwark/`
 - Seal (screen lock) is separate — glass vs house
 
 ## Troubleshooting
