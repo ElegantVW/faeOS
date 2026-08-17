@@ -1,0 +1,244 @@
+# faeOS Plymouth theme — “✦ Entering the Realm ✦”
+# Dark realm, crystal, rotating spinner, pink progress bar.
+
+# ── Background ────────────────────────────────────────────────────────
+Window.SetBackgroundTopColor(0.07, 0.03, 0.055);
+Window.SetBackgroundBottomColor(0.04, 0.02, 0.04);
+
+# Optional full-bleed image (vignette) — if missing, solid colors still apply
+bg.image = Image("background.png");
+bg.sprite = Sprite();
+bg.sprite.SetImage(bg.image.Scale(Window.GetWidth(), Window.GetHeight()));
+bg.sprite.SetPosition(Window.GetX(), Window.GetY(), -10000);
+bg.sprite.SetOpacity(1);
+
+# ── Crystal ───────────────────────────────────────────────────────────
+crystal.image = Image("crystal.png");
+crystal.sprite = Sprite(crystal.image);
+crystal.sprite.SetOpacity(1);
+
+# ── Title ─────────────────────────────────────────────────────────────
+# pink ≈ #e879a0
+title.image = Image.Text("✦ Entering the Realm ✦", 0.91, 0.47, 0.63, 1, "DejaVu Sans");
+title.sprite = Sprite(title.image);
+title.sprite.SetOpacity(1);
+
+subtitle.image = Image.Text("faeOS", 0.75, 0.36, 0.46, 1, "DejaVu Sans");
+subtitle.sprite = Sprite(subtitle.image);
+subtitle.sprite.SetOpacity(0.9);
+
+# ── Spinner ───────────────────────────────────────────────────────────
+spinner.base = Image("spinner.png");
+spinner.sprite = Sprite(spinner.base);
+spinner.angle = 0;
+spinner.sprite.SetOpacity(1);
+
+# ── Progress bar ──────────────────────────────────────────────────────
+progress_box.image = Image("progress_box.png");
+progress_box.sprite = Sprite(progress_box.image);
+
+progress_bar.original = Image("progress_bar.png");
+progress_bar.sprite = Sprite();
+progress_bar.progress = 0.02;
+progress_bar.pulse = 0;
+
+fun layout ()
+  {
+    local.cx = Window.GetX() + Window.GetWidth() / 2;
+    local.cy = Window.GetY() + Window.GetHeight() / 2;
+
+    # scale crystal if needed
+    local.max_cw = Window.GetWidth() * 0.35;
+    if (crystal.image.GetWidth() > max_cw)
+      {
+        local.s = max_cw / crystal.image.GetWidth();
+        crystal.drawn = crystal.image.Scale(crystal.image.GetWidth() * s, crystal.image.GetHeight() * s);
+      }
+    else
+      crystal.drawn = crystal.image;
+
+    crystal.sprite.SetImage(crystal.drawn);
+    crystal.sprite.SetX(cx - crystal.drawn.GetWidth() / 2);
+    crystal.sprite.SetY(cy - crystal.drawn.GetHeight() / 2 - Window.GetHeight() * 0.12);
+    crystal.sprite.SetZ(10);
+
+    title.sprite.SetX(cx - title.image.GetWidth() / 2);
+    title.sprite.SetY(crystal.sprite.GetY() + crystal.drawn.GetHeight() + 18);
+    title.sprite.SetZ(20);
+
+    subtitle.sprite.SetX(cx - subtitle.image.GetWidth() / 2);
+    subtitle.sprite.SetY(title.sprite.GetY() + title.image.GetHeight() + 8);
+    subtitle.sprite.SetZ(20);
+
+    spinner.sprite.SetX(cx - spinner.base.GetWidth() / 2);
+    spinner.sprite.SetY(subtitle.sprite.GetY() + subtitle.image.GetHeight() + 28);
+    spinner.sprite.SetZ(30);
+
+    progress_box.sprite.SetX(cx - progress_box.image.GetWidth() / 2);
+    progress_box.sprite.SetY(Window.GetY() + Window.GetHeight() * 0.78);
+    progress_box.sprite.SetZ(5);
+
+    progress_bar.x = progress_box.sprite.GetX() + 2;
+    progress_bar.y = progress_box.sprite.GetY() + (progress_box.image.GetHeight() - progress_bar.original.GetHeight()) / 2;
+    progress_bar.sprite.SetPosition(progress_bar.x, progress_bar.y, 6);
+  }
+
+layout();
+
+fun set_progress_image (p)
+  {
+    # clamp
+    if (p < 0.02)
+      p = 0.02;
+    if (p > 1)
+      p = 1;
+    progress_bar.progress = p;
+    local.w = progress_bar.original.GetWidth() * p;
+    if (w < 4)
+      w = 4;
+    progress_bar.image = progress_bar.original.Scale(w, progress_bar.original.GetHeight());
+    progress_bar.sprite.SetImage(progress_bar.image);
+  }
+
+set_progress_image(0.02);
+
+# ── Refresh (spinner + indeterminate pulse) ───────────────────────────
+status = "normal";
+
+fun refresh_callback ()
+  {
+    if (status == "normal")
+      {
+        # Image.Rotate takes degrees
+        spinner.angle += 10;
+        if (spinner.angle >= 360)
+          spinner.angle = 0;
+        spinner.sprite.SetImage(spinner.base.Rotate(spinner.angle));
+
+        # If boot progress hasn't moved, gentle pulse on the bar
+        if (progress_bar.progress < 0.08)
+          {
+            progress_bar.pulse += 0.08;
+            local.pp = 0.04 + (Math.Cos(progress_bar.pulse) + 1) / 2 * 0.06;
+            set_progress_image(pp);
+          }
+      }
+  }
+
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# ── Boot progress from systemd ────────────────────────────────────────
+fun progress_callback (duration, progress)
+  {
+    # progress is 0..1 when splash + systemd feed it
+    if (progress > progress_bar.progress)
+      set_progress_image(progress);
+  }
+
+Plymouth.SetBootProgressFunction(progress_callback);
+
+# ── Password dialogue (LUKS / root prompts) ───────────────────────────
+fun dialog_setup()
+  {
+    local.box;
+    local.lock;
+    local.entry;
+
+    box.image = Image("box.png");
+    lock.image = Image("lock.png");
+    entry.image = Image("entry.png");
+
+    box.sprite = Sprite(box.image);
+    box.x = Window.GetX() + Window.GetWidth() / 2 - box.image.GetWidth() / 2;
+    box.y = Window.GetY() + Window.GetHeight() / 2 - box.image.GetHeight() / 2;
+    box.z = 10000;
+    box.sprite.SetPosition(box.x, box.y, box.z);
+
+    lock.sprite = Sprite(lock.image);
+    lock.x = box.x + 16;
+    lock.y = box.y + box.image.GetHeight() / 2 - lock.image.GetHeight() / 2;
+    lock.z = box.z + 1;
+    lock.sprite.SetPosition(lock.x, lock.y, lock.z);
+
+    entry.sprite = Sprite(entry.image);
+    entry.x = lock.x + lock.image.GetWidth() + 8;
+    entry.y = box.y + box.image.GetHeight() / 2 - entry.image.GetHeight() / 2;
+    entry.z = box.z + 1;
+    entry.sprite.SetPosition(entry.x, entry.y, entry.z);
+
+    global.dialog.box = box;
+    global.dialog.lock = lock;
+    global.dialog.entry = entry;
+    global.dialog.bullet_image = Image("bullet.png");
+    dialog_opacity(1);
+  }
+
+fun dialog_opacity(opacity)
+  {
+    dialog.box.sprite.SetOpacity(opacity);
+    dialog.lock.sprite.SetOpacity(opacity);
+    dialog.entry.sprite.SetOpacity(opacity);
+    for (index = 0; dialog.bullet[index]; index++)
+      {
+        dialog.bullet[index].sprite.SetOpacity(opacity);
+      }
+  }
+
+fun display_normal_callback ()
+  {
+    global.status = "normal";
+    if (global.dialog)
+      dialog_opacity(0);
+  }
+
+fun display_password_callback (prompt, bullets)
+  {
+    global.status = "password";
+    if (!global.dialog)
+      dialog_setup();
+    else
+      dialog_opacity(1);
+    for (index = 0; dialog.bullet[index] || index < bullets; index++)
+      {
+        if (!dialog.bullet[index])
+          {
+            dialog.bullet[index].sprite = Sprite(dialog.bullet_image);
+            dialog.bullet[index].x = dialog.entry.x + 8 + index * dialog.bullet_image.GetWidth();
+            dialog.bullet[index].y = dialog.entry.y + dialog.entry.image.GetHeight() / 2 - dialog.bullet_image.GetHeight() / 2;
+            dialog.bullet[index].z = dialog.entry.z + 1;
+            dialog.bullet[index].sprite.SetPosition(dialog.bullet[index].x, dialog.bullet[index].y, dialog.bullet[index].z);
+          }
+        if (index < bullets)
+          dialog.bullet[index].sprite.SetOpacity(1);
+        else
+          dialog.bullet[index].sprite.SetOpacity(0);
+      }
+  }
+
+Plymouth.SetDisplayNormalFunction(display_normal_callback);
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+
+fun quit_callback ()
+  {
+    set_progress_image(1);
+  }
+
+Plymouth.SetQuitFunction(quit_callback);
+
+message_sprite = Sprite();
+message_sprite.SetPosition(10, 10, 10000);
+
+fun display_message_callback (text)
+  {
+    my_image = Image.Text(text, 0.91, 0.47, 0.63);
+    message_sprite.SetImage(my_image);
+  }
+
+fun hide_message_callback (text)
+  {
+    message_sprite = Sprite();
+    message_sprite.SetPosition(10, 10, 10000);
+  }
+
+Plymouth.SetDisplayMessageFunction(display_message_callback);
+Plymouth.SetHideMessageFunction(hide_message_callback);

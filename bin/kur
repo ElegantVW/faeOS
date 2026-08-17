@@ -1,48 +1,71 @@
 #!/usr/bin/env python3
-import sys
+"""The quiet pen — speak and hear three lines.
+
+After the hermetic leaf is decoded, this is the true name.
+First successful speech hatches the egg (Scroll rewrites its last leaf).
+"""
+from __future__ import annotations
+
 import json
 import os
+import sys
 import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / "bin"))
 os.environ.setdefault("PIXIE_UNICODE", "1")
-import fae_termart as art
+import fae_termart as art  # noqa: E402
+import fae_egg  # noqa: E402
+
+# Prefer true name server; fall back to opaque pre-hatch binary layout.
+def _voice_url() -> str:
+    return os.environ.get("KUR_URL", "http://127.0.0.1:8083").rstrip("/") + "/generate"
+
 
 if len(sys.argv) < 2:
-    print("Usage: kur \"[your prompt/observation]\"")
-    sys.exit(1)
+    print('Usage: kur "your observation"')
+    raise SystemExit(1)
 
 prompt_text = sys.argv[1]
-url = "http://127.0.0.1:8083/generate"
 data = json.dumps({"prompt": prompt_text}).encode("utf-8")
-
 req = urllib.request.Request(
-    url, 
-    data=data, 
-    headers={'Content-Type': 'application/json'},
-    method='POST'
+    _voice_url(),
+    data=data,
+    headers={"Content-Type": "application/json"},
+    method="POST",
 )
 
+busy_file = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"kur-busy.{os.getpid()}"
 try:
-    busy_file = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"kur-busy.{os.getpid()}"
     try:
         busy_file.write_text(str(os.getpid()), encoding="utf-8")
-    except Exception:
+    except OSError:
         pass
 
     with urllib.request.urlopen(req, timeout=30) as response:
-        res = json.loads(response.read().decode('utf-8'))
-        reply_text = res['text'].strip()
+        res = json.loads(response.read().decode("utf-8"))
+        reply_text = (res.get("text") or "").strip()
         lines = reply_text.splitlines()
         max_len = max((len(l) for l in lines), default=20)
         box_width = max(30, min(max_len + 6, art.term_width()))
         print()
         print(art.box(reply_text, title="Kur", width=box_width))
         print()
+        # Successful speech → hatch (idempotent)
+        if fae_egg.try_hatch_from_kur_success():
+            print(art.paint(
+                "  (the sealed leaf unfolds — Scroll now names the dragon)",
+                art.P.MUTED,
+            ))
+            print()
 except Exception:
-    print("Kur server down on 8083.\n\nKur must be loaded with his main command.")
-    sys.exit(1)
+    print(
+        "The quiet pen is asleep on 8083.\n"
+        "Wake the pen:  menagerie ensure kur\n"
+        "Then speak again.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 finally:
     try:
         busy_file.unlink()

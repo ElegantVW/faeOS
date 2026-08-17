@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# bulwark — launcher for the first-party protection binary
+# bulwark — thin launcher (never a prebuilt ELF in git)
+# Discovery: BULWARK_BIN → ~/.local/lib/faeos/bulwark → sibling tree
 set -euo pipefail
+
 CANDIDATES=(
   "${BULWARK_BIN:-}"
-  "$HOME/faeos/bulwark/target/release/bulwark"
   "$HOME/.local/lib/faeos/bulwark"
-  "$(cd "$(dirname "$0")/.." && pwd)/bulwark/target/release/bulwark"
+  "$HOME/bulwark/target/release/bulwark"
+  "${BULWARK_ROOT:-}/target/release/bulwark"
 )
+
 for c in "${CANDIDATES[@]}"; do
   [[ -n "$c" && -x "$c" ]] || continue
   exec "$c" "$@"
 done
+
 echo "bulwark: engine not built yet." >&2
-echo "  build:  cd ~/faeos/bulwark && ./build.sh install" >&2
+echo "  build:  git clone git@github.com:ElegantVW/bulwark.git ~/bulwark" >&2
+echo "          cd ~/bulwark && ./build.sh install" >&2
 exit 127

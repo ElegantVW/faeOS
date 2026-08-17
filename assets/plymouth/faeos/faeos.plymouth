@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=faeOS
+Description=Entering the Realm — crystal splash with pink progress
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/faeos
+ScriptFile=/usr/share/plymouth/themes/faeos/faeos.script

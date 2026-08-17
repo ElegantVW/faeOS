@@ -62,6 +62,27 @@ impl PasswordInput {
         "●".repeat(self.buffer.len())
     }
 
+    /// Soft fae dots for the password field.
+    pub fn pretty_dots(&self) -> String {
+        // mix: first few as • then ● — reads cuter than a solid block
+        let n = self.buffer.chars().count();
+        if n == 0 {
+            return String::new();
+        }
+        let mut s = String::with_capacity(n * 3);
+        for i in 0..n {
+            if i + 1 == n {
+                s.push('✦'); // last keystroke sparkles
+            } else {
+                s.push('•');
+            }
+            if i + 1 < n {
+                s.push(' ');
+            }
+        }
+        s
+    }
+
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }

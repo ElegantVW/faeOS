@@ -34,19 +34,18 @@ vendor/lib-pixie/llama-server
 auth.json
 **/accounts.conf
 
-# bulwark rust build
-bulwark/target/
-
-# seal rust build
+# rust build artifacts (in-tree crates + any leftover vendor paths)
 seal/target/
-
-# hearth rust build  
 hearth/target/
+rift/target/
+bulwark/target/
+fairy-lantern/target/
+fairy-lantern/roms/
 
-
-# Fairy Lantern (GBA) — never commit carts/saves
+# never commit prebuilt engines or carts
 *.gba
 *.sav
-fairy-lantern/roms/
-fairy-lantern/target/
-rift/target/
+# local installed engines live under ~/.local/lib/faeos/ (not in repo)
+
+# do not re-add machine-local ELF probes
+bin/pixie-lock

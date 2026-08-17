@@ -71,6 +71,16 @@ siren random                       # shuffle the whole library
 - global: `Tab` focus cycle · `S` save · `L` load&play · `R` rm playlist · `g` go-to · `q/esc` quit
 - spellbook bridge: `f` open a file · `F` open a directory (plays all its audio) — both pick via Spellbook (`p` inside picks the current dir)
 
+### TUI layout
+- Header, optional **waves** panel, side-by-side crystal **browser** + **queue** panels, **runes** footer — same `╭─ ✦ … ✦ ─╮` chrome as the rest of faeOS.
+
+### TUI mouse (shared `fae_termart` SGR)
+- **Click** a browser/queue row to select · **double-click** to open/play
+- **Click** a panel (or waves) to focus that region
+- **Wheel** over a list to move the selection (under-cursor)
+- Disable: `siren config set mouse false` (Shift+drag still selects text in the terminal)
+- Needs mouse reporting (Kitty, Alacritty, foot, …). In tmux: `set -g mouse on`.
+
 ---
 
 ## 🛠️ COMMON TASKS
@@ -146,7 +156,8 @@ bin/
   `--idle=yes --no-video --gapless-audio=yes --volume-max=150`).
 
 ### 2. Shared Layer (`bin/fae_termart.py`)
-- `box`, `paint_frame`, `tui_begin/tui_read_key/tui_cleanup`, `pad_vis`, `vis_len`.
+- `box`, `paint_frame`, `tui_begin/tui_read_key/tui_read_event/tui_cleanup`, `pad_vis`, `vis_len`.
+- Mouse: `MouseEvent`, `HitMap`, `Region`, `add_list_rows`, `DoubleClickTracker`, SGR enable in `tui_begin(mouse=True)`.
 
 ### 3. Development Plan (`docs/plans/siren.md`)
 - Full roadmap, technical specs, changelog.

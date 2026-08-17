@@ -1,15 +1,28 @@
 # Bulwark — first-party host protection
 
 **Role:** Firewall (Aegis), integrity (Purity), watch (Sentinel), hunt (Ward).  
-**Status:** v0.1 Phase‑1 MVP (Rust, zero *security product* package deps)
+**Status:** v0.1 Phase‑1 MVP (Rust, zero *security product* package deps)  
+**Repo:** [ElegantVW/bulwark](https://github.com/ElegantVW/bulwark) → clone to `~/bulwark`
 
 ## Directives
+
 - No ufw / nft CLI / clamav / fail2ban at runtime
 - Kernel talk: raw `NETLINK_NETFILTER` (nf_tables) written in-tree
-- Language: **Rust** single binary
+- Language: **Rust** single binary — **not** committed to faeOS git
 - Installable / removable: `bulwark install` / `uninstall [--purge]`
 
+## Plug into faeOS
+
+```bash
+git clone git@github.com:ElegantVW/bulwark.git ~/bulwark
+cd ~/bulwark && ./build.sh install
+# binary → ~/.local/lib/faeos/bulwark ; launcher → ~/bin/bulwark
+```
+
+Contract: [docs/engines.md](../engines.md). Canonical docs: repo `README.md`.
+
 ## Layers
+
 | Layer | What |
 |-------|------|
 | **Sentinel** | `/proc/net/*` listeners → PID/comm (no ss) |
@@ -18,6 +31,7 @@
 | **Ward** | Hostile patterns (PATH writable, LD_PRELOAD, deleted exe, tmp timers) |
 
 ## CLI
+
 ```
 bulwark                  # TUI
 bulwark status|ports|ward
@@ -29,27 +43,19 @@ bulwark install|uninstall [--purge]
 Profiles (embedded): `desktop`, `strict`, `server-ssh`.
 
 ## Apply (root)
+
 ```
 sudo bulwark aegis apply desktop
 bulwark aegis confirm    # within deadman window (~90s)
 sudo bulwark aegis undo  # remove table
 ```
 
-## Build
-```
-cd ~/faeos/bulwark && ./build.sh install
-```
-
 ## State
+
 `$XDG_DATA_HOME/faeos/bulwark/` (or `BULWARK_DIR`)
 
-## Everyday TUI (friendly)
-
-Home screen shows **SAFE / CARE / DANGER** plus Aegis · Purity · Ward · Sentinel
-with plain one-liners. Numbered menu `1`–`7`. Optional first-run **tour**
-(`bulwark tour`, or menu 7). Themed names kept; no netlink jargon on home.
-
 ## Next
+
 - [ ] IPv6 rule parity tests in netns
 - [ ] Address-from match in Aegis (src IP)
 - [ ] Purity progress UI

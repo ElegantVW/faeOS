@@ -144,6 +144,116 @@ def test_multibyte_utf8_not_a_key():
         close(fd)
 
 
+# ── mouse: SGR parse + read_event / read_key compat ────────────────────
+
+def test_parse_sgr_left_press():
+    ev = art.parse_sgr_mouse("<0;12;4M")
+    assert ev is not None
+    assert ev.button == 0 and ev.action == "press"
+    assert ev.x == 12 and ev.y == 4
+
+
+def test_parse_sgr_release():
+    ev = art.parse_sgr_mouse("<0;12;4m")
+    assert ev is not None
+    assert ev.action == "release" and ev.button == 0
+
+
+def test_parse_sgr_wheel():
+    up = art.parse_sgr_mouse("<64;5;5M")
+    down = art.parse_sgr_mouse("<65;5;5M")
+    assert up is not None and up.action == "wheel" and art.wheel_delta(up) == 1
+    assert down is not None and art.wheel_delta(down) == -1
+
+
+def test_parse_sgr_drag():
+    ev = art.parse_sgr_mouse("<32;3;3M")
+    assert ev is not None
+    assert ev.action == "drag" and ev.button == 0
+
+
+def test_tui_read_event_mouse():
+    fd = feed(b"\x1b[<0;10;20M")
+    try:
+        ev = art.tui_read_event(fd, timeout=1)
+        assert isinstance(ev, art.MouseEvent)
+        assert ev.x == 10 and ev.y == 20 and ev.action == "press"
+    finally:
+        close(fd)
+
+
+def test_tui_read_key_discards_mouse():
+    fd = feed(b"\x1b[<0;10;20M")
+    try:
+        assert art.tui_read_key(fd, timeout=0.2) == ""
+    finally:
+        close(fd)
+
+
+def test_tui_read_event_still_keys():
+    fd = feed(b"\x1b[A")
+    try:
+        assert art.tui_read_event(fd, timeout=1) == "up"
+    finally:
+        close(fd)
+
+
+def test_hitmap_highest_z_wins():
+    hm = art.HitMap()
+    hm.add(art.Region(id="a", x0=1, y0=1, x1=10, y1=5, z=0))
+    hm.add(art.Region(id="b", x0=1, y0=1, x1=5, y1=2, z=2))
+    assert hm.hit(3, 2).id == "b"
+    assert hm.hit(8, 3).id == "a"
+    assert hm.hit(99, 99) is None
+
+
+def test_add_list_rows():
+    hm = art.HitMap()
+    art.add_list_rows(hm, x0=1, x1=20, y0=5, count=3, start_index=2, id_prefix="browser")
+    r = hm.hit(5, 6)
+    assert r is not None and r.id == "browser:3" and r.data == 3
+
+
+def test_double_click_tracker():
+    d = art.DoubleClickTracker(ms=500)
+    assert d.is_double("row:1", now=1.0) is False
+    assert d.is_double("row:1", now=1.2) is True
+    assert d.is_double("row:1", now=1.3) is False
+    assert d.is_double("row:2", now=1.4) is False
+    assert d.is_double("row:2", now=2.0) is False  # past window
+
+
+def test_mouse_off_in_hygiene():
+    assert "\033[?1000l" in art.MOUSE_OFF
+    assert art.MOUSE_OFF in art._TUI_HYGIENE
+
+
+def test_split_widths_fit():
+    for total in (40, 80, 120, 24):
+        left, right = art.split_widths(total, gap=1, left_ratio=0.58)
+        assert left + right + 1 <= total
+        assert left >= 8 and right >= 8
+
+
+def test_panel_exact_height_and_width():
+    os.environ["PIXIE_UNICODE"] = "1"
+    p = art.panel(["one", "two"], title="queue", width=30, height=6, focus=True)
+    lines = p.splitlines()
+    assert len(lines) == 6
+    for ln in lines:
+        assert art.vis_len(art.strip_ansi(ln)) == 30
+
+
+def test_focus_mark_no_ansi_slice():
+    m = art.focus_mark(True)
+    assert "►" in art.strip_ansi(m) or ">" in art.strip_ansi(m)
+    assert art.focus_mark(False) == "  "
+
+
+def test_truncate_vis():
+    assert art.vis_len(art.truncate_vis("hello world", 8)) <= 8
+
+
 # ── paint / strip / width math ─────────────────────────────────────────
 
 def test_paint_respects_no_color():

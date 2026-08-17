@@ -25,7 +25,10 @@
 `$XDG_DATA_HOME/faeos/imbue/history.jsonl`  
 Dedup consecutive identical; max 500 entries; text cap 256 KiB.
 
+## Clipboard vs Ctrl+C
+**Terminal Ctrl+C is SIGINT, not copy.** Imbue/`watch` see the system CLIPBOARD/PRIMARY after a real copy (Ctrl+Shift+C, mouse select+copy, wl-copy, etc.). Verified by design: `clipboard_get` reads CLIPBOARD/PRIMARY backends, not the TTY interrupt character.
+
 ## Next
 - [ ] Image clips (optional)
-- [ ] systemd user unit for `imbue watch`
+- [ ] systemd user unit for `imbue watch` (recommended so history fills while you work)
 - [ ] Secret redaction heuristics (optional)

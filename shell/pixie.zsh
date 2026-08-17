@@ -253,15 +253,11 @@ bindkey '^[[Z' _scry-widget
 bindkey '\e[Z' _scry-widget
 bindkey '\e[27;2;9~' _scry-widget
 
-# ── Summon / Scroll — pick → put on the prompt (print -z) ──
-# Binary paints TUI on /dev/tty; selection is one line on stdout.
-# Flags that shouldn't be wrapped: list / refresh / exec / help.
+# ── Scroll / Summon — page book + PATH leaf ──
+# App runes **run** tools. PATH / summon selection is printed for print -z.
 summon() {
   case "${1:-}" in
-    -x|--exec|-l|--list|--refresh|-h|--help)
-      command summon "$@"
-      return $?
-      ;;
+    -x|--exec|-l|--list|--refresh|-h|--help) command summon "$@"; return $? ;;
   esac
   local selected ec=0
   selected=$(command summon "$@") || ec=$?
@@ -270,19 +266,24 @@ summon() {
   print -z -- "$selected"
 }
 
-# scroll bare / picker → insert chosen command on the prompt
 scroll() {
   case "${1:-}" in
-    list|menu|board|-h|--help)
+    list|menu|-h|--help|--list|-l|--refresh|--path|-p|path)
+      # --path alone still needs print-z when user picks
+      if [[ "${1:-}" == --path || "${1:-}" == -p || "${1:-}" == path ]]; then
+        local selected ec=0
+        selected=$(command scroll "$@") || ec=$?
+        (( ec != 0 )) && return "$ec"
+        [[ -z $selected ]] && return 1
+        print -z -- "$selected"
+        return 0
+      fi
       command scroll "$@"
       return $?
       ;;
   esac
-  local selected ec=0
-  selected=$(command scroll "$@") || ec=$?
-  (( ec != 0 )) && return "$ec"
-  [[ -z $selected ]] && return 1
-  print -z -- "$selected"
+  # full book: runes exec apps — do not capture stdout
+  command scroll "$@"
 }
 
 # open scroll → command directory (help page) · open spellbook → file manager

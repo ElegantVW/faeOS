@@ -25,9 +25,11 @@ TUI keys:
   global:   Tab focuses browser → queue → EQ · S save · L load&play
             R rm playlist · g go-to-path · q/esc quit · ctrl-u clear input
             f open a file (spellbook picker) · F open a directory (play it)
+  mouse:    click row select · double-click open/play · wheel scroll ·
+            click panel title to focus (config mouse=true)
 
 config: ~/.config/siren/config.json (default_volume · library_roots ·
-fuzzy_search · waves · gapless · normalize · cache_meta · wave_bands)
+fuzzy_search · waves · gapless · normalize · cache_meta · wave_bands · mouse)
 mpv IPC socket: /tmp/siren-mpv.sock (shared with prompt tick + faectl).
 """
 from __future__ import annotations
@@ -94,6 +96,7 @@ class SirenConfig:
     normalize: bool = False
     cache_meta: bool = True
     wave_bands: int = 16
+    mouse: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -105,6 +108,7 @@ class SirenConfig:
             "normalize": self.normalize,
             "cache_meta": self.cache_meta,
             "wave_bands": self.wave_bands,
+            "mouse": self.mouse,
         }
 
     @classmethod
@@ -123,6 +127,8 @@ class SirenConfig:
             cfg.wave_bands = 16
         if not isinstance(cfg.library_roots, list) or not cfg.library_roots:
             cfg.library_roots = ["~/Music"]
+        if not isinstance(cfg.mouse, bool):
+            cfg.mouse = bool(cfg.mouse)
         return cfg
 
     def save(self) -> None:
@@ -157,7 +163,7 @@ def cli_set_config(key: str, val: str) -> tuple[bool, str]:
             return False, "expects comma-separated paths"
         CFG.library_roots = parts
         return True, ", ".join(parts)
-    if k in ("fuzzy_search", "waves", "gapless", "normalize", "cache_meta"):
+    if k in ("fuzzy_search", "waves", "gapless", "normalize", "cache_meta", "mouse"):
         b = val.strip().lower() in _BOOL_WORDS
         setattr(CFG, k, b)
         return True, "on" if b else "off"
@@ -1286,25 +1292,24 @@ def waves_panel_lines(path: str, pos: float, playing: bool, paused: bool,
 
 def build_header(track: str, status: str, pos: float, dur: float, vol: int,
                  shuffle: bool, repeat: str, width: int) -> str:
+    # full-bleed crystal header (exact terminal width)
+    outer = max(24, width)
+    inner = outer - 4  # borders + padding
     if dur > 0:
         pct = pos / dur
-        outer = max(36, min(width, 96))
-        bar_w = max(10, outer - 47)
+        bar_w = max(8, min(inner - 28, 40))
         filled = int(bar_w * pct)
         bar = "█" * filled + "░" * (bar_w - filled)
-        prog = f" {bar}  {fmt_clock(pos)}/{fmt_clock(dur)} "
+        prog = f"{bar}  {fmt_clock(pos)}/{fmt_clock(dur)}"
     else:
         prog = ""
     status_icon = "▶" if status == "playing" else "⏸" if status == "paused" else "■"
     shuffle_icon = "[RND]" if shuffle else "[SEQ]"
     rep_icon = {"all": "[REP:ALL]", "track": "[REP:ONE]", "off": "[REP:OFF]"}.get(repeat, "[REP:OFF]")
-    line1 = f" {status_icon}  {track}"
-    line2 = f" vol: {vol}%  {shuffle_icon} {rep_icon}  {prog}"
-    return art.box([line1, line2], title=NAME, width=width, body_style=(P.SILVER,))
-
-
-def _pad_line(line: str, width: int) -> str:
-    return line + " " * max(0, width - art.vis_len(art.strip_ansi(line)))
+    line1 = art.truncate_vis(f"{status_icon}  {track}", max(8, inner))
+    line2 = art.truncate_vis(f"vol: {vol}%  {shuffle_icon} {rep_icon}  {prog}", max(8, inner))
+    return art.box([line1, line2], title=NAME, width=outer, body_style=(P.SILVER,),
+                   cap=None, floor=1)
 
 
 def rune_row(*pairs: tuple[str, str]) -> str:
@@ -1330,7 +1335,8 @@ def build_footer(width: int, focus_mode: int = 0) -> str:
             rune_row(("+/-", "vol"), ("w", "EQ"), ("W", "16/32"), ("S", "save"), ("R", "rm playlist")),
             rune_row(("g", "go to path"), ("Tab", "→ browser"), ("q", "quit")),
         ]
-    return art.box(rows, title="runes", width=width, body_style=(P.MUTED,))
+    return art.box(rows, title="runes", width=max(24, width), body_style=(P.MUTED,),
+                   cap=None, floor=1)
 
 
 def missing_notification(removed: list[tuple[QueueItem, str]], playlist_name: str) -> str:
@@ -1344,90 +1350,168 @@ def missing_notification(removed: list[tuple[QueueItem, str]], playlist_name: st
     return art.box(lines, title=NAME, width=60, body_style=(P.WARN,))
 
 
+def _panel_body_capacity(outer_h: int) -> int:
+    """Body rows inside a panel of outer height (top + bottom borders)."""
+    return max(1, outer_h - 2)
+
+
 def build_queue_panel(queue_items: list[QueueItem], playing_index: int,
-                      width: int, height: int, focus: bool) -> list[str]:
-    panel_w = max(20, width - 4)
-    max_lines = max(4, height - 4)
-    lines: list[str] = []
-    if focus:
-        title = art.paint("► QUEUE ◄", P.BOLD, P.PINK)
-    else:
-        title = art.paint("  QUEUE  ", P.MUTED)
-    lines.append(title)
-    lines.append(art.paint("─" * panel_w, P.PINK_DIM))
+                      width: int, height: int, focus: bool,
+                      *, hitmap: art.HitMap | None = None,
+                      x0: int = 1, y0: int = 1,
+                      cursor_index: int | None = None) -> str:
+    """Crystal queue panel (exact outer width × height). Returns framed string."""
+    body_cap = _panel_body_capacity(height)
+    body_w = max(4, width - 4)  # inner text width
+    sel = playing_index if cursor_index is None else cursor_index
+    body: list[str] = []
+    row_meta: list[int] = []  # entry index per body line that is a list row
+
     if not queue_items:
-        lines.append(art.paint("  (empty — 'a' to add from library)", P.DIM))
+        body.append(art.paint(art.truncate_vis("(empty — 'a' to add)", body_w), P.DIM))
     else:
-        start = max(0, playing_index - max_lines // 2)
-        end = min(len(queue_items), start + max_lines - 3)
-        if end - start < max_lines - 3:
-            start = max(0, end - (max_lines - 3))
+        # chrome: optional more-above / more-below eat body rows
+        max_rows = body_cap
+        start = max(0, sel - max(0, max_rows // 2))
+        end = min(len(queue_items), start + max_rows)
+        if end - start < max_rows:
+            start = max(0, end - max_rows)
+        # reserve lines for overflow hints
+        more_above = start > 0
+        more_below = end < len(queue_items)
+        slots = max_rows - (1 if more_above else 0) - (1 if more_below else 0)
+        slots = max(1, slots)
+        end = min(len(queue_items), start + slots)
+        if more_above:
+            body.append(art.paint(art.truncate_vis(f"… {start} above", body_w), P.MUTED))
+            row_meta.append(-1)
         for i in range(start, end):
             item = queue_items[i]
             display = item.display or "Unknown"
-            max_display_w = panel_w - 6
-            if art.vis_len(display) > max_display_w:
-                display = art.pad_vis(display, max_display_w)[:max_display_w - 3] + "..."
-            idx_str = f"{i+1:3d}."
+            idx_str = f"{i + 1}."
+            room = max(4, body_w - len(idx_str) - 1 - 2)
+            display = art.truncate_vis(display, room)
+            mark = art.focus_mark(i == sel, focused_panel=focus)
             if i == playing_index:
-                line = art.paint("▶ ", P.BOLD, P.PINK) + art.paint(display, P.BOLD, P.SILVER)
+                name = art.paint(display, P.BOLD, P.SILVER)
+                play = art.paint("♪", P.PINK)
             else:
-                line = "  " + art.paint(display, P.SILVER)
-            line = art.paint(idx_str, P.PINK_DIM) + " " + line
-            if focus and i == playing_index:
-                line = art.paint("►", P.PINK) + line[1:]
-            lines.append(line)
-        if len(queue_items) > end:
-            lines.append(art.paint(f"  … and {len(queue_items) - end} more", P.MUTED))
-        if start > 0:
-            lines.insert(1, art.paint(f"  {start} more above …", P.MUTED))
-    return lines
+                name = art.paint(display, P.SILVER)
+                play = " "
+            line = mark + art.paint(idx_str, P.PINK_DIM) + play + name
+            body.append(line)
+            row_meta.append(i)
+        if more_below:
+            body.append(art.paint(
+                art.truncate_vis(f"… {len(queue_items) - end} more", body_w), P.MUTED))
+            row_meta.append(-1)
+
+    framed = art.panel(body, title="queue", width=width, height=height,
+                       focus=focus, body_style=(P.SILVER,))
+    if hitmap is not None:
+        hitmap.add(art.Region(
+            id="queue:panel", x0=x0, y0=y0,
+            x1=x0 + max(0, width - 1), y1=y0 + max(0, height - 1),
+            z=1, role="panel", data=1,
+        ))
+        # body rows start at y0+1 (after top border)
+        for bi, idx in enumerate(row_meta):
+            if idx < 0:
+                continue
+            ry = y0 + 1 + bi
+            hitmap.add(art.Region(
+                id=f"queue:{idx}", x0=x0, y0=ry, x1=x0 + max(0, width - 1),
+                y1=ry, z=2, role="list-row", data=idx,
+            ))
+    return framed
 
 
-def build_browser_panel(browser, width: int, height: int, focus: bool) -> list[str]:
-    panel_w = max(20, width - 4)
-    max_lines = max(4, height - 4)
-    lines: list[str] = []
+def build_browser_panel(browser, width: int, height: int, focus: bool,
+                        *, hitmap: art.HitMap | None = None,
+                        x0: int = 1, y0: int = 1) -> str:
+    """Crystal browser panel (exact outer width × height). Returns framed string."""
+    body_cap = _panel_body_capacity(height)
+    body_w = max(4, width - 4)
     path_display = browser.get_display_path()
     if browser.filter:
-        path_display += f"  [filter: {browser.filter}]"
-    max_path_w = max(10, panel_w - 16)
-    if art.vis_len(path_display) > max_path_w:
-        path_display = art.pad_vis(path_display, max_path_w)[:max_path_w - 3] + "..."
-    if focus:
-        title = art.paint(f"► BROWSER ◄  {path_display}", P.BOLD, P.PINK)
-    else:
-        title = art.paint(f"  BROWSER   {path_display}", P.MUTED)
-    lines.append(title)
-    lines.append(art.paint("─" * panel_w, P.PINK_DIM))
+        path_display += f" [{browser.filter}]"
+    path_display = art.truncate_vis(path_display, max(6, body_w))
+    body: list[str] = [art.paint(path_display, P.MUTED)]
+    row_meta: list[int] = [-1]  # path line not clickable as entry
+
     if not browser.entries:
-        lines.append(art.paint("  (empty directory)", P.DIM))
+        body.append(art.paint(art.truncate_vis("(empty directory)", body_w), P.DIM))
     else:
-        start = max(0, browser.selected_idx - max_lines // 2)
-        end = min(len(browser.entries), start + max_lines - 3)
-        if end - start < max_lines - 3:
-            start = max(0, end - (max_lines - 3))
+        max_rows = max(1, body_cap - 1)  # path takes one
+        more_budget = max_rows
+        start = max(0, browser.selected_idx - more_budget // 2)
+        end = min(len(browser.entries), start + more_budget)
+        if end - start < more_budget:
+            start = max(0, end - more_budget)
+        more_above = start > 0
+        more_below = end < len(browser.entries)
+        slots = more_budget - (1 if more_above else 0) - (1 if more_below else 0)
+        slots = max(1, slots)
+        end = min(len(browser.entries), start + slots)
+        if more_above:
+            body.append(art.paint(art.truncate_vis(f"… {start} above", body_w), P.MUTED))
+            row_meta.append(-1)
         for i in range(start, end):
             entry = browser.entries[i]
             display = entry["display"]
-            max_display_w = panel_w - 4
-            if art.vis_len(display) > max_display_w:
-                display = art.pad_vis(display, max_display_w)[:max_display_w - 3] + "..."
+            room = max(4, body_w - 2)
+            display = art.truncate_vis(display, room)
+            mark = art.focus_mark(i == browser.selected_idx, focused_panel=focus)
             if i == browser.selected_idx:
-                line = art.paint("► ", P.BOLD, P.PINK) + art.paint(display, P.BOLD, P.SILVER)
+                name = art.paint(display, P.BOLD, P.SILVER)
+            elif entry["is_dir"]:
+                name = art.paint(display, P.SILVER)
             else:
-                if entry["is_dir"]:
-                    line = "  " + art.paint(display, P.SILVER)
-                else:
-                    line = "  " + art.paint(display, P.MUTED)
-            if focus and i == browser.selected_idx:
-                line = art.paint("►", P.PINK) + line[1:]
-            lines.append(line)
-        if len(browser.entries) > end:
-            lines.append(art.paint(f"  … and {len(browser.entries) - end} more", P.MUTED))
-        if start > 0:
-            lines.insert(1, art.paint(f"  {start} more above …", P.MUTED))
-    return lines
+                name = art.paint(display, P.MUTED)
+            body.append(mark + name)
+            row_meta.append(i)
+        if more_below:
+            body.append(art.paint(
+                art.truncate_vis(f"… {len(browser.entries) - end} more", body_w), P.MUTED))
+            row_meta.append(-1)
+
+    title = "browser"
+    framed = art.panel(body, title=title, width=width, height=height,
+                       focus=focus, body_style=(P.SILVER,))
+    if hitmap is not None:
+        hitmap.add(art.Region(
+            id="browser:panel", x0=x0, y0=y0,
+            x1=x0 + max(0, width - 1), y1=y0 + max(0, height - 1),
+            z=1, role="panel", data=0,
+        ))
+        for bi, idx in enumerate(row_meta):
+            if idx < 0:
+                continue
+            ry = y0 + 1 + bi
+            hitmap.add(art.Region(
+                id=f"browser:{idx}", x0=x0, y0=ry, x1=x0 + max(0, width - 1),
+                y1=ry, z=2, role="list-row", data=idx,
+            ))
+    return framed
+
+
+def build_waves_panel(path: str, pos: float, playing: bool, paused: bool,
+                      volume: float, width: int, height: int,
+                      bands: int = 16,
+                      *, hitmap: art.HitMap | None = None,
+                      y0: int = 1) -> str:
+    body_h = _panel_body_capacity(height)
+    body = waves_panel_lines(path, pos, playing, paused, volume, width, body_h, bands=bands)
+    # strip any outer width assumptions — body lines plain
+    framed = art.panel(body, title="waves", width=width, height=height,
+                       focus=False, body_style=(P.SILVER,))
+    if hitmap is not None:
+        hitmap.add(art.Region(
+            id="eq:panel", x0=1, y0=y0,
+            x1=max(1, width), y1=y0 + max(0, height - 1),
+            z=1, role="panel", data=2,
+        ))
+    return framed
 
 
 class FileBrowser:
@@ -1624,7 +1708,7 @@ def run_tui() -> int:
     if fd is None:
         print(art.paint("siren needs a real TTY (not a pipe).", P.ERR), file=sys.stderr)
         return 2
-    art.tui_begin(fd, "siren")
+    art.tui_begin(fd, "siren", mouse=bool(CFG.mouse))
 
     focus_mode = 0  # 0=browser, 1=queue, 2=EQ
     notification = ""
@@ -1637,6 +1721,80 @@ def run_tui() -> int:
     eq_visible = CFG.waves
     band_count = CFG.wave_bands
     validate_counter = 0
+    queue_sel = 0
+    hitmap = art.HitMap()
+    dbl = art.DoubleClickTracker(ms=350)
+
+    def _browser_activate() -> None:
+        res = browser.enter()
+        if res and res != "dir":
+            queue_add_and_play(res)
+
+    def _handle_mouse(ev: art.MouseEvent) -> None:
+        nonlocal focus_mode, queue_sel, eq_visible, notification, notification_time
+        if input_active:
+            return
+        delta = art.wheel_delta(ev)
+        if delta:
+            region = hitmap.hit(ev.x, ev.y)
+            if region is not None and region.id.startswith("browser"):
+                focus_mode = 0
+                if delta > 0:
+                    browser.navigate_up()
+                else:
+                    browser.navigate_down()
+            elif region is not None and region.id.startswith("queue"):
+                focus_mode = 1
+                n = len(QUEUE.items)
+                if n:
+                    queue_sel = max(0, min(n - 1, queue_sel - delta))
+            elif focus_mode == 0:
+                if delta > 0:
+                    browser.navigate_up()
+                else:
+                    browser.navigate_down()
+            elif focus_mode == 1:
+                n = len(QUEUE.items)
+                if n:
+                    queue_sel = max(0, min(n - 1, queue_sel - delta))
+            return
+        if ev.action != "press" or ev.button != 0:
+            return
+        region = hitmap.hit(ev.x, ev.y)
+        if region is None:
+            return
+        rid = region.id
+        if rid == "browser:panel":
+            focus_mode = 0
+            return
+        if rid == "queue:panel":
+            focus_mode = 1
+            return
+        if rid == "eq:panel":
+            focus_mode = 2
+            return
+        if rid.startswith("browser:"):
+            focus_mode = 0
+            try:
+                idx = int(rid.split(":", 1)[1])
+            except ValueError:
+                return
+            if 0 <= idx < len(browser.entries):
+                browser.selected_idx = idx
+                if dbl.is_double(rid):
+                    _browser_activate()
+            return
+        if rid.startswith("queue:"):
+            focus_mode = 1
+            try:
+                idx = int(rid.split(":", 1)[1])
+            except ValueError:
+                return
+            if 0 <= idx < len(QUEUE.items):
+                queue_sel = idx
+                if dbl.is_double(rid):
+                    play_queue_from(idx)
+            return
 
     try:
         while True:
@@ -1664,21 +1822,33 @@ def run_tui() -> int:
                     if item.path == path:
                         playing_idx = i
                         break
+            if queue_items:
+                if playing_idx >= 0 and not (0 <= queue_sel < len(queue_items)):
+                    queue_sel = playing_idx
+                queue_sel = max(0, min(len(queue_items) - 1, queue_sel))
+            else:
+                queue_sel = 0
 
-            header_h = 3
-            footer_h = len(build_footer(width, focus_mode).splitlines())
-            area = max(6, height - header_h - footer_h - 3)
+            header = build_header(track, status, pos, dur, vol, shuffle, repeat, width)
+            footer = build_footer(width, focus_mode)
+            header_h = header.count("\n") + 1
+            footer_h = footer.count("\n") + 1
+            show_note = bool(notification and (time.time() - notification_time) < 4)
+            note_h = (notification.count("\n") + 1) if show_note else 0
+            # blanks: after header, after note (or after header), after waves, after mid
+            blanks = 3 + (1 if show_note else 0)
+            area = max(6, height - header_h - footer_h - blanks - (1 if input_active else 0))
             if eq_visible:
-                eq_h = max(4, min(12, int(area * 0.35)))
+                eq_h = max(4, min(10, int(area * 0.32)))
                 bottom_h = area - eq_h
-                if bottom_h < 5:
-                    eq_h = max(3, area - 5)
+                if bottom_h < 6:
+                    eq_h = max(3, area - 6)
                     bottom_h = area - eq_h
             else:
                 eq_h = 0
                 bottom_h = area
-            if bottom_h < 5:
-                bottom_h = 5
+            if bottom_h < 6:
+                bottom_h = 6
 
             validate_counter += 1
             if validate_counter >= 100:
@@ -1688,44 +1858,57 @@ def run_tui() -> int:
                     notification = missing_notification(removed, "queue")
                     notification_time = time.time()
 
-            header = build_header(track, status, pos, dur, vol, shuffle, repeat, width)
-            waves_lines: list[str] = []
-            if eq_visible and eq_h > 0:
-                waves_lines = waves_panel_lines(path, pos, alive, paused, vol / 100.0,
-                                                width, eq_h, bands=band_count)
-            browser_w = max(20, int(width * 0.6))
-            queue_w = max(20, width - browser_w - 2)
-            if browser_w + queue_w + 2 > width:
-                browser_w = width - queue_w - 2
-            browser_lines = build_browser_panel(browser, browser_w, bottom_h, focus_mode == 0)
-            queue_lines = build_queue_panel(queue_items, playing_idx, queue_w, bottom_h, focus_mode == 1)
+            gap = 1
+            browser_w, queue_w = art.split_widths(width, gap=gap, left_ratio=0.58)
 
-            max_h = max(len(browser_lines), len(queue_lines))
-            while len(browser_lines) < max_h:
-                browser_lines.append("")
-            while len(queue_lines) < max_h:
-                queue_lines.append("")
-            bottom_rows = [
-                _pad_line(browser_lines[i], browser_w) + "  " + _pad_line(queue_lines[i], queue_w)
-                for i in range(max_h)
-            ]
+            # 1-based cell rows matching paint_frame home origin
+            hitmap.clear()
+            y = 1
+            y += header_h
+            y += 1  # blank after header
+            if show_note:
+                y += note_h
+                y += 1
+            waves_block = ""
+            if eq_visible and eq_h > 0:
+                waves_block = build_waves_panel(
+                    path, pos, alive, paused, vol / 100.0,
+                    width, eq_h, bands=band_count,
+                    hitmap=hitmap, y0=y,
+                )
+                y += eq_h
+                y += 1  # blank after waves
+            bottom_y0 = y
+            browser_block = build_browser_panel(
+                browser, browser_w, bottom_h, focus_mode == 0,
+                hitmap=hitmap, x0=1, y0=bottom_y0,
+            )
+            queue_block = build_queue_panel(
+                queue_items, playing_idx, queue_w, bottom_h, focus_mode == 1,
+                hitmap=hitmap, x0=browser_w + gap + 1, y0=bottom_y0,
+                cursor_index=queue_sel,
+            )
+            mid = art.split_row(
+                browser_block, queue_block,
+                gap=gap, left_width=browser_w, right_width=queue_w,
+            )
 
             frame_parts: list[str] = [header, ""]
-            if notification and (time.time() - notification_time) < 4:
+            if show_note:
                 frame_parts.append(notification)
+                frame_parts.append("")
             elif notification and (time.time() - notification_time) >= 4:
                 notification = ""
-            frame_parts.append("")
-            frame_parts.extend(waves_lines)
-            if waves_lines:
+            if waves_block:
+                frame_parts.append(waves_block)
                 frame_parts.append("")
-            frame_parts.extend(bottom_rows)
+            frame_parts.append(mid)
             frame_parts.append("")
-            frame_parts.append(build_footer(width, focus_mode))
+            frame_parts.append(footer)
             if input_active:
                 shown = "  " + input_prompt + input_buf + "▌"
                 if art.vis_len(shown) > width:
-                    shown = shown[: width - 1]
+                    shown = art.truncate_vis(art.strip_ansi(shown), width)
                 frame_parts.append(art.paint(shown, P.BOLD, P.PINK))
             frame = "\n".join(frame_parts)
 
@@ -1734,7 +1917,11 @@ def run_tui() -> int:
             except OSError:
                 art.tty_write(fd, art.clear_screen() + frame + "\n")
 
-            key = art.tui_read_key(fd, timeout=0.05)
+            ev = art.tui_read_event(fd, timeout=0.05)
+            if isinstance(ev, art.MouseEvent):
+                _handle_mouse(ev)
+                continue
+            key = ev
 
             if input_active:
                 if key == "esc":
@@ -1914,14 +2101,14 @@ def run_tui() -> int:
                             notification_time = time.time()
             elif focus_mode == 1:
                 if key in ("up", "k"):
-                    if queue_items and playing_idx > 0:
-                        queue_move(playing_idx, playing_idx - 1)
+                    if queue_items:
+                        queue_sel = max(0, queue_sel - 1)
                 elif key in ("down", "j"):
-                    if queue_items and playing_idx < len(queue_items) - 1:
-                        queue_move(playing_idx, playing_idx + 1)
+                    if queue_items:
+                        queue_sel = min(len(queue_items) - 1, queue_sel + 1)
                 elif key in ("enter", " "):
-                    if queue_items and 0 <= playing_idx < len(queue_items):
-                        play_queue_from(playing_idx)
+                    if queue_items and 0 <= queue_sel < len(queue_items):
+                        play_queue_from(queue_sel)
                 elif key == "a":
                     lib = scan_library()
                     if lib:
@@ -1930,14 +2117,17 @@ def run_tui() -> int:
                         for f in files[:10]:
                             queue_add(f)
                 elif key == "d":
-                    if queue_items and 0 <= playing_idx < len(queue_items):
-                        removed = queue_remove(playing_idx)
+                    if queue_items and 0 <= queue_sel < len(queue_items):
+                        removed = queue_remove(queue_sel)
                         if removed:
+                            if queue_sel >= len(QUEUE.items) and QUEUE.items:
+                                queue_sel = len(QUEUE.items) - 1
                             notification = art.box([f"Removed: {removed.display or 'track'}"],
                                                    title=NAME, width=50, body_style=(P.OK,))
                             notification_time = time.time()
                 elif key == "c":
                     queue_clear()
+                    queue_sel = 0
                     notification = art.box(["Queue cleared"], title=NAME, width=30, body_style=(P.OK,))
                     notification_time = time.time()
             else:

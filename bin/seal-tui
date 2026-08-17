@@ -36,7 +36,11 @@ KINDS = {
 KEYS = list(KINDS)
 BUTTONS = [("Lock Now", "lock"), ("Restart", "restart"),
            ("Guest On",  "guest_on"), ("Guest Off", "guest_off")]
-USER_BTNS = [("Add User", "add_user"), ("Remove", "rem_user")]
+USER_BTNS = [
+    ("Add User", "add_user"),
+    ("Remove", "rem_user"),
+    ("Set Pass", "set_pass"),
+]
 
 
 def load_json(path: Path) -> dict:
@@ -128,6 +132,46 @@ def discover_users() -> list[dict]:
 
 def valid_username(name: str) -> bool:
     return bool(re.match(r'^[a-z_][a-z0-9_-]{0,30}$', name))
+
+
+def set_user_password(fd, username: str) -> str:
+    """Prompt twice and set password via `sudo chpasswd`."""
+    import getpass
+
+    try:
+        art.tui_cleanup()
+    except Exception:
+        pass
+    try:
+        print(f"set password for {username}")
+        p1 = getpass.getpass("new password: ")
+        p2 = getpass.getpass("confirm: ")
+        if not p1:
+            return "cancelled (empty)"
+        if p1 != p2:
+            return "passwords do not match"
+        payload = f"{username}:{p1}\n".encode()
+        r = subprocess.run(
+            ["sudo", "-n", "chpasswd"],
+            input=payload,
+            capture_output=True,
+            timeout=30,
+        )
+        if r.returncode != 0:
+            r = subprocess.run(
+                ["sudo", "chpasswd"],
+                input=payload,
+                capture_output=True,
+                timeout=60,
+            )
+        if r.returncode == 0:
+            return f"password set for {username}"
+        err = (r.stderr or b"").decode(errors="replace").strip()
+        return f"chpasswd failed: {err or r.returncode}"
+    except Exception as e:
+        return f"set password error: {e}"
+    finally:
+        art.tui_begin(fd, "seal-tui")
 
 
 # ── TUI ──────────────────────────────────────────────────────────────
@@ -247,7 +291,10 @@ def run_tui() -> int:
 
             runes = art.box(
                 [
-                    art.pad_vis("j/k move · space toggle · enter edit · h hide · r delete", body_w),
+                    art.pad_vis(
+                        "j/k move · space hide · enter display · p set pass · h hide · r delete",
+                        body_w,
+                    ),
                     art.pad_vis("n add user · s save · L lock · R restart · q quit", body_w),
                 ],
                 title="runes",
@@ -390,6 +437,16 @@ def run_tui() -> int:
                                 status = ""
                             else:
                                 status = "no users"
+                        elif action == "set_pass":
+                            target = None
+                            if sel >= user_list_start and sel < total_rows:
+                                target = users[sel - user_list_start]["name"]
+                            elif users:
+                                target = users[0]["name"]
+                            if target:
+                                status = set_user_password(fd, target)
+                            else:
+                                status = "no users"
                 elif sel >= user_list_start and sel < total_rows:
                     user_idx = sel - user_list_start
                     if user_idx < len(users):
@@ -417,6 +474,13 @@ def run_tui() -> int:
                         cur = overrides[user_name].get("hidden", "false")
                         overrides[user_name]["hidden"] = "false" if cur == "true" else "true"
                         status = f"{'hidden' if overrides[user_name]['hidden'] == 'true' else 'shown'} {user_name}"
+            elif key == "p":
+                if sel >= user_list_start and sel < total_rows:
+                    user_idx = sel - user_list_start
+                    if user_idx < len(users):
+                        status = set_user_password(fd, users[user_idx]["name"])
+                elif users:
+                    status = set_user_password(fd, users[0]["name"])
             elif key in ("r", "d"):
                 if sel >= user_list_start and sel < total_rows:
                     user_idx = sel - user_list_start

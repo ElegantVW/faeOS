@@ -14,7 +14,7 @@ Usage:
   imp --demo                   render a sample frame (no server needed)
 
 Keys in the TUI:
-  Enter   conjure      a       animate (i2v, optional prompt)
+  Enter   conjure      a       animate (multi-frame LLM sequence, optional prompt)
   r       refine ("Make it more …")
   s       save         g       gallery (fzf)
   /       history (fzf)         Tab     cycle style
@@ -65,6 +65,28 @@ os.environ["PIXIE_UNICODE"] = "1"
 
 IMP_URL = os.environ.get("PIXIE_LLM_URL", "http://127.0.0.1:8082").rstrip("/")
 KUR_URL = os.environ.get("KUR_LLM_URL", "http://127.0.0.1:8081").rstrip("/")
+
+
+def llm_url_allowed(url: str) -> bool:
+    """Loopback-only LLM endpoints unless IMP_ALLOW_REMOTE=1."""
+    if os.environ.get("IMP_ALLOW_REMOTE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return True
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def require_local_llm(url: str) -> None:
+    if not llm_url_allowed(url):
+        raise RuntimeError(
+            f"imp refuses non-loopback LLM at {url!r} "
+            "(set IMP_ALLOW_REMOTE=1 to allow remote models)"
+        )
 IMP_ALIAS = os.environ.get("IMP_LLM_ALIAS", "imp")
 KUR_ALIAS = os.environ.get("KUR_LLM_ALIAS", "kur")
 MAX_TOKENS = int(os.environ.get("PIXIE_MAX_TOKENS", "3072"))
@@ -369,6 +391,7 @@ def _apply_sgr(color: tuple | None, body: str) -> tuple | None:
 
 
 def _http_json(url: str, body: dict, timeout: float) -> dict:
+    require_local_llm(url)
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
@@ -385,6 +408,8 @@ def _http_json(url: str, body: dict, timeout: float) -> dict:
 
 
 def llm_up(url: str, timeout: float = 2.0) -> bool:
+    if not llm_url_allowed(url):
+        return False
     for path in ("/health", "/v1/models"):
         try:
             with urllib.request.urlopen(f"{url}{path}", timeout=timeout) as r:

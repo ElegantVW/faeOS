@@ -1,2 +1,11 @@
 #!/usr/bin/env bash
-exec seal --daemon
+# seald — idle lock daemon (thin wrapper around seal --daemon)
+SEAL="${HOME}/bin/seal"
+if [[ ! -x "$SEAL" ]]; then
+  SEAL="$(command -v seal 2>/dev/null || true)"
+fi
+if [[ -z "$SEAL" || ! -x "$SEAL" ]]; then
+  echo "seald: seal binary not found" >&2
+  exit 127
+fi
+exec "$SEAL" --daemon

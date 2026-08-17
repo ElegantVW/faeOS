@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+import sys
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+_vdir = str(Path(__file__).resolve().parent)
+if _vdir not in sys.path:
+    sys.path.insert(0, _vdir)
+try:
+    from smoltide_voice import KurVoice
+    speaker = KurVoice()
+except ImportError:
+    sys.path.insert(0, str(Path.home() / "bin"))
+    from kur_voice import KurVoice
+    speaker = KurVoice()
+
+# Kur's own voice daemon port (independent of every LLM profile).
+PORT = 8083
+# Kur's own LLM profile lives on menagerie (smollm2, 8081) — not imp's server.
+LLM_URL = os.environ.get("KUR_LLM_URL", "http://127.0.0.1:8081").rstrip("/")
+
+
+def _menagerie() -> str:
+    for cand in (
+        os.environ.get("PIXIE_LLM_BIN", ""),
+        str(Path.home() / "bin" / "menagerie"),
+        str(Path.home() / "faeos" / "bin" / "menagerie"),
+    ):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return "menagerie"
+
+class KurRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def do_POST(self):
+        if self.path == "/generate":
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            
+            busy_file = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"kur-busy.{os.getpid()}"
+            try:
+                busy_file.write_text(str(os.getpid()), encoding="utf-8")
+            except Exception:
+                pass
+
+            try:
+                payload = json.loads(post_data.decode('utf-8'))
+                prompt = payload.get("prompt", "")
+                
+                # Format prompt using SmolLM2 chat template for accurate instruction following
+                llm_prompt = f"<|im_start|>user\nWrite a brief, beautiful 3-line haiku about: {prompt}. Return only the 3 lines.<|im_end|>\n<|im_start|>assistant\n"
+                req_data = json.dumps({
+                    "prompt": llm_prompt,
+                    "n_predict": 48,
+                    "temperature": 0.7
+                }).encode("utf-8")
+                
+                req = urllib.request.Request(
+                    f"{LLM_URL}/completion",
+                    data=req_data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                
+                haiku_text = ""
+                for _attempt in range(2):
+                    try:
+                        with urllib.request.urlopen(req, timeout=8) as resp:
+                            res_json = json.loads(resp.read().decode("utf-8"))
+                            haiku_text = res_json.get("content", "").strip()
+                            break
+                    except Exception:
+                        # our own model may have been unloaded when kur quit last;
+                        # ensure kur's instance, then give it time to load (~20s)
+                        subprocess.run(
+                            [_menagerie(), "ensure", "kur"],
+                            capture_output=True, timeout=120
+                        )
+                        for _wait in range(25):
+                            if urllib.request.urlopen(f"{LLM_URL}/health", timeout=2).status in (200, 503):
+                                break
+                            time.sleep(1)
+                
+                if not haiku_text:
+                    haiku_text = f"Silent mountains stand,\n{prompt} echoes through the mist,\nPeace returns again."
+                
+                # Clean up formatting for TTS
+                response_text = haiku_text.replace("\n", ". ")
+                
+                # Trigger TTS pipeline with Danny's deep voice
+                speaker.speak(response_text)
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                
+                response_data = {"status": "spoken", "text": haiku_text}
+                self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode('utf-8'))
+            finally:
+                try:
+                    busy_file.unlink()
+                except Exception:
+                    pass
+
+def run_server():
+    server_address = ('127.0.0.1', PORT)
+    httpd = HTTPServer(server_address, KurRequestHandler)
+    sys.__stderr__.write(f"[Kur Haiku Server initialized and listening on port {PORT}...]\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        sys.__stderr__.write("\n[Kur Server shutting down clean.]\n")
+
+if __name__ == "__main__":
+    run_server()

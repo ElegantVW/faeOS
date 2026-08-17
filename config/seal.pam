@@ -1,3 +1,7 @@
-# PAM configuration for seal (faeOS lock screen)
+# PAM configuration for seal (faeOS lock screen + greeter)
+# Install: sudo cp config/seal.pam /etc/pam.d/seal
 
-auth include system-auth
+#%PAM-1.0
+auth       include      system-auth
+account    include      system-auth
+session    include      system-auth

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# seal-login — graphical login face for startx-based faeOS sessions.
+#
+# Use as your X client (xinitrc) so Seal greets before the desktop:
+#
+#   # ~/.xinitrc
+#   exec seal-login
+#
+# Or with an explicit session:
+#   exec seal-login i3
+#   exec seal-login "dbus-run-session i3"
+#
+# Requires:
+#   - seal on PATH (faeos/bin or ~/bin)
+#   - /etc/pam.d/seal (fae-bootstrap installs it)
+#   - X already started by startx/xinit
+
+set -euo pipefail
+
+SESSION="${1:-${SEAL_SESSION:-i3}}"
+export SEAL_SESSION="$SESSION"
+
+if ! command -v seal >/dev/null 2>&1; then
+  echo "seal-login: seal not found on PATH" >&2
+  exit 127
+fi
+
+exec seal --greeter --session "$SESSION"

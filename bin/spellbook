@@ -12,6 +12,7 @@ Controls:
   k / ↑        Move up
   l / →        Open file/directory
   h / ←        Go to parent directory
+  mouse        Click select · double-click open · wheel scroll
   q           Quit
   ?           Help
 
@@ -51,15 +52,25 @@ else:
     SYM_LOCK = "[X] "
 
 
-def tui_frame(rows: list[tuple[str, tuple, ...]], *, title: str, subtitle: str = "", width: int | None = None) -> str:
-    """Hand-drawn pink frame — allows per-row styling (art.box cannot)."""
+def tui_frame(
+    rows: list[tuple[str, tuple, ...]],
+    *,
+    title: str,
+    subtitle: str = "",
+    width: int | None = None,
+) -> tuple[str, int, int]:
+    """Hand-drawn pink frame — allows per-row styling (art.box cannot).
+
+    Returns (frame, first_data_row_y_1based, data_row_count).
+    first_data_row_y is relative to the frame top (1 = top border line).
+    """
     unicode_mode = art.strip_ansi(os.environ.get("PIXIE_UNICODE", "")).lower() in ("1", "on", "true", "yes", "unicode")
     tl, tr, bl, br, hz, vt = ("╭", "╮", "╰", "╯", "─", "│") if unicode_mode else ("+", "+", "+", "+", "-", "|")
     mark = "✦" if unicode_mode else "*"
     w = width or art.term_width()
-    outer = max(36, min(w, 96))
+    outer = max(8, w)  # full width for accurate mouse hitmaps
     inner = outer - 2
-    body_w = inner - 2
+    body_w = max(1, inner - 2)
     out = []
     if title:
         tplain = art.strip_ansi(title)
@@ -68,15 +79,20 @@ def tui_frame(rows: list[tuple[str, tuple, ...]], *, title: str, subtitle: str =
         out.append(art.paint(tl + hz, P.PINK_DIM) + art.paint(label, P.BOLD, P.PINK) + art.paint(hz * fill + tr, P.PINK_DIM))
     else:
         out.append(art.paint(tl + hz * inner + tr, P.PINK_DIM))
+    sub_lines = 0
     if subtitle:
         for ln in art.wrap_plain(art.strip_ansi(subtitle), body_w):
             out.append(art.paint(vt + " " + art.pad_vis(ln, body_w) + " " + vt, P.MUTED))
+            sub_lines += 1
         out.append(art.paint(vt + " " + ("·" if unicode_mode else "-") * body_w + " " + vt, P.PINK_DIM))
+        sub_lines += 1
+    # data rows start after top + subtitle block
+    first_data_rel = 1 + 1 + sub_lines  # 1-based within frame: top is 1
     for text, style in rows:
         plain = art.pad_vis(art.strip_ansi(text), body_w)
         out.append(art.paint(vt, P.PINK_DIM) + " " + art.paint(plain, *style) + " " + art.paint(vt, P.PINK_DIM))
     out.append(art.paint(bl + hz * inner + br, P.PINK_DIM))
-    return "\n".join(out)
+    return "\n".join(out), first_data_rel, len(rows)
 
 
 def narrate(cast: str, answered: str, *, ok: bool = True) -> str:
@@ -159,7 +175,7 @@ class FileManager:
         """One styled list row — selected rows wear the pink crown."""
         selected = i == self.selected_index
         name, info = self.format_file_info(file)
-        mark = "▶ " if selected else "  "
+        mark = art.strip_ansi(art.focus_mark(selected))
         if file.is_dir():
             style = (P.BOLD, P.BLUSH) if selected else (P.PINK,)
         elif file.is_symlink():
@@ -177,30 +193,48 @@ class FileManager:
         sub = f"{self.current_path} · {len(files)} scrolls · {dirs} {tome_w}"
         if self.status:
             sub += f" · {self.status}"
-        return tui_frame([], title="Spell Book", subtitle=sub, width=art.term_width())
+        frame, _, _ = tui_frame([], title="Spell Book", subtitle=sub, width=art.term_width())
+        return frame
 
-    def draw_file_list(self, files: list[Path]) -> str:
-        """Windowed scroll shelf — styled rows inside one frame."""
+    def draw_file_list(self, files: list[Path]) -> tuple[str, int, int, int, bool]:
+        """Windowed scroll shelf.
+
+        Returns (frame, first_data_rel, top_index, n_visible, has_parent_row).
+        When has_parent_row, body line 0 is the clickable parent affordance
+        (not a file index); file rows start at body line 1.
+        """
         tw = art.term_width()
         n = len(files)
+        can_up = self.current_path.parent != self.current_path
+        parent_row: list[tuple[str, tuple]] = []
+        if can_up:
+            parent_row = [(
+                art.strip_ansi(art.focus_mark(False)) + "↑  ..  (parent directory)",
+                (P.BOLD, P.PINK),
+            )]
         if not files:
-            return tui_frame(
-                [("  (the shelf is empty — cast n to bind a new scroll)", (P.MUTED,))],
-                title="the scrolls",
-                width=tw,
-            )
+            rows = parent_row + [
+                ("  (the shelf is empty — cast n to bind a new scroll)", (P.MUTED,)),
+            ]
+            frame, first_rel, n_rows = tui_frame(rows, title="the scrolls", width=tw)
+            return frame, first_rel, 0, 0, can_up
         max_rows = self._max_rows()
+        # parent row eats one list slot when present
+        file_slots = max(1, max_rows - (1 if can_up else 0))
         if self.selected_index >= n:
             self.selected_index = n - 1
-        if self.offset > n - max_rows:
-            self.offset = max(0, n - max_rows)
+        if self.offset > n - file_slots:
+            self.offset = max(0, n - file_slots)
         top = self.offset
-        visible = files[top : top + max_rows]
-        rows = [self._file_row(top + i, f, tw - 8) for i, f in enumerate(visible)]
+        visible = files[top : top + file_slots]
+        rows = parent_row + [
+            self._file_row(top + i, f, tw - 8) for i, f in enumerate(visible)
+        ]
         sub = ""
-        if n > max_rows:
-            sub = f"vision {top + 1}-{min(n, top + max_rows)} of {n} scrolls"
-        return tui_frame(rows, title="the scrolls", subtitle=sub, width=tw)
+        if n > file_slots:
+            sub = f"vision {top + 1}-{min(n, top + file_slots)} of {n} scrolls"
+        frame, first_rel, n_rows = tui_frame(rows, title="the scrolls", subtitle=sub, width=tw)
+        return frame, first_rel, top, len(visible), can_up
 
     def draw_help(self) -> str:
         """Draw the help screen."""
@@ -253,21 +287,57 @@ class FileManager:
             body_style=(P.SILVER,)
         )
 
-    def draw_ui(self) -> str:
-        """Draw the complete UI."""
+    def _go_parent(self) -> None:
+        if self.current_path.parent != self.current_path:
+            parent = self.current_path.parent
+            self.current_path = parent
+            self.selected_index = 0
+            self.offset = 0
+            self.status = narrate(f"cd {parent}/", "a new path unfolds")
+
+    def draw_ui(self) -> tuple[str, art.HitMap]:
+        """Draw the complete UI; return (frame, hitmap) for mouse."""
+        hitmap = art.HitMap()
         header = self.draw_header()
         files = self.get_files()
-        file_list = self.draw_file_list(files)
+        file_list, first_rel, top, n_vis, has_parent = self.draw_file_list(files)
         hint = (
-            "j/k move · enter/l/o open · h parent · ? help · s sort · . hidden · "
-            "n new · d delete · r rename · e edit · q quit"
+            "j/k / wheel · enter/l/o / double-click open · h / click ↑ parent · "
+            "? help · s sort · . hidden · n new · d delete · r rename · e edit · q quit"
             + (" · p pick this dir" if self.pick_mode else "")
         )
         tw = art.term_width()
-        body_w = max(30, min(tw, 96) - 4)
+        body_w = max(30, tw - 4)
         rows = [(ln, (P.PINK_DIM,)) for ln in art.wrap_plain(art.strip_ansi(hint), body_w)]
-        footer = tui_frame(rows, title="runes", width=tw)
-        return "\n".join([header, "", file_list, "", footer])
+        footer, _, _ = tui_frame(rows, title="runes", width=tw)
+        # y layout: header, blank, file_list, blank, footer
+        y = 1
+        y += header.count("\n") + 1
+        y += 1  # blank
+        list_y0 = y
+        body_i = 0
+        if has_parent:
+            ry = list_y0 + first_rel - 1 + body_i
+            hitmap.add(art.Region(
+                id="parent", x0=1, y0=ry, x1=max(1, tw), y1=ry,
+                z=3, role="parent", data=None,
+            ))
+            body_i += 1
+        if n_vis > 0:
+            for bi in range(n_vis):
+                idx = top + bi
+                ry = list_y0 + first_rel - 1 + body_i + bi
+                hitmap.add(art.Region(
+                    id=f"row:{idx}", x0=1, y0=ry, x1=max(1, tw), y1=ry,
+                    z=2, role="list-row", data=idx,
+                ))
+        list_h = file_list.count("\n") + 1
+        hitmap.add(art.Region(
+            id="list", x0=1, y0=list_y0, x1=max(1, tw),
+            y1=list_y0 + list_h - 1, z=0, role="scroll", data=None,
+        ))
+        frame = "\n".join([header, "", file_list, "", footer])
+        return frame, hitmap
 
     def open_file(self, file: Path):
         """Open a file or directory."""
@@ -290,6 +360,14 @@ class FileManager:
             except Exception as e:
                 self.status = narrate(f"open {file.name}", str(e), ok=False)
 
+    def _ensure_visible(self) -> None:
+        max_rows = self._max_rows()
+        if self.selected_index < self.offset:
+            self.offset = self.selected_index
+        elif self.selected_index >= self.offset + max_rows:
+            self.offset = self.selected_index - max_rows + 1
+        self.offset = max(0, self.offset)
+
     def run(self):
         """Main loop."""
         fd = art.tui_open_tty()
@@ -297,33 +375,58 @@ class FileManager:
             print("Error: spellbook requires an interactive terminal")
             return
         art.tui_begin(fd, "spellbook")
-        
+        dbl = art.DoubleClickTracker(ms=350)
+
         try:
             while True:
                 try:
-                    frame = self.draw_ui()
-                    os.write(fd, b"\033[H\033[J")
-                    os.write(fd, (frame + "\n").encode("utf-8", "replace"))
-                    os.write(fd, b"\033[0m")
-                    sys.stdout.flush()
+                    frame, hitmap = self.draw_ui()
+                    try:
+                        art.paint_frame(fd, frame)
+                    except OSError:
+                        os.write(fd, b"\033[H\033[J")
+                        os.write(fd, (frame + "\n").encode("utf-8", "replace"))
 
-                    # Read key using the robust read_key function
-                    key = art.tui_read_key(fd, timeout=0.1)
+                    ev = art.tui_read_event(fd, timeout=0.1)
+                    if isinstance(ev, art.MouseEvent):
+                        files = self.get_files()
+                        delta = art.wheel_delta(ev)
+                        if delta and files:
+                            if delta > 0:
+                                self.selected_index = max(0, self.selected_index - 1)
+                            else:
+                                self.selected_index = min(
+                                    len(files) - 1, self.selected_index + 1
+                                )
+                            self._ensure_visible()
+                            continue
+                        if ev.action == "press" and ev.button == 0:
+                            region = hitmap.hit(ev.x, ev.y)
+                            if region is None:
+                                continue
+                            if region.role == "parent":
+                                self._go_parent()
+                                continue
+                            if region.role == "list-row":
+                                idx = int(region.data)  # type: ignore[arg-type]
+                                if 0 <= idx < len(files):
+                                    self.selected_index = idx
+                                    self._ensure_visible()
+                                    if dbl.is_double(region.id):
+                                        self.open_file(files[idx])
+                        continue
 
-                    if key in ('q', 'ctrl-c', 'esc'):
+                    key = ev
+                    if key in ("q", "ctrl-c", "esc"):
                         break
-                    if key:  # Only handle non-empty keys
+                    if key:
                         self.handle_key(key)
 
                     if self.pick_mode and self.chosen_path:
                         break
                 except KeyboardInterrupt:
-                    # Clean exit on Ctrl+C
                     break
 
-                # Small delay to prevent CPU overuse
-                time.sleep(0.01)
-                        
         except Exception as e:
             art.tui_cleanup()
             raise e
@@ -361,12 +464,7 @@ class FileManager:
             if files and self.selected_index < len(files):
                 self.open_file(files[self.selected_index])
         elif key in ('left', 'h'):  # Left arrow or h
-            if self.current_path.parent != self.current_path:
-                parent = self.current_path.parent
-                self.current_path = parent
-                self.selected_index = 0
-                self.offset = 0
-                self.status = narrate(f"cd {parent}/", "a new path unfolds")
+            self._go_parent()
         elif key == 'gg':  # First file
             self.selected_index = 0
             self.offset = 0

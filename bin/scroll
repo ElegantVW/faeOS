@@ -1,510 +1,769 @@
 #!/usr/bin/env python3
-"""scroll — themed command directory.
+"""scroll — faeOS living book (page carousel) + PATH leaf.
 
-  scroll             arrow picker → prints insert text (for zsh print -z)
-  scroll list       static boxed board once
-  scroll menu       raw tab-separated lines
-  scroll board      old modal board (view only)
+  scroll              open on page 1 (Scroll); Tab turns pages
+  scroll --path       open PATH leaf (print name → shell prompt)
+  scroll list         text dump of every page
+  summon              PATH leaf (FAE_SCROLL_TAB=path)
 
-UI paints on /dev/tty; selection goes to stdout so the shell can capture it.
+Navigation (also taught on page 1):
+  Tab / Shift-Tab     next / previous page
+  j/k · wheel         scroll within page
+  1–9                 cast footer runes (run the spell)
+  m / Ctrl-p          play/pause book ambience
+  g then 1–9/0        jump to pages 11–20
+  G then 1–9/0        jump to pages 21–30
+  q                   close the book
+
+PATH leaf: type filter · Enter prints the name for print -z.
+The sealed leaf / Kur page are egg state (see fae_egg.py).
 """
 from __future__ import annotations
 
-import atexit
-import argparse
 import os
-import shutil
+import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-# shared art / TTY helpers
 sys.path.insert(0, str(Path.home() / "bin"))
-import fae_termart as art  # noqa: E402
-
-# Force Unicode box drawing for smooth round corners
 os.environ["PIXIE_UNICODE"] = "1"
 
-P = art.P
-PIXIE_SCREEN = Path.home() / "bin" / "pixie-screen"
+import fae_termart as art  # noqa: E402
+from fae_termart import Palette as P
+
+import fae_egg  # noqa: E402
+import fae_ambience  # noqa: E402
+import scroll_pages as pages  # noqa: E402
+from scroll_pages import AppPage, Rune  # noqa: E402
 
 NAME = "scroll"
+PATH_ID = "__path__"
+CACHE_FILE = (
+    Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+    / "pixie"
+    / "summon.list"
+)
+TTL = 6 * 3600
+# outer margin so box edges stay visible (cols/rows given back to the term)
+MARGIN_X = 1
+MARGIN_Y = 1
 
-SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
-    (
-        "TOME - READING (SCRIPTORIUM)",
-        [
-            ("tome <file>", "Read a document (markdown · text)"),
-            ("tome", "Browse readable files in this directory"),
-            ("tome ~/faeos/faeOSplan.md", "The faeOS plan itself"),
-            ("tome ~/faeos/docs/plans", "All app plans"),
-        ],
-    ),
-    (
-        "SIREN - MUSIC",
-        [
-            ("siren", "Interactive player TUI"),
-            ("siren play", "Shuffle ~/Music (recursive)"),
-            ("siren play music", "Same - explicit library"),
-            ("next", "Next track"),
-            ("prev", "Previous track"),
-            ("now", "Now playing"),
-            ("stop", "Stop playback"),
-            ("pause", "Pause / resume"),
-            ("volume", "Get/set sink volume 0-150"),
-            ("yt", "YouTube -> fzf -> mpv"),
-            ("siren queue add <query>", "Add tracks to queue"),
-            ("siren playlist save|load <name>", "Save/load a playlist"),
-            ("siren config set <key> <val>", "Config (default_volume, normalize…)"),
-            ("siren trove list 10 music lofi", "Legal free media (IA)"),
-            ("siren trove get <id>", "Download one item to ~/Music/trove"),
-        ],
-    ),
-    (
-        "ETHER - NETWORK",
-        [
-            ("ether", "Live TUI: bt · wifi · lan (navigate · q to close)"),
-            ("whisper ether", "Tune the ANC headphone in"),
-            ("listen ether", "Tune the JBL Go 3 in"),
-            ("ether status", "One-shot report: bt · wifi · lan"),
-            ("ether net", "IPv4/IPv6 + archive.org check"),
-            ("ether veil on", "Raise the VPN"),
-            ("ether veil off", "Lower the VPN"),
-            ("ether bridge", "Phone hotspot fallback (netherweave.env)"),
-            ("ether about", "Network weaves help"),
-        ],
-    ),
-    (
-        "BREAK",
-        [
-            ("zen", "Browser on F7 - shell stays free"),
-            ("zen focus", "Switch to browser VT"),
-            ("zen stop", "Quit browser + X"),
-            ("zen https://", "Open URL - finish the URL"),
-        ],
-    ),
-    (
-        "AI - MENAGERIE",
-        [
-            ("menagerie", "AI control center (TUI: models, apps, budget)"),
-            ("menagerie status all", "table: app | model | port | status"),
-            ("menagerie ensure pixie", "summon one app's model on demand"),
-            ("menagerie set pixie <model>", "switch which model an app uses"),
-            ("menagerie models", "list registered models"),
-            ("menagerie models add --hf <repo> <file>", "download a model (HF)"),
-            ("menagerie budget", "RAM budget for loaded models"),
-            ('pixie "', "Local agent - finish the quote"),
-            ("pixie -v \"", "Show tools this run"),
-            ("pixie verbose on", "Always show tools"),
-            ("pixie verbose off", "Quiet tools"),
-            ('ask "', "Same engine as pixie"),
-            ('ask-web "', "Agent biased to web"),
-            ('menagerie chat pixie "', "Raw offline chat"),
-        ],
-    ),
-    (
-        "MAIL",
-        [
-            ("mail", "aerc client"),
-            ("goblin", "Mail spirit TUI (aerc -> local text)"),
-            ("goblin sync", "IMAP -> unread/*.txt"),
-            ("goblin list", "List local mail files"),
-            ("goblin bundle", "All unread as text"),
-            ('pixie "check my emails"', "Sync + summarize"),
-        ],
-    ),
-    (
-        "MAGPIE - SEARCH",
-        [
-            ("magpie ", "Private search - add words"),
-            ("magpie --deep 3 ", "Fetch top pages - add words"),
-            ("magpie -a ", "Deep + AI summary - add words"),
-            ("magpie --tor ", "Via Tor - add words"),
-            ("duck ", "Alias -> magpie (old name)"),
-        ],
-    ),
-    (
-        "ROUTER",
-        [
-            ("router probe", "Gateway + vendor"),
-            ("router status", "PC IPv4/IPv6 check"),
-            ("router wan", "WAN IP (creds)"),
-            ("router login", "Admin page probe"),
-            ("router forget", "Drop saved creds"),
-        ],
-    ),
-    (
-        "SYSTEM",
-        [
-            ("scroll", "This menu"),
-            ("scroll list", "Static board (no pick)"),
-            ("summon", "Quick launcher (dmenu-style, type to run)"),
-            ("summon -x <query>", "Launch first match directly"),
-            ("summon --refresh", "Rescan PATH cache"),
-            ("eye", "The Eye — process watcher (CPU/RSS/kill)"),
-            ("eye list 15", "Top 15 processes once (stdout)"),
-            ("vault", "Vault — disk map (recursive sizes, ncdu-style)"),
-            ("vault list ~", "Weigh home once (stdout)"),
-            ("alchemy", "Alchemy — pacman cauldron (brew / sip / distill)"),
-            ("alchemy search <q>", "Search repos"),
-            ("alchemy brew <pkg>", "Install a package (sudo)"),
-            ("grimoire", "Grimoire — markdown notes (pages)"),
-            ("grimoire new <title>", "Create a new note + open editor"),
-            ("abacus", "Abacus — calculator REPL"),
-            ('abacus "2+2"', "One-shot evaluate"),
-            ("quests", "Quests — todo.txt log (independent)"),
-            ("quests add … due:YYYY-MM-DD", "Add a quest with due date"),
-            ("hourglass", "Hourglass — timer / pomodoro (independent)"),
-            ("hourglass 25", "Start 25-minute sand"),
-            ("almanac", "Almanac — calendar hub (quests + hourglass feeds)"),
-            ("almanac today", "Today's agenda"),
-            ("bulwark", "Bulwark — host protection (firewall/integrity/hunt)"),
-            ("bulwark status", "Protection posture at a glance"),
-            ("bulwark ports", "Listening sockets + owners"),
-            ("imbue", "Imbue — clipboard memory (history / re-paste)"),
-            ("imbue list", "Recent clips"),
-            ("imbue set <text>", "Set clipboard + store"),
-            ("imbue watch", "Poll clipboard into history"),
-            ("reflection", "Reflection — screenshots & gallery"),
-            ("reflection full", "Capture whole desktop"),
-            ("reflection window", "Capture focused window"),
-            ("reflection region", "Drag a rectangle"),
-            ("reflection view chafa|normal", "Terminal art vs real image open"),
-            ("reflection open --normal", "Open last shot in image viewer"),
-            ("fairy", "Fairy Lantern — home TUI (last / SPARK / Spellbook)"),
-            ("fairy-lantern", "same as fairy"),
-            ("fairy last", "Re-open last .gba"),
-            ("fairy spark", "Built-in SPARK fable"),
-            ("fairy play <rom.gba>", "Play a GBA fable (window)"),
-            ("  (in play)", "F5 savestate · F7 load · battery → .sav"),
-            ("termfix", "Reset TTY + line-edit after glitches"),
-            ("tick status", "Tick + grace state"),
-            ("tick on 10", "Idle clear every 10s"),
-            ("tick off", "Freeze idle clear"),
-            ("scry", "Cmd + output history (also Shift-Tab)"),
-            ("spellbook", "File manager TUI"),
-            ("faectl", "FaeOS control panel (status / restart-llm)"),
-            ("pixie-term fancy", "Fancy DRM terminal (no X/startx)"),
-            ("pixie-term dress", "Pink palette + big font on this VT"),
-        ],
-    ),
-]
 
-# ── entries ────────────────────────────────────────────────────────────
+# ── geometry ───────────────────────────────────────────────────────────
 
-def all_entries() -> list[tuple[str, str, str]]:
-    """(section, cmd, blurb) flat list."""
-    out: list[tuple[str, str, str]] = []
-    for section, entries in SECTIONS:
-        for cmd, blurb in entries:
-            out.append((section, cmd, blurb))
+def frame_size() -> tuple[int, int]:
+    """Near-fullscreen width/height from raw TIOCGWINSZ (respects font zoom).
+
+    Does **not** use term_width's floor=44/cap=96 — large Kitty fonts shrink
+    cols/rows below those floors and would otherwise draw past the screen.
+    """
+    cols, rows = art.winsize()
+    if cols <= 0:
+        cols = 80
+    if rows <= 0:
+        rows = 24
+    tw = max(24, cols - 2 * MARGIN_X)
+    # keep one free row so the bottom border is not eaten by the driver
+    th = max(10, rows - MARGIN_Y)
+    return tw, th
+
+
+def _body_text_width(panel_w: int) -> int:
+    """Inner text width inside a crystal panel (borders + side padding)."""
+    # outer | sp text sp |  → body_w = width - 4
+    return max(8, panel_w - 4)
+
+
+def _wrap_rows(lines: list[str], width: int) -> list[str]:
+    """Wrap each logical line to visible width (ANSI-safe via wrap_plain)."""
+    out: list[str] = []
+    for ln in lines:
+        plain = art.strip_ansi(ln)
+        if not plain:
+            out.append("")
+            continue
+        # keep leading indent feel on wrapped continuations
+        indent = len(plain) - len(plain.lstrip(" "))
+        pad = " " * min(indent, 4)
+        chunks = art.wrap_plain(plain, width)
+        for i, ch in enumerate(chunks):
+            if i == 0:
+                out.append(ch)
+            else:
+                out.append(pad + ch.lstrip(" "))
+    return out or [""]
+
+
+def _window_rows(
+    lines: list[str], offset: int, max_rows: int
+) -> tuple[list[str], int, bool, bool]:
+    """Page `lines` into at most `max_rows` slots, with ↑/↓ indicators inside budget.
+
+    Returns (visible_rows, clamped_offset, has_above, has_below).
+    Never returns more than max_rows lines — so panel height trim cannot
+    silently drop real content.
+    """
+    if max_rows < 1:
+        return [""], 0, False, False
+    n = len(lines)
+    if n <= max_rows:
+        # pad to stable height? leave short — panel pads blanks
+        return list(lines), 0, False, False
+
+    offset = max(0, min(offset, n - 1))
+
+    def slots_for(off: int) -> tuple[int, bool, bool]:
+        """How many content lines fit at this offset, and indicator flags."""
+        need_up = off > 0
+        # provisional: assume we need a down marker if any content remains
+        room = max_rows - (1 if need_up else 0)
+        # if remaining content > room, reserve one line for ↓
+        remaining = n - off
+        need_down = remaining > room
+        if need_down:
+            room -= 1
+        room = max(1, room)
+        # re-check down after fixing room
+        need_down = off + room < n
+        # if we flipped need_down off, room can grow — leave as-is (one blank ok)
+        return room, need_up, need_down
+
+    content_slots, need_up, need_down = slots_for(offset)
+    max_off = max(0, n - content_slots)
+    if offset > max_off:
+        offset = max_off
+        content_slots, need_up, need_down = slots_for(offset)
+
+    chunk = lines[offset : offset + content_slots]
+    out: list[str] = []
+    if need_up:
+        out.append(art.paint(f"  … ↑ {offset} above · j/k or wheel …", P.MUTED))
+    out.extend(chunk)
+    if need_down:
+        below = n - (offset + content_slots)
+        out.append(art.paint(f"  … ↓ {below} more · j/k or wheel …", P.MUTED))
+
+    # hard cap (defensive)
+    if len(out) > max_rows:
+        out = out[:max_rows]
+    return out, offset, need_up, need_down
+
+
+# ── PATH cache ─────────────────────────────────────────────────────────
+
+def scan_path() -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for d in os.environ.get("PATH", "").split(":"):
+        if not d:
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name.startswith(".") or "\n" in name or "\t" in name or name in seen:
+                continue
+            p = Path(d) / name
+            if not p.is_file():
+                continue
+            try:
+                if not os.access(p, os.X_OK):
+                    continue
+            except OSError:
+                continue
+            seen.add(name)
+            out.append((name, d))
+    out.sort(key=lambda t: t[0])
     return out
 
 
-def insert_text(cmd: str) -> str:
-    """Text to put on the shell prompt."""
-    return cmd.replace("…", "").replace("...", "").rstrip()
+def read_cache() -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    try:
+        for line in CACHE_FILE.read_text().splitlines():
+            if "\t" in line:
+                name, path = line.split("\t", 1)
+                entries.append((name, path))
+    except OSError:
+        pass
+    return entries
 
 
-# ── static list board ──────────────────────────────────────────────────
-
-def strip_ansi(s: str) -> str:
-    return art.strip_ansi(s)
-
-
-def vis_len(s: str) -> int:
-    return art.vis_len(s)
-
-
-def term_size() -> tuple[int, int]:
-    cols, rows = art.winsize()
-    return max(40, cols), max(12, rows)
+def write_cache(entries: list[tuple[str, str]]) -> None:
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_FILE.write_text(
+            "\n".join(f"{n}\t{p}" for n, p in entries) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
-def pad_vis(s: str, width: int) -> str:
-    return art.pad_vis(s, width)
+def cache_age() -> float:
+    try:
+        return time.time() - CACHE_FILE.stat().st_mtime
+    except OSError:
+        return float("inf")
 
 
-def build_list_box_lines() -> list[str]:
-    """Static multi-column board (list mode)."""
-    tw = art.term_width(cap=120, floor=48)
+def path_entries() -> list[tuple[str, str]]:
+    if cache_age() > TTL:
+        write_cache(scan_path())
+    return read_cache()
+
+
+# ── curriculum ─────────────────────────────────────────────────────────
+
+def book_pages() -> list[AppPage | str]:
+    """Ordered leaves: AppPage… then PATH sentinel string."""
+    by_id = pages.pages_by_id()
+    out: list[AppPage | str] = []
+    for pid in pages.CURRICULUM:
+        if pid in by_id:
+            out.append(by_id[pid])
+    if fae_egg.is_hatched():
+        out.append(pages.kur_page())
+    else:
+        out.append(pages.hermetic_page())
+    out.append(PATH_ID)
+    return out
+
+
+# ── run / print ────────────────────────────────────────────────────────
+
+def _stdio_to_tty() -> None:
+    try:
+        tty = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+    except OSError:
+        return
+    try:
+        for fd in (0, 1, 2):
+            try:
+                os.dup2(tty, fd)
+            except OSError:
+                pass
+    finally:
+        if tty > 2:
+            try:
+                os.close(tty)
+            except OSError:
+                pass
+
+
+def run_cmdline(cmdline: str) -> int:
+    art.tui_cleanup()
+    cmdline = (cmdline or "").strip()
+    if not cmdline:
+        return 1
+    try:
+        argv = shlex.split(cmdline)
+    except ValueError:
+        argv = cmdline.split()
+    if not argv:
+        return 1
+    _stdio_to_tty()
+    try:
+        os.execvpe(argv[0], argv, os.environ)
+    except OSError:
+        try:
+            return subprocess.call(argv)
+        except OSError as e:
+            print(f"{NAME}: {e}", file=sys.stderr)
+            return 1
+    return 1
+
+
+def emit_path_name(name: str) -> int:
+    """PATH leaf: pure name on stdout for shell print -z."""
+    art.tui_cleanup()
+    sys.stdout.write(name + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+# ── list dump ──────────────────────────────────────────────────────────
+
+def print_list() -> int:
+    tw, _ = frame_size()
     lines: list[str] = []
-    for section, entries in SECTIONS:
-        lines.append(f"[{section}]")
-        for cmd, blurb in entries:
-            lines.append(f"  {cmd}  -  {blurb}")
+    for leaf in book_pages():
+        if leaf == PATH_ID:
+            lines.append("[PATH]  summon / scroll --path — print name to prompt")
+            continue
+        assert isinstance(leaf, AppPage)
+        lines.append(f"✦ {leaf.name}  ({leaf.domain})")
+        lines.append(f"  {leaf.tagline}")
+        for ln in leaf.intro:
+            lines.append(f"  {ln}")
+        lines.append("  · How ·")
+        for ln in leaf.how:
+            lines.append(f"    {ln}")
+        lines.append("  · CLI ·")
+        for cmd, blurb in leaf.cli:
+            lines.append(f"    {cmd}  —  {blurb}")
         lines.append("")
-    return art.box(
-        lines or ["(empty)"],
-        title=NAME,
-        width=tw,
-        body_style=(P.SILVER,),
-    ).splitlines()
-
-
-def print_list_box() -> int:
-    for line in build_list_box_lines():
+    for line in art.box(
+        lines, title=NAME, width=tw, body_style=(P.SILVER,), cap=None, floor=1
+    ).splitlines():
         print(line)
     return 0
 
 
-def print_menu_lines() -> None:
-    for section, entries in SECTIONS:
-        for cmd, blurb in entries:
-            insert = insert_text(cmd)
-            display = f"{cmd}  -  {blurb}  [{section}]"
-            print(f"{insert}\t{display}")
+# ── render app page ────────────────────────────────────────────────────
+
+def _runes_for(page: AppPage) -> list[Rune]:
+    runes = [r for r in page.runes if r.kind != "back"]
+    # keep up to 9 castable runes
+    return runes[:9]
 
 
-# ── arrow picker (primary UI) ──────────────────────────────────────────
+def _page_body_lines(page: AppPage, text_w: int) -> list[str]:
+    """Full logical body for a dossier, wrapped to the panel text width."""
+    raw: list[str] = [""]
+    # title + tagline may be long when zoomed narrow — wrap as plain then re-style first line lightly
+    head = f"✦ {page.name} ✦  {page.tagline}"
+    for i, ch in enumerate(_wrap_rows([head], text_w)):
+        if i == 0:
+            raw.append(art.paint(ch, P.BOLD, P.PINK) if ch.startswith("✦") else ch)
+        else:
+            raw.append(art.paint(ch, P.MUTED))
+    raw.append("")
+    raw.extend(_wrap_rows([f"  {ln}" for ln in page.intro], text_w))
+    raw.append("")
+    how_title = f"✦ How to use {page.name} ✦"
+    raw.extend(_wrap_rows([how_title], text_w))
+    raw.append("")
+    raw.extend(_wrap_rows([f"  {ln}" for ln in page.how], text_w))
+    raw.append("")
+    raw.extend(_wrap_rows(["✦ CLI commands ✦"], text_w))
+    raw.append("")
+    for cmd, blurb in page.cli:
+        raw.extend(_wrap_rows([f"  {cmd}  —  {blurb}"], text_w))
+    raw.append("")
+    return raw
 
-def _filter_entries(
-    entries: list[tuple[str, str, str]], q: str
-) -> list[tuple[str, str, str]]:
-    q = q.strip().lower()
-    if not q:
-        return list(entries)
-    out = []
-    for sec, cmd, blurb in entries:
-        hay = f"{sec} {cmd} {blurb}".lower()
-        if all(tok in hay for tok in q.split()):
-            out.append((sec, cmd, blurb))
-    return out
 
+def render_app_page(
+    page: AppPage,
+    page_i: int,
+    page_n: int,
+    body_off: int,
+    width: int,
+    height: int,
+    *,
+    music: str = "off",
+) -> tuple[str, art.HitMap, list[Rune], int]:
+    """Render dossier. Returns (frame, hitmap, runes, clamped body_off)."""
+    hitmap = art.HitMap()
+    runes = _runes_for(page)
+    mus = " · ♪" if music == "playing" else (" · ♪∥" if music == "paused" else "")
+    title = f"{NAME} ✦ {page.name} ✦  ·  {page_i + 1}/{page_n}  ·  Tab next{mus}"
+    text_w = _body_text_width(width)
 
-def _picker_frame(
-    visible: list[tuple[str, str, str]],
-    sel: int,
-    filt: str,
-    status: str = "",
-) -> str:
-    tw = art.term_width()
-    th = art.term_height()
-    # header
-    head = art.box(
-        [
-            "arrow pick a spell → Enter puts it on the prompt",
-            f"filter: {filt}_",
-            f"showing {len(visible)}  ·  {status}" if status else f"showing {len(visible)}",
-        ],
-        title=NAME.upper(),
-        width=tw,
-        body_style=(P.MUTED,),
+    # Footer first (fixed budget) so main gets the rest of the terminal.
+    chips = [f"[{i + 1}:{r.label}]" for i, r in enumerate(runes)] or ["(no runes)"]
+    chip_line = "  ".join(chips)
+    foot_src = _wrap_rows(
+        [chip_line, "1–9 cast · m music · Tab page · g/G jump · j/k scroll · q quit"],
+        text_w,
     )
-    # list window
-    h = max(8, th - 14)
-    if not visible:
-        rows = ["(no matches — backspace to clear filter)"]
-    else:
-        sel = max(0, min(sel, len(visible) - 1))
-        start = max(0, min(sel - h // 2, max(0, len(visible) - h)))
-        end = min(len(visible), start + h)
-        rows = []
-        name_w = max(12, tw - 14)
-        last_sec = ""
-        for i in range(start, end):
-            sec, cmd, blurb = visible[i]
-            if sec != last_sec:
-                rows.append(f"-- {sec} --")
-                last_sec = sec
-            mark = "> " if i == sel else "  "
-            line = f"{mark}{cmd}  -  {blurb}"
-            rows.append(art.strip_ansi(art.pad_vis(line, name_w)).rstrip())
-    body = art.box(
-        rows,
-        title="spells",
-        width=tw,
+    # outer height = 2 chrome + body lines
+    foot_h = 2 + max(2, len(foot_src))
+    gap = 1
+    main_h = height - foot_h - gap
+    if main_h < 6:
+        # tiny zoom: shrink footer to bare minimum
+        foot_src = _wrap_rows([chip_line[: max(8, text_w)]], text_w)[:1]
+        foot_src.append("j/k scroll · Tab · q")
+        foot_h = 2 + len(foot_src)
+        main_h = max(5, height - foot_h - gap)
+
+    max_inner = max(2, main_h - 2)  # rows inside main borders
+    body = _page_body_lines(page, text_w)
+    window, body_off, _, _ = _window_rows(body, body_off, max_inner)
+
+    main = art.panel(
+        window,
+        title=title,
+        width=width,
+        height=main_h,
+        focus=True,
         body_style=(P.SILVER,),
     )
-    runes = art.box(
-        [
-            "up/dn move | type filter | backspace erase | Ctrl-U clear filter",
-            "Enter select | Esc / q leave",
-        ],
+    foot = art.panel(
+        foot_src,
         title="runes",
-        width=tw,
+        width=width,
+        height=foot_h,
+        focus=False,
         body_style=(P.MUTED,),
     )
-    return "\n".join([head, "", body, "", runes])
+
+    # Ensure combined frame never exceeds terminal height (panel is exact).
+    main_lines = main.count("\n") + 1
+    foot_lines = foot.count("\n") + 1
+    total = main_lines + gap + foot_lines
+    if total > height:
+        # trim main height
+        overflow = total - height
+        main_h = max(5, main_h - overflow)
+        max_inner = max(2, main_h - 2)
+        window, body_off, _, _ = _window_rows(body, body_off, max_inner)
+        main = art.panel(
+            window, title=title, width=width, height=main_h, focus=True, body_style=(P.SILVER,)
+        )
+        main_lines = main.count("\n") + 1
+
+    foot_top = main_lines + gap  # 1-based y of foot top border
+    x = 3
+    for i, r in enumerate(runes):
+        lab = f"[{i + 1}:{r.label}]"
+        w = min(art.vis_len(lab) + 1, width - 2)
+        hitmap.add(
+            art.Region(
+                id=f"rune:{i}",
+                x0=x,
+                y0=foot_top + 1,
+                x1=min(width, x + w),
+                y1=foot_top + 1,
+                z=2,
+                role="rune",
+                data=i,
+            )
+        )
+        x += w + 2
+        if x >= width - 4:
+            break
+
+    frame = "\n".join([main, "", foot] if gap else [main, foot])
+    # Final safety: drop trailing blank lines if still over height
+    fl = frame.splitlines()
+    if len(fl) > height:
+        frame = "\n".join(fl[:height])
+    return frame, hitmap, runes, body_off
 
 
-def run_picker() -> int:
-    """Arrow-key selector. UI on /dev/tty; chosen insert on stdout."""
+def render_path_page(
+    visible: list[tuple[str, str]],
+    sel: int,
+    filt: str,
+    page_i: int,
+    page_n: int,
+    width: int,
+    height: int,
+) -> tuple[str, art.HitMap]:
+    hitmap = art.HitMap()
+    title = f"{NAME} ✦ PATH ✦  ·  {page_i + 1}/{page_n}  ·  Tab wraps to start"
+    text_w = _body_text_width(width)
+    head_src = _wrap_rows(
+        [
+            "System launcher — type to filter · Enter puts the name on your prompt.",
+            f"filter: {filt}_",
+            f"showing {len(visible)}  ·  Shift-Tab back through the book",
+        ],
+        text_w,
+    )
+    foot_src = _wrap_rows(
+        ["Enter / double-click → print · m music · Tab cycle · q quit"],
+        text_w,
+    )
+    head_h = 2 + max(2, len(head_src))
+    foot_h = 2 + max(1, len(foot_src))
+    gap = 1
+    list_h = max(5, height - head_h - foot_h - 2 * gap)
+    if head_h + list_h + foot_h + 2 * gap > height:
+        list_h = max(4, height - head_h - foot_h - 2 * gap)
+
+    inner = max(2, list_h - 2)
+    start = end = 0
+    lines: list[str] = []
+    if not visible:
+        lines = ["  (no matches — ⌫ clear filter)"]
+    else:
+        sel = max(0, min(sel, len(visible) - 1))
+        start = max(0, min(sel - inner // 2, max(0, len(visible) - inner)))
+        end = min(len(visible), start + inner)
+        for i in range(start, end):
+            name, path = visible[i]
+            mark = art.focus_mark(i == sel)
+            line = art.truncate_vis(f"{mark}{name:<22} {path}", text_w)
+            lines.append(art.paint(line, P.PINK) if i == sel else line)
+
+    head = art.panel(head_src, title=title, width=width, height=head_h, focus=True)
+    body = art.panel(lines, title="path", width=width, height=list_h, focus=False)
+    foot = art.panel(
+        foot_src, title="runes", width=width, height=foot_h, focus=False, body_style=(P.MUTED,)
+    )
+    head_lines = head.count("\n") + 1
+    y = head_lines + gap  # list panel top
+    if visible and end > start:
+        for bi, idx in enumerate(range(start, end)):
+            hitmap.add(
+                art.Region(
+                    id=f"path:{idx}",
+                    x0=1,
+                    y0=y + 1 + bi,
+                    x1=max(1, width),
+                    y1=y + 1 + bi,
+                    z=2,
+                    role="path",
+                    data=idx,
+                )
+            )
+    frame = "\n".join([head, "", body, "", foot])
+    fl = frame.splitlines()
+    if len(fl) > height:
+        frame = "\n".join(fl[:height])
+    return frame, hitmap
+
+
+def _match(q: str, *parts: str) -> bool:
+    q = q.strip().lower()
+    if not q:
+        return True
+    hay = " ".join(parts).lower()
+    return all(t in hay for t in q.split())
+
+
+# ── TUI ────────────────────────────────────────────────────────────────
+
+def run_tui(*, start_path: bool = False) -> int:
     fd = art.tui_open_tty()
     if fd is None:
-        # non-interactive: dump list
-        return print_list_box()
+        return print_list()
 
     art.tui_begin(fd, NAME)
-
-    catalog = all_entries()
-    filt = ""
-    sel = 0
-    status = ""
+    leaves = book_pages()
+    page_i = len(leaves) - 1 if start_path else 0
+    body_off = 0
+    path_filt = ""
+    path_sel = 0
+    jump_mode = ""  # "" | "g" | "G"
+    dbl = art.DoubleClickTracker(ms=350)
+    amb = fae_ambience.for_app("scroll")
+    # Gentle town loop while reading; own mpv socket — never Siren's.
+    amb.start(paused=False)
 
     try:
         while True:
-            visible = _filter_entries(catalog, filt)
-            if sel >= len(visible):
-                sel = max(0, len(visible) - 1)
-            frame = _picker_frame(visible, sel, filt, status)
-            status = ""
+            leaves = book_pages()  # refresh hatch mid-session
+            if page_i >= len(leaves):
+                page_i = len(leaves) - 1
+            if page_i < 0:
+                page_i = 0
+            tw, th = frame_size()
+            leaf = leaves[page_i]
+            n = len(leaves)
+            mus = amb.status()
+
+            if leaf == PATH_ID:
+                vis = [(a, b) for a, b in path_entries() if _match(path_filt, a, b)]
+                if path_sel >= len(vis):
+                    path_sel = max(0, len(vis) - 1)
+                frame, hitmap = render_path_page(
+                    vis, path_sel, path_filt, page_i, n, tw, th
+                )
+                runes: list[Rune] = []
+            else:
+                assert isinstance(leaf, AppPage)
+                frame, hitmap, runes, body_off = render_app_page(
+                    leaf, page_i, n, body_off, tw, th, music=mus
+                )
+
             try:
                 art.paint_frame(fd, frame)
             except OSError:
-                # fallback paint
                 art.tty_write(fd, art.clear_screen() + frame + "\n")
 
-            key = art.tui_read_key(fd)
-            if key in ("q", "Q", "esc", "ctrl-c"):
+            ev = art.tui_read_event(fd, timeout=0.5)
+            if isinstance(ev, art.MouseEvent):
+                jump_mode = ""
+                delta = art.wheel_delta(ev)
+                if delta:
+                    if leaf == PATH_ID:
+                        vis = [
+                            (a, b)
+                            for a, b in path_entries()
+                            if _match(path_filt, a, b)
+                        ]
+                        if vis:
+                            path_sel = max(0, min(len(vis) - 1, path_sel - delta))
+                    else:
+                        body_off = max(0, body_off - delta * 2)
+                    continue
+                if ev.action != "press" or ev.button != 0:
+                    continue
+                region = hitmap.hit(ev.x, ev.y)
+                if region is None:
+                    continue
+                if region.role == "rune" and isinstance(region.data, int):
+                    i = region.data
+                    if 0 <= i < len(runes) and runes[i].insert:
+                        amb.stop()
+                        return run_cmdline(runes[i].insert)
+                if region.role == "path" and isinstance(region.data, int):
+                    vis = [
+                        (a, b)
+                        for a, b in path_entries()
+                        if _match(path_filt, a, b)
+                    ]
+                    i = region.data
+                    if 0 <= i < len(vis):
+                        path_sel = i
+                        if dbl.is_double(region.id):
+                            amb.stop()
+                            return emit_path_name(vis[i][0])
+                continue
+
+            key = ev
+            if not key:
+                continue
+
+            # page jump chords
+            if jump_mode in ("g", "G") and key in "0123456789":
+                base = 10 if jump_mode == "g" else 20
+                # 1→11/21, … 9→19/29, 0→20/30
+                off = 10 if key == "0" else int(key)
+                target = base + (0 if key == "0" else off) - 1
+                # g1 = 11 → index 10; formula: base + digit, digit 1..9 → +1..+9, 0 → +10
+                if key == "0":
+                    target = base + 9  # 20th or 30th page (1-based 20/30 → index 19/29)
+                else:
+                    target = base + int(key) - 1  # g1 → 10 (page 11)
+                page_i = max(0, min(len(leaves) - 1, target))
+                body_off = 0
+                path_filt = ""
+                jump_mode = ""
+                continue
+            if key == "g":
+                jump_mode = "g"
+                continue
+            if key == "G":
+                jump_mode = "G"
+                continue
+            if jump_mode and key not in "0123456789":
+                jump_mode = ""
+
+            if key in ("q", "Q", "ctrl-c"):
+                amb.stop()
                 art.tui_cleanup()
                 return 1
+            # Music: m on app pages; ctrl-p everywhere (path filter keeps m free for typing)
+            if key == "ctrl-p" or (key == "m" and leaf != PATH_ID):
+                amb.toggle()
+                continue
+            if key == "tab":
+                page_i = (page_i + 1) % len(leaves)
+                body_off = 0
+                path_filt = ""
+                path_sel = 0
+                continue
+            if key == "shift-tab":
+                page_i = (page_i - 1) % len(leaves)
+                body_off = 0
+                path_filt = ""
+                path_sel = 0
+                continue
+
+            if leaf == PATH_ID:
+                vis = [(a, b) for a, b in path_entries() if _match(path_filt, a, b)]
+                if key in ("up", "k"):
+                    path_sel = max(0, path_sel - 1)
+                elif key in ("down", "j"):
+                    path_sel = min(max(0, len(vis) - 1), path_sel + 1)
+                elif key == "enter":
+                    if vis:
+                        amb.stop()
+                        return emit_path_name(vis[path_sel][0])
+                elif key == "backspace":
+                    path_filt = path_filt[:-1]
+                    path_sel = 0
+                elif key in ("ctrl-u", "clear"):
+                    path_filt = ""
+                    path_sel = 0
+                elif key == "space":
+                    path_filt += " "
+                    path_sel = 0
+                elif len(key) == 1 and key.isprintable():
+                    path_filt += key
+                    path_sel = 0
+                continue
+
+            # app page
             if key in ("up", "k"):
-                sel = max(0, sel - 1)
+                body_off = max(0, body_off - 1)
             elif key in ("down", "j"):
-                sel = min(max(0, len(visible) - 1), sel + 1)
+                body_off += 1
+            elif key in "123456789":
+                i = int(key) - 1
+                if 0 <= i < len(runes) and runes[i].insert:
+                    amb.stop()
+                    return run_cmdline(runes[i].insert)
             elif key == "enter":
-                if not visible:
-                    status = "(nothing to cast)"
-                    continue
-                cmd = visible[sel][1]
-                insert = insert_text(cmd)
-                art.tui_cleanup()
-                # selection → stdout only (shell captures for print -z)
-                print(insert)
-                return 0
-            elif key == "backspace":
-                filt = filt[:-1]
-                sel = 0
-            elif key in ("clear", "ctrl-u"):  # termart: ^U → ctrl-u
-                filt = ""
-                sel = 0
-            elif key == "delete":
-                pass
-            elif len(key) == 1 and key.isprintable():
-                filt += key
-                sel = 0
-            elif key == "space":
-                filt += " "
-                sel = 0
-            # ignore other keys
-    except Exception:
-        art.tui_cleanup()
-        raise
+                if runes and runes[0].insert:
+                    amb.stop()
+                    return run_cmdline(runes[0].insert)
     finally:
-        art.tui_cleanup()
-
-
-def run_fzf_picker() -> int:
-    """Optional fzf path (fixed: UI on tty, selection on stdout only)."""
-    if not shutil.which("fzf"):
-        return run_picker()
-
-    art.tui_screen_hold(True, NAME)
-    atexit.register(lambda: art.tui_screen_hold(False, NAME))
-
-    lines = []
-    for section, cmd, blurb in all_entries():
-        ins = insert_text(cmd)
-        display = f"{cmd}  -  {blurb}  [{section}]"
-        lines.append(f"{ins}\t{display}")
-
-    env = {
-        **os.environ,
-        "FZF_DEFAULT_OPTS": (
-            "--color=fg:#c0c0c8,bg:#1a0a12,hl:#e879a0,fg+:#ffebf2,bg+:#2a1520,"
-            "hl+:#ff2d55,info:#9d5c75,prompt:#e879a0,pointer:#ffb020,"
-            "marker:#3dd68c,spinner:#c44d7a,header:#c44d7a"
-        ),
-    }
-    cmd = [
-        "fzf",
-        "--height=80%",
-        "--layout=reverse",
-        "--border=rounded",
-        "--ansi",
-        "--delimiter=\t",
-        "--with-nth=2",
-        "--nth=2",
-        f"--header={NAME}  ·  up/dn move  ·  type filter  ·  Enter select  ·  Esc quit",
-        f"--prompt={NAME} > ",
-        "--info=inline",
-        "--cycle",
-    ]
-    try:
-        # CRITICAL: do not capture stderr — fzf UI needs a real TTY.
-        # Only stdout is the selection (zsh captures it).
-        tty_out = open("/dev/tty", "w", encoding="utf-8", errors="replace")
+        amb.stop()
         try:
-            proc = subprocess.run(
-                cmd,
-                input="\n".join(lines) + "\n",
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=tty_out,
-                env=env,
-            )
-        finally:
-            tty_out.close()
-    except (FileNotFoundError, OSError):
-        art.tui_screen_hold(False, NAME)
-        return run_picker()
-
-    art.tui_screen_hold(False, NAME)
-    if proc.returncode != 0:
-        return 1 if proc.returncode in (1, 130) else proc.returncode
-    sel = (proc.stdout or "").strip()
-    if not sel:
-        return 1
-    insert = sel.split("\t", 1)[0]
-    print(insert)
-    return 0
+            art.tui_cleanup()
+        except Exception:
+            pass
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        prog=NAME,
-        description="Scroll — themed command directory (arrow pick → prompt)",
-    )
-    ap.add_argument(
-        "mode",
-        nargs="?",
-        default="pick",
-        help="pick (default) | list | menu | board | fzf",
-    )
-    ap.add_argument("--list", "-l", action="store_true", help="static board once")
-    ap.add_argument("--menu", action="store_true", help="raw lines")
-    ap.add_argument(
-        "--fzf",
-        action="store_true",
-        help="use fzf instead of built-in arrow picker",
-    )
-    ap.add_argument(
-        "--board",
-        action="store_true",
-        help="static board then wait for a key (legacy)",
-    )
-    args = ap.parse_args()
-    mode = (args.mode or "pick").lower()
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    is_summon = os.environ.get("FAE_SCROLL_TAB", "").lower() in ("path", "summon", "1")
 
-    if args.menu or mode == "menu":
-        print_menu_lines()
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__)
         return 0
-    if args.list or mode in ("list", "ls"):
-        return print_list_box()
-    if args.board or mode == "board":
-        # legacy view-only board
-        print_list_box()
-        print()
-        print("  (view only — run scroll for arrow pick)")
+    if argv and argv[0] == "--refresh":
+        write_cache(scan_path())
+        print(f"{NAME}: PATH cache {len(read_cache())} commands", file=sys.stderr)
         return 0
-    if args.fzf or mode == "fzf":
-        return run_fzf_picker()
-    # default: built-in arrow picker (works on kmscon without fzf TTY quirks)
-    if mode in ("pick", "i", "interactive", ""):
-        return run_picker()
-    # unknown mode → picker
-    return run_picker()
+    if argv and argv[0] in ("-l", "--list", "list"):
+        if is_summon or "--path" in argv:
+            for n, _ in path_entries():
+                print(n)
+            return 0
+        return print_list()
+
+    start_path = is_summon
+    run_now = False
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-x", "--exec"):
+            run_now = True
+            i += 1
+            continue
+        if a in ("--path", "-p", "path"):
+            start_path = True
+            i += 1
+            continue
+        rest.append(a)
+        i += 1
+
+    if run_now and rest:
+        hits = [n for n, p in path_entries() if _match(rest[0], n, p)]
+        hits.sort(key=lambda n: (0 if n.lower().startswith(rest[0].lower()) else 1, n))
+        if not hits:
+            print(f"summon: no match for {rest[0]!r}", file=sys.stderr)
+            return 1
+        return run_cmdline(" ".join([hits[0], *rest[1:]]))
+
+    # pre-filter on path if summon foo
+    if start_path and rest:
+        # open path page; filter applied by stuffing via env is overkill —
+        # just run TUI; user can type. Optional: we could set initial filter.
+        pass
+
+    return run_tui(start_path=start_path)
 
 
 if __name__ == "__main__":
@@ -512,5 +771,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except KeyboardInterrupt:
         art.tui_cleanup()
-        print()
         raise SystemExit(130)

@@ -1,18 +1,22 @@
-# Kur — haiku dragon (easter egg)
+# Hidden familiar (egg)
 
-**Role:** 10,000-year-old dragon who only speaks in haiku. Local LLM (smollm2-360m) + TTS voice. **Easter egg — hidden from `scroll`, discovered by the curious.**
+**Role:** A small local haiku/voice familiar, productized as a **hatchable quest**.  
+**Status:** engine stable · leaf sealed until hatch
 
-**Status:** stable
+## Architecture (no quest solution)
 
-## Current
-- `kur` — haiku generation (local LLM + voice), `kur-server` (systemd, port 8083, `/generate`), `kur_voice.py`
-- Model: `smollm2-360m-instruct-q4_k_m.gguf` (~350MB) on port 8081 — kur's own menagerie instance; cold-start self-heals with `menagerie ensure kur` and waits for the model instead of falling back to the canned haiku
-- AI apps are independent: kur talks to its own instance, not imp's server
+| Piece | Role |
+|-------|------|
+| Scroll **Sealed Leaf** | Quest hook — egg in the Menagerie; points at `murmur` |
+| `murmur` | Babbling glass (mostly gibberish; rare clean shards) |
+| `~/.local/share/faeos/eggs/dragon.json` | Hatch flag after first successful true-name speech |
+| `bin/vendor/smoltide*` | Opaque backends until cascade rename |
+| `kur` / menagerie profile | True name — not taught by docs |
 
-## Next
-- [ ] Haiku quality pass (prompt/temperature tuning)
-- [ ] **Better TTS** — current piper voice "sucks"; candidates: kokoro (local, better quality, ~350MB) or higher-quality piper voice models. Until then piper libs stay local in `~/bin` (not shipped by install.sh)
-- [ ] Keep hidden: no scroll entry, no README table row (only plan docs)
+**Hatch:** only after the player completes the in-world tasks (wake the pen, speak the name). Murmur never hatches alone.
 
-## Notes
-- If someone runs `scroll` and finds no kur, that's the feature.
+**Policy:** Do **not** commit solve paths, ciphers, keyword tables, or step-by-step rituals in this repo.
+
+## Engine (post-discovery)
+
+- Voice ~8083 · LLM profile in menagerie · small instruct model  

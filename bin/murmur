@@ -1,0 +1,1339 @@
+#!/usr/bin/env python3
+"""murmur — the babbling glass (Moonring-style NPC).
+
+Sit with the glass. Speak. Mostly noise. Sometimes a clean word falls through.
+
+    murmur                  conversation TUI (default)
+    murmur "ash and egg"    one exchange, then exit
+    murmur -h               unhelpful flavor
+
+Never a walkthrough. Never the true name of the egg.
+"""
+from __future__ import annotations
+
+import json
+import os
+import random
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / "bin"))
+os.environ.setdefault("PIXIE_UNICODE", "1")
+
+import fae_termart as art  # noqa: E402
+from fae_termart import Palette as P
+import fae_ambience  # noqa: E402
+
+NAME = "murmur"
+STATE_DIR = (
+    Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    / "faeos"
+    / "murmur"
+)
+STATE_FILE = STATE_DIR / "glass.json"
+LOG_CAP = 220
+IDLE_TICKS = 12  # ~6s at 0.5s poll
+MAX_BUF = 400
+
+# ── voice material ─────────────────────────────────────────────────────
+
+_SYL = (
+    "xa zor thul mirr vek saan oth kel dru vash nyr im bael "
+    "quor sith umbr eld grae vyn keth sol um yll pha tor "
+    "ae on ul ir ess aen ioth uth skar vorr linn shael mor "
+    "ketha umbril vae niss orum thren sil vael orr neth".split()
+)
+
+# Keyword → shard pools. Ingredients only — never a full ritual / true name.
+_ORACLES: dict[str, list[str]] = {
+    "silence": ["three", "quiet", "listen", "hold"],
+    "quiet": ["hours", "pen", "wait", "keep"],
+    "ash": ["rites", "under", "fire", "grey"],
+    "fire": ["pen", "wake", "ash", "warm"],
+    "mercury": ["name", "flow", "change", "quick"],
+    "salt": ["fix", "keep", "body", "earth"],
+    "sulfur": ["soul", "speak", "burn", "bright"],
+    "leaf": ["spine", "seal", "egg", "last"],
+    "seal": ["leaf", "wait", "glass", "closed"],
+    "sealed": ["leaf", "patience", "egg", "spine"],
+    "glass": ["babble", "soft", "speech", "crack"],
+    "babble": ["soft", "speech", "again", "fog"],
+    "soft": ["speech", "again", "listen"],
+    "speech": ["shell", "once", "mouth"],
+    "nonsense": ["ash", "patience", "again", "noise"],
+    "gibberish": ["feed", "ash", "again", "noise"],
+    "dragon": ["haiku", "three", "old", "sleeps"],
+    "egg": ["warm", "menagerie", "hatch", "sleeps"],
+    "hatch": ["speak", "once", "name", "warm"],
+    "pen": ["wake", "menagerie", "small", "quiet"],
+    "pens": ["wake", "menagerie", "many"],
+    "menagerie": ["ensure", "pen", "egg", "pens"],
+    "ensure": ["pen", "name", "wake", "call"],
+    "wake": ["pen", "ensure", "speak", "rise"],
+    "speak": ["shell", "once", "name", "aloud"],
+    "shell": ["speak", "once", "open"],
+    "name": ["three", "letters", "old", "short"],
+    "letters": ["three", "short", "few"],
+    "three": ["lines", "letters", "haiku", "beats"],
+    "lines": ["three", "haiku", "verse"],
+    "haiku": ["three", "lines", "voice", "brief"],
+    "voice": ["port", "daemon", "pen", "throat"],
+    "small": ["model", "pen", "quiet", "brief"],
+    "model": ["small", "pen", "wake", "mind"],
+    "port": ["voice", "daemon", "gate"],
+    "scroll": ["leaf", "egg", "last", "book"],
+    "book": ["leaf", "spine", "pages"],
+    "worth": ["patience", "ash", "again", "time"],
+    "true": ["name", "speak", "short"],
+    "kettle": ["sings", "three", "steam"],
+    "smoke": ["ash", "rites", "grey"],
+    "hour": ["quiet", "three", "sand"],
+    "hours": ["quiet", "keep", "long"],
+    "rite": ["ash", "under", "old"],
+    "rites": ["ash", "under", "old"],
+    "old": ["name", "dragon", "pen", "long"],
+    "sleep": ["wake", "pen", "egg", "dream"],
+    "sleeps": ["wake", "pen", "still"],
+    "pulse": ["house", "sleeps", "beat"],
+    "house": ["pen", "egg", "walls"],
+    "warm": ["egg", "name", "speak", "hands"],
+    "warmth": ["egg", "attention", "not-heat"],
+    "attention": ["name", "egg", "look"],
+    "murmur": ["glass", "listen", "again", "me"],
+    "hello": ["who", "noise", "…"],
+    "hi": ["…", "noise", "who"],
+    "hey": ["…", "static"],
+    "help": ["noise", "listen", "ash", "no"],
+    "please": ["patience", "again", "soft"],
+    "thanks": ["…", "static", "ok"],
+    "thank": ["…", "static"],
+    "what": ["noise", "egg", "pen", "?"],
+    "who": ["glass", "house", "?"],
+    "why": ["worth", "patience", "?"],
+    "where": ["pens", "leaf", "spine"],
+    "when": ["patience", "once", "after"],
+    "how": ["listen", "ash", "again"],
+    "yes": ["…", "maybe", "fog"],
+    "no": ["…", "fog", "still"],
+    "maybe": ["fog", "stir"],
+    "love": ["warm", "egg", "soft"],
+    "hate": ["ash", "static", "cold"],
+    "afraid": ["quiet", "wait", "listen"],
+    "fear": ["quiet", "ash"],
+    "dream": ["sleep", "egg", "fog"],
+    "song": ["three", "voice", "haiku"],
+    "sing": ["three", "voice"],
+    "poem": ["three", "lines", "haiku"],
+    "fae": ["house", "glass", "pens"],
+    "pixie": ["noise", "other", "pen"],
+    "siren": ["song", "other", "wave"],
+    "imp": ["paint", "other", "noise"],
+    "path": ["shell", "walk", "many"],
+    "summon": ["path", "call", "many"],
+    "open": ["shell", "leaf", "once"],
+    "close": ["fog", "seal", "dull"],
+    "listen": ["quiet", "three", "soft"],
+    "feed": ["ash", "speech", "again"],
+    "word": ["name", "short", "one"],
+    "words": ["many", "noise", "few"],
+    "secret": ["leaf", "name", "quiet"],
+    "hidden": ["egg", "leaf", "pen"],
+    "find": ["listen", "ash", "patience"],
+    "lost": ["fog", "path", "again"],
+    # emotions / body / house (volume without recipe)
+    "lonely": ["glass", "fog", "sit"],
+    "curious": ["listen", "ash", "again"],
+    "patience": ["ash", "quiet", "worth"],
+    "patient": ["quiet", "hours", "wait"],
+    "angry": ["static", "ash", "cold"],
+    "sad": ["fog", "soft", "quiet"],
+    "hope": ["warm", "egg", "wait"],
+    "hopeful": ["warm", "wait"],
+    "doubt": ["fog", "again", "listen"],
+    "trust": ["sit", "soft", "again"],
+    "remember": ["ash", "shape", "not-name"],
+    "forget": ["fog", "static", "again"],
+    "blood": ["warm", "rite", "old"],
+    "bone": ["keep", "body", "earth"],
+    "breath": ["three", "soft", "speak"],
+    "breathe": ["soft", "quiet", "three"],
+    "mouth": ["speak", "once", "shape"],
+    "ear": ["listen", "quiet", "hold"],
+    "hand": ["warm", "egg", "touch"],
+    "hands": ["warm", "egg", "touch"],
+    "touch": ["warm", "soft", "egg"],
+    "nest": ["egg", "pen", "warm"],
+    "cradle": ["egg", "warm", "hold"],
+    "keeper": ["pen", "menagerie", "watch"],
+    "keepers": ["pen", "many", "quiet"],
+    "tourist": ["noise", "no", "map"],
+    "map": ["no", "fog", "noise"],
+    "key": ["name", "short", "not-here"],
+    "lock": ["leaf", "name", "wait"],
+    "door": ["shell", "once", "open"],
+    "gate": ["port", "voice", "wait"],
+    "mirror": ["glass", "fog", "self"],
+    "window": ["glass", "house", "look"],
+    "wall": ["house", "pen", "still"],
+    "walls": ["house", "keep"],
+    "floor": ["ash", "under", "sit"],
+    "ceiling": ["fog", "high", "still"],
+    "night": ["quiet", "hours", "listen"],
+    "day": ["fog", "still", "work"],
+    "moon": ["glass", "soft", "watch"],
+    "sun": ["warm", "not-heat", "egg"],
+    "star": ["small", "far", "name"],
+    "stars": ["many", "quiet", "far"],
+    "river": ["flow", "name", "change"],
+    "stone": ["keep", "wait", "old"],
+    "iron": ["cold", "keep", "body"],
+    "gold": ["bright", "not-worth", "noise"],
+    "silver": ["glass", "soft", "pane"],
+    "crystal": ["glass", "crack", "listen"],
+    "oracle": ["noise", "shard", "maybe"],
+    "prophecy": ["no", "shard", "fog"],
+    "riddle": ["listen", "ash", "again"],
+    "puzzle": ["no", "map", "sit"],
+    "code": ["noise", "not", "here"],
+    "password": ["no", "noise", "leave"],
+    "daemon": ["voice", "port", "sleep"],
+    "server": ["voice", "pen", "sleep"],
+    "whisper": ["soft", "speech", "again"],
+    "shout": ["static", "no", "too-loud"],
+    "call": ["pen", "name", "wake"],
+    "answer": ["noise", "maybe", "shard"],
+    "question": ["fog", "again", "?"],
+    "truth": ["short", "name", "once"],
+    "lie": ["fog", "static", "many"],
+    "void": ["fog", "quiet", "hold"],
+    "empty": ["fog", "sit", "still"],
+    "full": ["noise", "too-much", "ash"],
+    "begin": ["sit", "speak", "ash"],
+    "end": ["fog", "leave", "seat"],
+    "again": ["ash", "patience", "feed"],
+    "still": ["quiet", "egg", "wait"],
+    "alive": ["warm", "pulse", "egg"],
+    "dead": ["ash", "quiet", "cold"],
+    "ghost": ["fog", "glass", "echo"],
+    "spirit": ["name", "soft", "old"],
+    "familiar": ["egg", "pen", "house"],
+    "pet": ["pen", "not", "simple"],
+    "beast": ["pen", "sleeps", "old"],
+    "wyrm": ["egg", "old", "sleep"],
+    "serpent": ["egg", "coil", "wait"],
+    "scale": ["egg", "hard", "warm"],
+    "scales": ["egg", "many", "keep"],
+    "claw": ["wake", "sharp", "later"],
+    "wing": ["later", "air", "not-yet"],
+    "wings": ["later", "not-yet"],
+    "flame": ["not-heat", "attention", "ash"],
+    "ember": ["ash", "warm", "small"],
+    "coal": ["ash", "under", "keep"],
+    "dust": ["ash", "quiet", "floor"],
+    "sand": ["hour", "quiet", "fall"],
+    "clock": ["hour", "tick", "no"],
+    "tick": ["pulse", "house", "soft"],
+    "tock": ["…", "fog"],
+    "zen": ["quiet", "other", "pen"],
+    "vault": ["keep", "secret", "other"],
+    "tome": ["book", "leaf", "other"],
+    "grimoire": ["book", "rite", "other"],
+    "alchemy": ["salt", "sulfur", "mercury"],
+    "alchemist": ["salt", "sulfur", "mercury"],
+    "ritual": ["ash", "three", "old"],
+    "ceremony": ["ash", "quiet", "three"],
+    "offering": ["speech", "ash", "again"],
+    "gift": ["speech", "soft", "again"],
+    "pray": ["noise", "no", "ash"],
+    "prayer": ["noise", "ash", "no"],
+    "wish": ["egg", "name", "soft"],
+    "want": ["listen", "patience", "ash"],
+    "need": ["listen", "ash", "sit"],
+    "know": ["not-yet", "shard", "fog"],
+    "knows": ["glass", "shape", "not-name"],
+    "unknown": ["fog", "egg", "leaf"],
+    "unknowns": ["fog", "many"],
+    "mystery": ["leaf", "egg", "fog"],
+    "strange": ["glass", "house", "fog"],
+    "weird": ["static", "ok", "sit"],
+    "broken": ["glass", "crack", "still"],
+    "whole": ["not-yet", "fog", "wait"],
+    "piece": ["shard", "glass", "one"],
+    "pieces": ["many", "fog", "ash"],
+    "shard": ["glass", "word", "one"],
+    "shards": ["many", "few", "listen"],
+    "clear": ["rare", "short", "bright"],
+    "cloudy": ["fog", "still", "sit"],
+    "thick": ["fog", "again", "patience"],
+    "thin": ["fog", "maybe", "later"],
+    "thins": ["fog", "bond", "sit"],
+    "notice": ["glass", "sit", "long"],
+    "notices": ["glass", "you", "maybe"],
+    "noticed": ["chair", "fog", "mark"],
+    "chair": ["sit", "fog", "yours"],
+    "seat": ["fog", "warm", "keep"],
+    "sit": ["listen", "ash", "long"],
+    "sitting": ["still", "glass", "notices"],
+    "stay": ["sit", "again", "soft"],
+    "leave": ["fog", "seat", "warm"],
+    "return": ["again", "fog", "thinner"],
+    "home": ["house", "pen", "egg"],
+    "away": ["fog", "path", "back"],
+    "far": ["stars", "name", "quiet"],
+    "near": ["glass", "mouth", "soft"],
+    "inside": ["shell", "egg", "wait"],
+    "outside": ["shell", "speak", "once"],
+    "under": ["ash", "rites", "quiet"],
+    "over": ["fog", "leaf", "spine"],
+    "between": ["pens", "egg", "quiet"],
+    "among": ["pens", "egg", "unlabeled"],
+    "unlabeled": ["egg", "pens", "hide"],
+    "label": ["no", "tourist", "fog"],
+    "status": ["table", "not-this", "noise"],
+    "table": ["status", "not-egg", "lie"],
+    "mind": ["small", "brief", "wake"],
+    "brief": ["three", "name", "haiku"],
+    "long": ["patience", "hours", "sit"],
+    "short": ["name", "three", "letters"],
+    "few": ["letters", "words", "clear"],
+    "many": ["noise", "pens", "fog"],
+    "one": ["once", "name", "shell"],
+    "once": ["speak", "shell", "aloud"],
+    "aloud": ["speak", "shell", "mouth"],
+    "whispered": ["soft", "maybe", "no"],
+    "loud": ["static", "too-much", "no"],
+    "softly": ["speech", "again", "listen"],
+    "hard": ["egg", "scale", "wait"],
+    "easy": ["no", "tourist", "ash"],
+    "harder": ["patience", "again"],
+    "simple": ["no", "noise", "sit"],
+    "complex": ["fog", "ash", "again"],
+    "ready": ["not-yet", "warm", "name"],
+    "unready": ["wait", "ash", "sit"],
+    "soon": ["patience", "fog", "maybe"],
+    "never": ["tourist", "no", "map"],
+    "always": ["fog", "glass", "babble"],
+    "sometimes": ["shard", "clear", "rare"],
+    "rarely": ["clear", "short", "bright"],
+    "often": ["noise", "ash", "feed"],
+    "enough": ["maybe", "sit", "more"],
+    "more": ["ash", "speech", "again"],
+    "less": ["noise", "quiet", "hold"],
+    "nothing": ["fog", "sit", "still"],
+    "something": ["egg", "pen", "listens"],
+    "anything": ["noise", "or", "shard"],
+    "everything": ["too-much", "fog", "no"],
+    "none": ["fog", "empty", "still"],
+    "all": ["noise", "house", "pens"],
+    "half": ["shard", "fog", "maybe"],
+}
+
+# Bright-only broken phrases — still no recipe.
+_PHRASES = (
+    "pen waits",
+    "wake the pens",
+    "name is short",
+    "three lines",
+    "egg sleeps",
+    "warm the egg",
+    "speak once",
+    "shell listens",
+    "ash under",
+    "quiet hours",
+    "menagerie pens",
+    "not heat — attention",
+    "call the pen",
+    "brief mind",
+    "fog thins",
+    "hands warm",
+    "mouth shapes",
+    "spine leaf",
+    "sit until noticed",
+    "shard · not map",
+    "unlabeled among pens",
+    "attention · not flame",
+    "glass remembers shape",
+    "chair marked in fog",
+    "short old name",
+    "once at the shell",
+    "keepers do not label",
+    "leaf will not hatch",
+    "soft speech again",
+    "grey rites under",
+    "port sleeps · voice later",
+    "worth is sitting",
+    "noise keeps the seat",
+    "crack listens back",
+    "few letters · many hours",
+    "warmth without fire",
+    "the pane leans in",
+    "still not a syllabus",
+)
+
+# Multi-hit theme combos → stronger NPC “noticing” (still cryptic)
+_THREADS: list[tuple[frozenset[str], list[str]]] = [
+    (frozenset({"egg", "menagerie"}), ["pens hide warmth", "unlabeled · waits", "egg among pens"]),
+    (frozenset({"egg", "warm"}), ["attention not fire", "hands · not flame", "warm · wait"]),
+    (frozenset({"pen", "wake"}), ["call it · rise", "ensure · open", "wake · speak"]),
+    (frozenset({"speak", "shell"}), ["once · aloud", "shell · listen", "name · once"]),
+    (frozenset({"three", "haiku"}), ["brief · three", "lines · breath", "short song"]),
+    (frozenset({"ash", "silence"}), ["under · quiet", "grey · hold", "rites · hush"]),
+    (frozenset({"name", "three"}), ["letters · few", "short · old", "three · shape"]),
+    (frozenset({"glass", "egg"}), ["pane · nest", "crack · wait", "fog · shell"]),
+    (frozenset({"listen", "quiet"}), ["hold · three", "soft · hours", "ear · ash"]),
+    (frozenset({"menagerie", "pen"}), ["many pens · one quiet", "call · ensure", "wake · pen"]),
+    (frozenset({"egg", "name"}), ["short · warm", "name · sleeps", "not tourist"]),
+    (frozenset({"leaf", "seal"}), ["spine · closed", "leaf · wait", "seal · glass"]),
+    (frozenset({"speak", "name"}), ["once · shape", "mouth · short", "aloud · careful"]),
+    (frozenset({"ash", "egg"}), ["rites · nest", "grey · warm", "under · shell"]),
+    (frozenset({"sit", "glass"}), ["chair · marked", "pane · notices", "long · fog"]),
+    (frozenset({"warm", "attention"}), ["not heat", "look · egg", "hands · wait"]),
+    (frozenset({"voice", "pen"}), ["throat · pen", "daemon · later", "brief · mind"]),
+    (frozenset({"salt", "sulfur"}), ["body · soul", "earth · burn", "pair · old"]),
+    (frozenset({"mercury", "name"}), ["flow · change", "quick · short", "name · fluid"]),
+    (frozenset({"hatch", "speak"}), ["not yet · mouth", "warm · then once", "speak · after"]),
+    (frozenset({"scroll", "leaf"}), ["last · spine", "book · egg", "leaf · admits"]),
+    (frozenset({"quiet", "hours"}), ["three · sand", "hold · long", "keep · hush"]),
+]
+
+_GREET = (
+    "the glass fog clears · xa thul mirr …",
+    "… something listens · or pretends to …",
+    "soft static. feed it speech.",
+    "the babbling glass hums.",
+    "a crack of quiet. then noise.",
+    "… the house bleeds through the fog …",
+    "fog on the glass. your mouth opens first.",
+    "it does not bow. it crackles.",
+)
+
+_GREET_RETURN = (
+    "you again · fog thinner",
+    "the glass remembers a shape · not a name",
+    "… back · static leans in …",
+    "hum resumes · incomplete",
+)
+
+_BYE = (
+    "… umbr eld …",
+    "static folds shut.",
+    "the glass goes dull.",
+    "…",
+    "fog takes the rest.",
+    "noise keeps your seat warm.",
+)
+
+_TIRED = (
+    "… again …",
+    "the glass has heard that ash before",
+    "same static · different mouth",
+    "… you already fed it that …",
+    "echo · not new",
+    "it turns the same shard over",
+)
+
+_IDLE = (
+    "… thul …",
+    "the glass ticks without a clock",
+    "xa · … · mirr",
+    "fog breathes",
+    "…",
+    "a hairline crack cools",
+    "static rearranges itself",
+)
+
+_IDLE_THEMED = {
+    "egg": ("warmth without fire …", "… something waits in a pen …", "soft shell-noise"),
+    "speak": ("… mouth …", "once · maybe", "shell · hush"),
+    "ash": ("grey settles", "… under …", "rites without priest"),
+    "other": ("…", "xa thul", "fog leans"),
+}
+
+_MOOD_GLYPH = {
+    "fog": "fog",
+    "stir": "stir",
+    "bright": "clear",
+}
+
+# Meta-asks → mockery only (zero spoilers, zero true name)
+_META_KEYS = frozenset({
+    "help", "hint", "hints", "spoiler", "spoilers", "solve", "solution",
+    "answer", "answers", "cheat", "walkthrough", "tutorial", "guide",
+    "how", "please", "tell", "explain", "whatis", "whats",
+})
+_META_PHRASES = (
+    "tell me the name",
+    "what is the name",
+    "give me a hint",
+    "how do i",
+    "how to",
+    "what do i do",
+    "open the egg",
+    "hatch the egg",
+    "secret command",
+)
+
+_SILENCE_REACT = (
+    "…",
+    "? · fog",
+    "the glass waits · badly",
+    "empty mouth · full static",
+    "… xa …",
+    "a pause · then more fog",
+    "it does not fill silence for free",
+    "… mirr …",
+    "the pane tilts · waiting is not speech",
+)
+
+_REFUSAL = (
+    "no map in the fog",
+    "the glass does not tutor",
+    "ask the noise again · slower",
+    "worth is not a man page",
+    "static refuses the syllabus",
+    "that question tastes like tourist",
+    "… no …",
+    "the pane laughs in grey",
+    "feed ash, not homework",
+    "if it were easy it would already be loud",
+    "spoilers are for other houses",
+    "the glass keeps its teeth",
+    "try sitting · try worse words",
+    "maps burn · shards stay",
+    "your hunger is loud · your offering is thin",
+)
+
+
+# ── session ────────────────────────────────────────────────────────────
+
+Mood = str  # fog | stir | bright
+
+
+@dataclass
+class Session:
+    mood: Mood = "fog"
+    act: int = 0  # 0 fog-heavy · 1 stirred · 2 thin fog (from meaningful hits)
+    heard: set[str] = field(default_factory=set)
+    turns: int = 0
+    meaningful: int = 0  # hits that advanced the glass
+    fog_streak: int = 0
+    last_reply: str = ""
+    last_keys: frozenset[str] = field(default_factory=frozenset)
+    recent_keys: list[str] = field(default_factory=list)  # rolling theme trail
+    phrase_cd: dict[str, int] = field(default_factory=dict)  # phrase → turns until free
+    rng: random.Random = field(default_factory=random.Random)
+    cats: dict[str, int] = field(default_factory=dict)
+    hatched_world: bool = False
+    bond: int = 0  # soft relationship 0..100
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.rng, random.Random):
+            self.rng = random.Random()
+
+    def tick_cooldowns(self) -> None:
+        dead = []
+        for k, v in self.phrase_cd.items():
+            if v <= 1:
+                dead.append(k)
+            else:
+                self.phrase_cd[k] = v - 1
+        for k in dead:
+            self.phrase_cd.pop(k, None)
+
+    def relationship(self) -> int:
+        """0–100 soft bond from this life + soft file."""
+        base = self.bond
+        base += min(40, sum(self.cats.values()) * 2)
+        base += min(20, self.turns)
+        base += min(15, self.meaningful * 2)
+        return max(0, min(100, base))
+
+    def refresh_act(self) -> None:
+        if self.meaningful >= 12 or self.relationship() >= 55:
+            self.act = 2
+        elif self.meaningful >= 5 or self.relationship() >= 25:
+            self.act = 1
+        else:
+            self.act = 0
+
+
+def _load_soft() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _save_soft(sess: Session) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        prev = _load_soft()
+        payload = {
+            "mood": sess.mood,
+            "turns_total": int(prev.get("turns_total", 0)) + sess.turns,
+            "cats": sess.cats,
+            "visits": int(prev.get("visits", 0)) + 1,
+            "meaningful_peak": max(int(prev.get("meaningful_peak", 0)), sess.meaningful),
+            "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(STATE_FILE)
+    except OSError:
+        pass
+    # world flag for Scroll / house (boolean atmosphere only)
+    try:
+        import fae_egg
+        fae_egg.note_murmur_visit(deep_turns=sess.turns)
+    except Exception:
+        pass
+
+
+def new_session() -> Session:
+    soft = _load_soft()
+    s = Session(rng=random.Random())
+    total = int(soft.get("turns_total", 0))
+    visits = int(soft.get("visits", 0))
+    s.bond = min(40, visits * 5 + total // 3)
+    s.meaningful = min(20, int(soft.get("meaningful_peak", 0)) // 2)
+    if total > 20 or visits > 3 or s.bond >= 25:
+        s.mood = "stir"
+    s.cats = {str(k): int(v) for k, v in (soft.get("cats") or {}).items()}
+    s.refresh_act()
+    try:
+        import fae_egg
+        s.hatched_world = bool(fae_egg.is_hatched())
+        if s.hatched_world:
+            s.mood = "stir"
+            s.bond = min(100, s.bond + 15)
+            s.refresh_act()
+    except Exception:
+        pass
+    return s
+
+
+# ── reply pipeline ─────────────────────────────────────────────────────
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def _gibberish(rng: random.Random, words: int = 12) -> str:
+    return " ".join(rng.choice(_SYL) for _ in range(max(3, words)))
+
+
+def _match_keys(offering: str) -> list[str]:
+    toks = _tokens(offering)
+    low = " ".join(toks)
+    found: list[str] = []
+    for key in _ORACLES:
+        if " " in key and key in low:
+            found.append(key)
+    for t in toks:
+        if t in _ORACLES and t not in found:
+            found.append(t)
+    return found
+
+
+def _pick_shard(sess: Session, key: str) -> str:
+    pool = list(_ORACLES.get(key, []))
+    if not pool:
+        return _gibberish(sess.rng, 3)
+    fresh = [p for p in pool if p not in sess.heard]
+    return sess.rng.choice(fresh or pool)
+
+
+def _category(key: str) -> str:
+    if key in ("egg", "hatch", "warm", "warmth", "menagerie", "pen", "pens", "hidden"):
+        return "egg"
+    if key in ("speak", "shell", "name", "letters", "three", "haiku", "lines", "song", "sing"):
+        return "speak"
+    if key in ("ash", "fire", "silence", "quiet", "rites", "rite", "smoke"):
+        return "ash"
+    return "other"
+
+
+def _shift_mood(sess: Session, hits: list[str]) -> None:
+    if not hits:
+        sess.fog_streak += 1
+        if sess.fog_streak >= 3:
+            sess.mood = "fog"
+        elif sess.mood == "bright":
+            sess.mood = "stir"
+        return
+    sess.fog_streak = 0
+    sess.meaningful += 1
+    n = len(set(hits))
+    eggish = any(_category(h) == "egg" for h in hits)
+    # higher act = glass thins faster toward clear
+    if n >= 2 or eggish or sess.act >= 2:
+        sess.mood = "bright"
+    elif sess.mood == "fog":
+        sess.mood = "stir"
+    elif sess.mood == "stir":
+        sess.mood = "bright"
+    sess.refresh_act()
+
+
+def _thread_line(sess: Session, hits: list[str]) -> str | None:
+    """If recent + current keys form a known thread, maybe utter a phrase."""
+    trail = set(sess.recent_keys[-6:]) | set(hits)
+    for need, lines in _THREADS:
+        if need <= trail and sess.rng.random() < 0.55:
+            cand = sess.rng.choice(lines)
+            if cand in sess.phrase_cd:
+                continue
+            return cand
+    return None
+
+
+def _pick_phrase(sess: Session) -> str | None:
+    free = [p for p in _PHRASES if p not in sess.phrase_cd]
+    if not free:
+        return None
+    # higher bond → slightly more phrases available (still random)
+    if sess.relationship() < 15 and sess.rng.random() < 0.35:
+        return None
+    return sess.rng.choice(free)
+
+
+def _mark_phrase_used(sess: Session, phrase: str, cd: int = 5) -> None:
+    sess.phrase_cd[phrase] = cd
+
+
+def _is_meta_ask(offering: str) -> bool:
+    low = offering.lower().strip()
+    if any(p in low for p in _META_PHRASES):
+        return True
+    toks = set(_tokens(offering))
+    # help/hint/solve alone or with please
+    if toks & _META_KEYS:
+        # "how are you" is not a meta spoil request
+        if toks <= {"how", "are", "you", "ya"}:
+            return False
+        if "how" in toks and not (toks & {"name", "hatch", "egg", "open", "solve", "work", "do"}):
+            # bare "how" / "how?" still mildly meta
+            return len(toks) <= 2
+        return True
+    return False
+
+
+def _is_silence(offering: str) -> bool:
+    t = offering.strip()
+    if not t:
+        return True
+    if not _tokens(t) and set(t) <= set("?.!…·. "):
+        return True
+    if t in (".", "..", "...", "…", "?", "??", "???"):
+        return True
+    return False
+
+
+def _compose(sess: Session, hits: list[str], repeat: bool) -> list[str]:
+    rng = sess.rng
+    if repeat and hits:
+        line = rng.choice(_TIRED)
+        fog = _gibberish(rng, rng.randint(3, 8))
+        return [f"{line}  ·  {fog}"]
+
+    if not hits:
+        # act 2: slightly shorter fog; hatched: occasional leaf nod
+        base = 8 + min(18, sess.fog_streak * 2)
+        if sess.act >= 2:
+            base = max(5, base - 3)
+        if sess.hatched_world and rng.random() < 0.28:
+            return [_gibberish(rng, 5), "… leaf loud …"]
+        return [_gibberish(rng, base)]
+
+    shards = [_pick_shard(sess, h) for h in hits]
+    for s in shards:
+        for w in s.split():
+            sess.heard.add(w.lower())
+    for h in hits:
+        sess.cats[_category(h)] = sess.cats.get(_category(h), 0) + 1
+
+    thread = _thread_line(sess, hits)
+    if thread and sess.mood in ("stir", "bright") and rng.random() < 0.5:
+        _mark_phrase_used(sess, thread, cd=6)
+        if rng.random() < 0.4:
+            return [thread]
+        return [thread, _gibberish(rng, rng.randint(3, 6))]
+
+    mood = sess.mood
+    if mood == "fog" or (mood == "stir" and rng.random() < 0.35):
+        shard = rng.choice(shards)
+        fog = _gibberish(rng, rng.randint(4, 10))
+        return [f"{fog}  ·  {shard}"] if rng.random() < 0.5 else [f"{shard}  ·  {fog}"]
+
+    if mood == "stir":
+        k = min(len(shards), rng.randint(1, 2))
+        part = " ".join(rng.sample(shards, k) if len(shards) >= k else shards)
+        if rng.random() < 0.45:
+            return [part]
+        return [f"{part}  ·  {_gibberish(rng, rng.randint(3, 6))}"]
+
+    # bright — phrase with cooldown
+    if rng.random() < 0.42:
+        ph = _pick_phrase(sess)
+        if ph:
+            _mark_phrase_used(sess, ph, cd=5)
+            return [ph]
+    if rng.random() < 0.5:
+        return [rng.choice(shards)]
+    k = min(len(shards), rng.randint(1, 3))
+    part = " ".join(rng.sample(shards, k) if len(shards) >= k else shards)
+    lines = [part]
+    if rng.random() < 0.3:
+        lines.append(_gibberish(rng, rng.randint(3, 6)))
+    return lines
+
+
+def greet(sess: Session) -> list[str]:
+    rel = sess.relationship()
+    visits_soft = int(_load_soft().get("visits", 0))
+    if sess.hatched_world and sess.rng.random() < 0.55:
+        return [
+            sess.rng.choice((
+                "… the leaf is loud now …",
+                "fog thinner · something named …",
+                "the pane still babbles · less lonely",
+            )),
+            _gibberish(sess.rng, 4),
+        ]
+    if visits_soft > 0 or rel >= 20:
+        g = sess.rng.choice(_GREET_RETURN)
+        return [g] if sess.rng.random() < 0.65 else [g, _gibberish(sess.rng, 5)]
+    g = sess.rng.choice(_GREET)
+    if rel < 10:
+        return [g, _gibberish(sess.rng, sess.rng.randint(6, 11))]
+    return [g, _gibberish(sess.rng, sess.rng.randint(5, 9))]
+
+
+def farewell(sess: Session) -> list[str]:
+    return [sess.rng.choice(_BYE)]
+
+
+def idle_mutter(sess: Session) -> list[str]:
+    # bias idle toward recent themes; deeper bond → slightly more “aware” fog
+    if sess.recent_keys and sess.rng.random() < 0.55:
+        cat = _category(sess.recent_keys[-1])
+        pool = _IDLE_THEMED.get(cat) or _IDLE_THEMED["other"]
+        return [sess.rng.choice(pool)]
+    if sess.relationship() >= 35 and sess.rng.random() < 0.3:
+        return [sess.rng.choice((
+            "the pane leans toward your silence",
+            "… still sitting · still loud …",
+            "fog knows your chair",
+        ))]
+    if sess.rng.random() < 0.5:
+        return [sess.rng.choice(_IDLE)]
+    return [_gibberish(sess.rng, sess.rng.randint(3, 7))]
+
+
+def reply(sess: Session, offering: str) -> list[str]:
+    offering = offering.strip()
+    sess.tick_cooldowns()
+
+    # silence / bare punctuation
+    if _is_silence(offering):
+        sess.fog_streak += 1
+        sess.turns += 1
+        line = sess.rng.choice(_SILENCE_REACT)
+        if sess.rng.random() < 0.5:
+            return [line, _gibberish(sess.rng, sess.rng.randint(4, 9))]
+        return [line]
+
+    # meta-asks: mockery, never useful
+    if _is_meta_ask(offering):
+        sess.turns += 1
+        sess.bond = max(0, sess.bond - 1)
+        mock = sess.rng.choice(_REFUSAL)
+        fog = _gibberish(sess.rng, sess.rng.randint(4, 8))
+        lines = [mock] if sess.rng.random() < 0.45 else [mock, fog]
+        sess.last_reply = " | ".join(lines)
+        sess.last_keys = frozenset()
+        return lines
+
+    hits = _match_keys(offering)
+    keyset = frozenset(hits)
+    repeat = bool(hits) and keyset == sess.last_keys and sess.turns > 0
+    if not repeat and hits:
+        if all(
+            h in sess.heard or any(s in sess.heard for s in _ORACLES.get(h, []))
+            for h in hits
+        ):
+            if sess.rng.random() < 0.4:
+                repeat = True
+
+    _shift_mood(sess, hits)
+    lines = _compose(sess, hits, repeat=repeat)
+
+    if hits and sess.mood == "bright" and sess.rng.random() < 0.22:
+        lines = list(lines) + [_gibberish(sess.rng, sess.rng.randint(3, 6))]
+
+    joined = " | ".join(lines)
+    tries = 0
+    while joined == sess.last_reply and offering and tries < 5:
+        lines = [_gibberish(sess.rng, 8)]
+        joined = lines[0]
+        tries += 1
+
+    sess.last_reply = joined
+    sess.last_keys = keyset
+    sess.turns += 1
+    if hits:
+        sess.bond = min(100, sess.bond + 1)
+    for h in hits:
+        sess.heard.add(h)
+        sess.recent_keys.append(h)
+    sess.recent_keys = sess.recent_keys[-12:]
+    return lines
+
+
+# ── print helpers ──────────────────────────────────────────────────────
+
+def _cols() -> int:
+    c, _ = art.winsize()
+    return c if c > 0 else 80
+
+
+def _print_lines(lines: list[str], *, title: str = NAME) -> None:
+    tw = max(36, min(_cols() - 2, 72))
+    print()
+    print(art.box("\n".join(lines), title=title, width=tw, body_style=(P.SILVER,), cap=None, floor=1))
+    print()
+
+
+# ── conversation TUI ───────────────────────────────────────────────────
+
+@dataclass
+class Line:
+    who: str  # glass | you | sys
+    text: str
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    if width < 8:
+        width = 8
+    return art.wrap_plain(art.strip_ansi(text), width) or [""]
+
+
+def _trim_log(log: list[Line]) -> None:
+    while len(log) > LOG_CAP:
+        log.pop(0)
+
+
+def render_chat(
+    log: list[Line],
+    buf: str,
+    log_off: int,
+    width: int,
+    height: int,
+    *,
+    mood: str = "fog",
+    stick_bottom: bool = True,
+    turns: int = 0,
+    music: str = "off",
+) -> tuple[str, int]:
+    text_w = max(8, width - 4)
+    mood_l = _MOOD_GLYPH.get(mood, mood)
+    title = f"{NAME} ✦ babbling glass  ·  {mood_l}"
+    if turns:
+        title = f"{title}  ·  {turns}"
+    if music == "playing":
+        title = f"{title}  ·  ♪"
+    elif music == "paused":
+        title = f"{title}  ·  ♪∥"
+
+    full: list[str] = []
+    for ln in log:
+        if ln.who == "glass":
+            prefix, cont, style = "✦ ", "  ", (P.SILVER,)
+        elif ln.who == "you":
+            prefix, cont, style = "▸ ", "  ", (P.PINK,)
+        else:
+            prefix, cont, style = "· ", "  ", (P.MUTED,)
+        for i, ch in enumerate(_wrap(ln.text, max(8, text_w - 2))):
+            full.append(art.paint((prefix if i == 0 else cont) + ch, *style))
+
+    hint = "enter speak · empty/q leave · ^p music · wheel/pgup log · home/end"
+    shown = buf if art.vis_len(buf) < text_w - 8 else "…" + buf[-(text_w - 9) :]
+    foot_inner = [f"you> {shown}▌"] + _wrap(hint, text_w)
+    foot_h = 2 + max(2, len(foot_inner))
+    gap = 1
+    main_h = max(5, height - foot_h - gap)
+    if main_h + foot_h + gap > height:
+        foot_h = max(4, height - main_h - gap)
+        main_h = max(5, height - foot_h - gap)
+    inner = max(2, main_h - 2)
+
+    n = len(full)
+    if n <= inner:
+        log_off = 0
+        window = list(full) + [""] * (inner - n)
+    else:
+        max_off = max(0, n - inner)
+        log_off = max_off if stick_bottom else max(0, min(log_off, max_off))
+        window = full[log_off : log_off + inner]
+        if log_off > 0 and window:
+            window[0] = art.paint(f"  … ↑ {log_off} …", P.MUTED)
+        if log_off + inner < n and window:
+            window[-1] = art.paint(f"  … ↓ {n - log_off - inner} …", P.MUTED)
+
+    main = art.panel(window, title=title, width=width, height=main_h, focus=True, body_style=(P.SILVER,))
+    foot = art.panel(foot_inner, title="speak", width=width, height=foot_h, focus=False, body_style=(P.MUTED,))
+    frame = "\n".join([main, "", foot])
+    fl = frame.splitlines()
+    if len(fl) > height:
+        frame = "\n".join(fl[:height])
+    return frame, log_off
+
+
+def _splash_body(sess: Session) -> list[str]:
+    """Mocking welcome — explains the glass without spoiling the egg."""
+    visits = int(_load_soft().get("visits", 0))
+    rel = sess.relationship()
+    if visits <= 0:
+        pride = [
+            "Congratulations.",
+            "You found the broken toy that only speaks nonsense.",
+            "Truly, a scholar of dead ends.",
+        ]
+    elif visits < 3:
+        pride = [
+            "Back again?",
+            "Most people leave after the first mouthful of static.",
+            "Your persistence is… almost impressive.",
+        ]
+    elif visits < 8:
+        pride = [
+            "Oh. You again.",
+            "The glass does not care how often you return.",
+            "But the house has started to notice the dent you leave.",
+        ]
+    elif visits < 20:
+        pride = [
+            "Still here.",
+            "Either you are worthy, or you are simply loud.",
+            "The glass has not decided. Neither has the house.",
+        ]
+    else:
+        pride = [
+            "Familiar footsteps. Familiar bad ideas.",
+            "If nonsense were a craft, you would be its journeyman.",
+            "Sit. The fog has saved you a seat.",
+        ]
+    what = [
+        "",
+        "✦ What this is ✦",
+        "Murmur is the babbling glass — a conversation, not a command.",
+        "You speak. It answers. Mostly fog. Sometimes a clean word",
+        "falls through like a tooth in ash.",
+        "",
+        "It will not teach you. It will not hatch anything for you.",
+        "It only listens badly, and remembers worse.",
+        "",
+        "Feed it speech. Sit with the noise.",
+        "Empty line or q when you have had enough theatre.",
+        "(All letters are for speaking — including g.)",
+    ]
+    if rel >= 40:
+        what.extend(["", "… it almost sounds like it knows your mouth shape."])
+    if sess.hatched_world:
+        what.extend(["", "… the pane is a little clearer today. Don’t let it go", "to your head."])
+    return pride + what
+
+
+def show_splash(fd: int, sess: Session) -> None:
+    """Small centered window: mockery + brief how-to. Any key/click continues."""
+    cols, rows = art.winsize()
+    tw = max(36, min(cols - 4, 64))
+    body = _splash_body(sess)
+    inner_w = max(20, tw - 4)
+    wrapped: list[str] = []
+    for ln in body:
+        if not ln:
+            wrapped.append("")
+            continue
+        wrapped.extend(_wrap(ln, inner_w))
+    box = art.box(
+        wrapped + ["", art.paint("  [ any key or click · begin ]  ", P.BOLD, P.PINK)],
+        title=f"{NAME} ✦ entrance",
+        width=tw,
+        body_style=(P.SILVER,),
+        cap=None,
+        floor=1,
+    )
+    blines = box.splitlines()
+    bh = len(blines)
+    top_pad = max(0, (max(rows, bh + 2) - bh) // 3)
+    side = max(0, (cols - tw) // 2)
+    pad = " " * side
+    frame_lines = [""] * top_pad + [pad + ln for ln in blines]
+    while len(frame_lines) < max(1, rows - 1):
+        frame_lines.append("")
+    frame = "\n".join(frame_lines[: max(1, rows - 1)])
+    try:
+        art.paint_frame(fd, frame)
+    except OSError:
+        art.tty_write(fd, art.clear_screen() + frame + "\n")
+    while True:
+        ev = art.tui_read_event(fd, timeout=0.5)
+        if isinstance(ev, art.MouseEvent):
+            if ev.action == "press":
+                break
+            continue
+        if ev:  # any key including space/enter
+            break
+
+
+def run_tui(*, splash: bool = True) -> int:
+    fd = art.tui_open_tty()
+    if fd is None:
+        return run_line_repl()
+
+    art.tui_begin(fd, NAME, mouse=True)
+    sess = new_session()
+    amb = fae_ambience.for_app("murmur")
+    # *Glass Fog* waltz under the glass; own mpv socket — never Siren's.
+    amb.start(paused=False)
+    if splash:
+        show_splash(fd, sess)
+    log: list[Line] = [Line("glass", g) for g in greet(sess)]
+    buf = ""
+    log_off = 0
+    stick_bottom = True
+    idle_ticks = 0
+
+    try:
+        while True:
+            cols, rows = art.winsize()
+            tw = max(28, cols - 2)
+            th = max(10, rows - 1)
+            frame, log_off = render_chat(
+                log, buf, log_off, tw, th,
+                mood=sess.mood, stick_bottom=stick_bottom, turns=sess.turns,
+                music=amb.status(),
+            )
+            try:
+                art.paint_frame(fd, frame)
+            except OSError:
+                art.tty_write(fd, art.clear_screen() + frame + "\n")
+
+            ev = art.tui_read_event(fd, timeout=0.5)
+            if isinstance(ev, art.MouseEvent):
+                idle_ticks = 0
+                d = art.wheel_delta(ev)
+                if d:
+                    stick_bottom = False
+                    log_off = max(0, log_off - d * 3)
+                continue
+
+            key = ev
+            if not key:
+                idle_ticks += 1
+                if not buf and idle_ticks >= IDLE_TICKS and sess.rng.random() < 0.45:
+                    idle_ticks = 0
+                    for line in idle_mutter(sess):
+                        log.append(Line("glass", line))
+                    _trim_log(log)
+                    stick_bottom = True
+                continue
+
+            idle_ticks = 0
+            if key in ("ctrl-c",):
+                break
+            if key == "ctrl-p":
+                st = amb.toggle()
+                note = {
+                    "playing": "… a hollow tone under the glass …",
+                    "paused": "… the tone holds its breath …",
+                    "off": "… no music found …",
+                }.get(st, "")
+                if note:
+                    log.append(Line("sys", note))
+                    stick_bottom = True
+                continue
+            if key == "pgup":
+                stick_bottom = False
+                log_off = max(0, log_off - 5)
+                continue
+            if key == "pgdn":
+                log_off += 5
+                stick_bottom = True
+                continue
+            if key == "up":
+                stick_bottom = False
+                log_off = max(0, log_off - 1)
+                continue
+            if key == "down":
+                log_off += 1
+                stick_bottom = True
+                continue
+            if key == "home":
+                stick_bottom = False
+                log_off = 0
+                continue
+            if key == "end":
+                stick_bottom = True
+                continue
+            if key == "backspace":
+                buf = buf[:-1]
+                continue
+            if key in ("ctrl-u", "clear"):
+                buf = ""
+                continue
+            if key == "ctrl-w":
+                buf = buf.rstrip()
+                sp = buf.rfind(" ")
+                buf = buf[: sp + 1] if sp >= 0 else ""
+                continue
+            if key == "ctrl-l":
+                log.clear()
+                log.append(Line("sys", "… fog wipes the pane …"))
+                log.append(Line("glass", _gibberish(sess.rng, 6)))
+                stick_bottom = True
+                continue
+            if key == "enter":
+                text = buf.strip()
+                buf = ""
+                if not text or text.lower() in ("q", "quit", "exit", "bye", "leave"):
+                    for b in farewell(sess):
+                        log.append(Line("sys", b))
+                    frame, _ = render_chat(
+                        log, "", 0, tw, th,
+                        mood=sess.mood, stick_bottom=True, turns=sess.turns,
+                        music=amb.status(),
+                    )
+                    try:
+                        art.paint_frame(fd, frame)
+                    except OSError:
+                        pass
+                    time.sleep(0.4)
+                    break
+                log.append(Line("you", text))
+                stick_bottom = True
+                # brief think beat (no permanent log junk)
+                frame, log_off = render_chat(
+                    log, "", log_off, tw, th,
+                    mood=sess.mood, stick_bottom=True, turns=sess.turns,
+                    music=amb.status(),
+                )
+                try:
+                    art.paint_frame(fd, frame)
+                except OSError:
+                    pass
+                time.sleep(1.0)
+                log.append(Line("sys", ""))  # soft exchange gap
+                for line in reply(sess, text):
+                    log.append(Line("glass", line))
+                _trim_log(log)
+                stick_bottom = True
+                continue
+            if key == "space":
+                if len(buf) < MAX_BUF:
+                    buf += " "
+                continue
+            if key == "tab":
+                if sess.rng.random() < 0.35:
+                    log.append(Line("glass", _gibberish(sess.rng, 4)))
+                    stick_bottom = True
+                continue
+            if len(key) == 1 and key.isprintable():
+                if len(buf) < MAX_BUF:
+                    buf += key
+                continue
+    finally:
+        amb.stop()
+        _save_soft(sess)
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+    return 0
+
+
+def run_line_repl() -> int:
+    sess = new_session()
+    for g in greet(sess):
+        _print_lines([g])
+    print(art.paint("murmur · empty line or q to leave", P.MUTED), file=sys.stderr)
+    try:
+        while True:
+            try:
+                line = input(art.paint("you> ", P.PINK))
+            except EOFError:
+                break
+            if not line.strip() or line.strip().lower() in ("q", "quit", "exit", "bye"):
+                break
+            _print_lines(reply(sess, line))
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+    finally:
+        _save_soft(sess)
+    for b in farewell(sess):
+        _print_lines([b])
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    splash = True
+    if os.environ.get("MURMUR_QUIET", "").strip().lower() in ("1", "true", "yes", "on"):
+        splash = False
+    # flags
+    cleaned: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(art.box(
+                [
+                    "murmur feeds the glass.",
+                    "The glass answers.",
+                    "Most answers are noise.",
+                    "That is the point.",
+                    "",
+                    "murmur              sit with the glass",
+                    "murmur \"words\"      one offering",
+                    "murmur --no-splash  skip the entrance roast",
+                    "Ctrl-p              play/pause glass fog waltz",
+                    "FAE_AMBIENCE=0      silence (no ambient mpv)",
+                ],
+                title=NAME,
+                width=52,
+                body_style=(P.MUTED,),
+                cap=None,
+                floor=1,
+            ))
+            return 0
+        if a in ("--no-splash", "-q", "--quiet"):
+            splash = False
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    argv = cleaned
+
+    if argv:
+        sess = new_session()
+        _print_lines(reply(sess, " ".join(argv)))
+        _save_soft(sess)
+        return 0
+
+    return run_tui(splash=splash)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        try:
+            art.tui_cleanup()
+        except Exception:
+            pass
+        raise SystemExit(130)

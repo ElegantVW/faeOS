@@ -1,20 +1,27 @@
-# Scroll — help menu
+# Scroll — living book (page carousel)
 
-**Role:** Themed command directory / interactive help picker. Every app (except easter eggs) has a section here. New-user discovery.
+**Role:** One **page per app**; Tab teaches faeOS; last leaf is PATH (print to prompt).  
+**Status:** carousel + hermetic egg leaf (2026-08-16)
 
-**Status:** stable
+## Navigation
+- **Tab / Shift-Tab** — next / previous page (curriculum order)  
+- **1–9** — cast footer runes (**run** the spell)  
+- **g / G + digit** — vim-style page jump (11–20 / 21–30)  
+- **j/k · wheel** — scroll within a long page  
+- **PATH leaf** — filter · Enter → print name for shell `print -z`  
+- Layout: near-fullscreen panels with small margin so box edges show  
 
-## Current
-- `scroll` — TUI arrow picker → prints selection to prompt (`print -z` in zsh)
-- `scroll list` / `scroll menu` — static boxed board / raw lines
-- Sections: ETHER, SIREN, AI (pixie/faectl), MAIL, misc (spellbook, faectl, zen, tick…)
-- Runs on shared `tui_*` layer; fzf path with screen hold
+## Curriculum
+See `CURRICULUM` in `scroll_pages.py`. Ends with **Sealed Leaf** (or **Kur** if hatched), then **PATH**.
 
-## Next
-- [ ] Keep SECTIONS in sync with every app change (rule: app plan update ⇒ scroll section update)
-- [ ] Grouped navigation (jump to section by key)
-- [ ] Per-app detail pages (deep help) instead of flat blurbs
-- [ ] Kur stays hidden (easter egg)
+## Sealed Leaf / egg
+- Story: an **egg in the Menagerie** to hatch; points at **`murmur`** (babbling glass).  
+- No hand-holding, no true name, no solve path in docs.  
+- Leaf turns only after the player completes hatch tasks (not from murmur alone).  
 
-## Notes
-- Kur is deliberately NOT listed (easter egg).
+## Content
+`scroll_pages.py` — dossiers; fae tone; keys in How.  
+Egg: `fae_egg.py` + hermetic/kur runtime pages · `murmur` oracle.
+
+## Rule
+New app ⇒ page in `PAGES` + slot in `CURRICULUM` before “shipped.”

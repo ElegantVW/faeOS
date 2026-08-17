@@ -86,11 +86,13 @@ bin/
 | P2-005 | **Progress Bars** | Visual progress for current track | ✅ Done (2026-08-03) | `siren` | custom |
 | P2-006 | **Track Info Panel** | Show metadata, album art (ASCII) | ⏳ Not Started | `siren` | `mutagen`, `Pillow` |
 | P2-007 | **Configuration System** | Persistent settings (`config get|set`) | ✅ Done (2026-08-05) | `siren` (SirenConfig) | `json` |
-| P2-008 | **Mouse Support** | Basic mouse navigation in TUI | ⏳ Not Started | `siren` | `curses` or `urwid` |
+| P2-008 | **Mouse Support** | Click/select, double-click activate, wheel, panel focus via shared `fae_termart` SGR + HitMap | ✅ Done (2026-08-16) | `fae_termart`, `siren` | stdlib CSI (no curses) |
 
 #### 📋 Phase 2 Implementation Notes
 - **P2-001/002/007**: applied at mpv spawn via `apply_runtime_prefs`; volume only set on fresh spawn so live user changes are never stomped.
-- **P2-007**: keys — `default_volume` (0-150), `library_roots` (list), `fuzzy_search`, `waves`, `gapless`, `normalize`, `cache_meta` (bools), `wave_bands` (8/16/32). Sanitized on load; atomic write via `.tmp` + `replace`.
+- **P2-007**: keys — `default_volume` (0-150), `library_roots` (list), `fuzzy_search`, `waves`, `gapless`, `normalize`, `cache_meta`, `mouse` (bools), `wave_bands` (8/16/32). Sanitized on load; atomic write via `.tmp` + `replace`.
+- **P2-008**: SGR mouse in `fae_termart` (`tui_begin(mouse=)`, `tui_read_event`, `HitMap`); siren registers browser/queue rows + panel titles; double-click activate; wheel under cursor. Queue `j/k` now moves a selection cursor (play with enter), not reorder.
+- **Mid layout (2026-08-16):** browser + queue are real crystal `art.panel` frames via `split_row` / `split_widths` (same chrome as header/runes). Focus uses `focus_mark` (no ANSI slicing). Header/footer full-bleed (`cap=None`). Waves optional full-width panel.
 
 ---
 
@@ -130,7 +132,8 @@ Runtime (all optional except mpv + stdlib):
 
 Planned / optional (future):
 - pytube (YouTube) · spotipy (Spotify) · Pillow (album art)
-- argcomplete (tab completion) · curses/urwid (mouse)
+- argcomplete (tab completion)
+- mouse: shared `fae_termart` SGR 1006 + HitMap (not curses)
 ```
 
 ### Configuration File Format

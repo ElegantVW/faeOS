@@ -1,6 +1,6 @@
 [package]
 name = "seal"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "faeOS seal — native X11 screen locker with animated UI"
 license = "MIT"
@@ -19,6 +19,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rusttype = "0.9"
 rand = "0.8"
+libc = "0.2"
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "xinput", "randr", "dpms"] }
 
 [profile.release]

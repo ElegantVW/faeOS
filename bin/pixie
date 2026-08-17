@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -33,10 +35,67 @@ If you have the final answer or do not need a tool, output a clear, friendly con
 
 # --- Core Tool Executions ---
 
+HOME = Path.home()
+
+# Paths we refuse to touch even under $HOME
+BLOCKED_PREFIXES = (
+    HOME / ".ssh",
+    HOME / ".gnupg",
+    HOME / ".grok" / "credentials",
+)
+
+# Tools that mutate the system and must be explicitly approved by the user
+# before they run. In one-shot mode (no confirmation available) they are denied.
+_CONFIRM_TOOLS = ("execute_bash",)
+
+_SERVICE_RE = re.compile(r"^[A-Za-z0-9@._:-]+$")
+
+
+class _Confirm:
+    """Cross-thread confirmation gate: the worker thread blocks in ask() until
+    the UI thread calls respond() with the user's y/n answer."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self.pending: tuple | None = None
+        self._answer: bool | None = None
+
+    def ask(self, fname: str, fargs: dict) -> bool:
+        with self._cond:
+            self.pending = (fname, fargs)
+            self._answer = None
+            self._cond.notify_all()
+            while self._answer is None:
+                self._cond.wait(0.2)
+            return self._answer
+
+    def respond(self, answer: bool) -> None:
+        with self._cond:
+            if self.pending is not None:
+                self._answer = answer
+                self.pending = None
+                self._cond.notify_all()
+
+
 def run_bash_command(command: str) -> dict:
+    """Run a command as an argument vector (no shell), so metacharacters
+    (pipes, `&&`, `;`, `$(...)`, redirects) are never interpreted."""
+    if not isinstance(command, str) or not command.strip():
+        return {"error": "empty command"}
     try:
-        res = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=20)
+        argv = shlex.split(command)
+    except ValueError as e:
+        return {"error": f"could not parse command: {e}"}
+    if not argv:
+        return {"error": "empty command"}
+    argv = [os.path.expanduser(a) for a in argv]
+    if argv[0] in ("systemctl", "journalctl") and "--no-pager" not in argv:
+        argv.insert(1, "--no-pager")
+    try:
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=20)
         return {"stdout": res.stdout.strip(), "stderr": res.stderr.strip(), "exit_code": res.returncode}
+    except FileNotFoundError:
+        return {"error": f"command not found: {argv[0]}"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -59,19 +118,21 @@ def read_local_file(path: str, start_line: int | None = None, end_line: int | No
         return {"error": str(e)}
 
 def manage_systemd_service(service_name: str, action: str) -> dict:
-    is_user = service_name in ["menagerie.service", "menagerie", "kur"] or "--user" in sys.argv
-    scope_flag = "--user" if is_user else ""
-    
-    if action == "status":
-        cmd = f"systemctl {scope_flag} status {service_name} --no-pager"
-    elif action == "restart":
-        cmd = f"systemctl {scope_flag} restart {service_name}"
-    elif action == "logs":
-        cmd = f"journalctl {scope_flag} -u {service_name} -n 15 --no-pager"
-    else:
+    if not isinstance(service_name, str) or not _SERVICE_RE.match(service_name):
+        return {"error": f"invalid service name: {service_name!r}"}
+    if action not in ("status", "restart", "logs"):
         return {"error": f"Invalid action: {action}"}
-        
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+    is_user = service_name in ["menagerie.service", "menagerie", "kur"] or "--user" in sys.argv
+    scope_flag = ["--user"] if is_user else []
+
+    if action == "status":
+        cmd = ["systemctl", *scope_flag, "status", service_name, "--no-pager"]
+    elif action == "restart":
+        cmd = ["systemctl", *scope_flag, "restart", service_name]
+    else:
+        cmd = ["journalctl", *scope_flag, "-u", service_name, "-n", "15", "--no-pager"]
+
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     
     # FILTER EXHAUSTIVE LOGS: Keep context clean and lightweight for the LLM turn
     stdout_payload = res.stdout.strip()
@@ -90,15 +151,32 @@ def manage_systemd_service(service_name: str, action: str) -> dict:
         "stderr": res.stderr.strip()
     }
 
+def _assert_allowed(path: str) -> Path:
+    """Resolve and refuse paths outside $HOME or into sensitive dirs."""
+    p = Path(os.path.expanduser(path)).resolve()
+    try:
+        p.relative_to(HOME.resolve())
+    except ValueError as e:
+        raise PermissionError(f"refusing path outside home ({HOME}): {path}") from e
+    for b in BLOCKED_PREFIXES:
+        try:
+            p.relative_to(b.resolve())
+            raise PermissionError(f"refusing sensitive path: {path}")
+        except ValueError:
+            pass
+    return p
+
 def write_local_file(path: str, content: str) -> dict:
     try:
-        p = os.path.expanduser(path)
-        d = os.path.dirname(p)
-        if d and not os.path.isdir(d):
-            os.makedirs(d, exist_ok=True)
+        p = _assert_allowed(path)
+        d = p.parent
+        if not d.is_dir():
+            d.mkdir(parents=True, exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
             f.write(content)
-        return {"path": path, "written": True, "bytes": len(content)}
+        return {"path": str(p), "written": True, "bytes": len(content)}
+    except PermissionError as e:
+        return {"error": str(e)}
     except Exception as e:
         return {"error": str(e)}
 
@@ -283,21 +361,28 @@ def _norm_args(fname: str, fargs: dict) -> dict:
         return {"sync": sync, "box": box, "max_messages": int(limit or 20)}
     return fargs
 
-def run_tool(fname: str, fargs: dict) -> dict:
-    """Execute a single tool call (mirrors ask_pixie dispatch)."""
+def run_tool(fname: str, fargs: dict, confirm=None) -> dict:
+    """Execute a single tool call (mirrors ask_pixie dispatch).
+
+    `confirm` is an optional callable(fname, fargs) -> bool used to gate
+    mutating tools (see _CONFIRM_TOOLS). When it is None and a tool requires
+    confirmation, the tool is denied (one-shot / non-interactive safety).
+    """
     fname = _TOOL_ALIASES.get(fname, fname)
     if fname not in _KNOWN_TOOLS:
         return {"error": f"Unknown tool '{fname}'. Valid tools: {', '.join(_KNOWN_TOOLS)}"}
+    if not isinstance(fargs, dict):
+        fargs = {}
+    fargs = _norm_args(fname, fargs)
+    if fname in _CONFIRM_TOOLS:
+        if confirm is None:
+            return {"error": (f"'{fname}' needs approval and none is available here; "
+                              "run `pixie` (interactive chat) to review and approve actions.")}
+        if not confirm(fname, fargs):
+            return {"error": f"'{fname}' was not approved by the user."}
     if fname == "execute_bash":
-        fargs = _norm_args(fname, fargs)
-        cmd = fargs.get('command', '')
-        if "systemctl" in cmd and "--no-pager" not in cmd:
-            cmd = cmd.replace("systemctl", "systemctl --no-pager")
-        if "journalctl" in cmd and "--no-pager" not in cmd:
-            cmd = cmd.replace("journalctl", "journalctl --no-pager")
-        return run_bash_command(cmd)
+        return run_bash_command(fargs.get('command', ''))
     if fname == "read_local_file":
-        fargs = _norm_args(fname, fargs)
         return read_local_file(fargs.get('path', ''), fargs.get('start_line'), fargs.get('end_line'))
     if fname == "manage_systemd_service":
         s_name = fargs.get('service_name', 'menagerie.service')
@@ -305,15 +390,12 @@ def run_tool(fname: str, fargs: dict) -> dict:
             s_name = "menagerie.service"
         return manage_systemd_service(s_name, fargs.get('action', 'status'))
     if fname == "write_local_file":
-        fargs = _norm_args(fname, fargs)
         return write_local_file(fargs.get('path', ''), fargs.get('content', ''))
     if fname == "web_research":
-        fargs = _norm_args(fname, fargs)
         return web_research(fargs.get('query', ''), int(fargs.get('max_results', 5)))
     if fname == "fetch_web_page":
         return fetch_web_page(fargs.get('url', ''), int(fargs.get('max_chars', 4000)))
     if fname == "check_mail":
-        fargs = _norm_args(fname, fargs)
         return check_mail(fargs.get('sync', True), fargs.get('box', 'unread'), fargs.get('max_messages', 20))
     return {"error": f"Unknown function mapping: {fname}"}
 
@@ -495,23 +577,7 @@ def ask_pixie(user_prompt: str, verbose: bool = False) -> str:
             pass
 
     if func_name:
-        if func_name == "execute_bash":
-            cmd = func_args.get('command', '')
-            if "systemctl" in cmd and "--no-pager" not in cmd:
-                cmd = cmd.replace("systemctl", "systemctl --no-pager")
-            if "journalctl" in cmd and "--no-pager" not in cmd:
-                cmd = cmd.replace("journalctl", "journalctl --no-pager")
-            result = run_bash_command(cmd)
-        elif func_name == "read_local_file":
-            result = read_local_file(func_args.get('path', ''), func_args.get('start_line'), func_args.get('end_line'))
-        elif func_name == "manage_systemd_service":
-            s_name = func_args.get('service_name', 'menagerie.service')
-            if s_name in ["your_user_name", "your_user_service", "default", "user-environment"]:
-                s_name = "menagerie.service"
-            result = manage_systemd_service(s_name, func_args.get('action', 'status'))
-        else:
-            result = {"error": f"Unknown function mapping: {func_name}"}
-            
+        result = run_tool(func_name, func_args)
         elapsed_time = time.time() - start_time
         
         if sys.stderr.isatty():
@@ -807,6 +873,7 @@ def chat_ui(verbose: bool = False) -> int:
     view = {"off": 0}
     waking = {"flag": False}
     enter_pending = False
+    confirm = _Confirm()
 
     if not llm_up(verbose):
         waking["flag"] = True
@@ -916,7 +983,7 @@ def chat_ui(verbose: bool = False) -> int:
                         break
                     t1 = time.time()
                     pending["tool"] = (fname, fargs, None, 0.0, t1)
-                    result = run_tool(fname, fargs)
+                    result = run_tool(fname, fargs, confirm=confirm.ask)
                     _log_tool(fname, fargs, result)
                     pending["tool"] = None
                     if cancel["flag"]:
@@ -990,7 +1057,12 @@ def chat_ui(verbose: bool = False) -> int:
                              width=min(max_bw, tw - 8)).splitlines(), "center")
 
         input_box_title = "Pixie is pondering" if busy else f"Pixie ✦ {rune['name']}"
-        if waking["flag"]:
+        if confirm.pending is not None:
+            cfname, cfargs = confirm.pending
+            ctext = f"approve {cfname}? {json.dumps(cfargs)}"
+            input_box = art.box(art.pad_vis(art.paint("✦ " + ctext, P.BOLD, P.BLUSH) + "  [y/N]", tw - 8),
+                                title="Confirm action", width=tw - 4)
+        elif waking["flag"]:
             input_box = art.box(art.pad_vis("✦ waking the menagerie brain…", tw - 8),
                                 title=input_box_title, width=tw - 4)
         elif busy:
@@ -1041,6 +1113,12 @@ def chat_ui(verbose: bool = False) -> int:
                 art.tty_write(fd, art.clear_screen() + frame + "\n")
 
             key = art.tui_read_key(fd, timeout=0.05)
+            if confirm.pending is not None:
+                if key in ("y", "Y", "enter"):
+                    confirm.respond(True)
+                elif key in ("n", "N", "esc", "ctrl-c"):
+                    confirm.respond(False)
+                continue
             if not waking["flag"] and enter_pending:
                 enter_pending = False
                 if buf.strip():

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Clamp PipeWire default sink volume after WirePlumber starts.
+# Restored device volumes can exceed 100% (this box was at ~210% / +19 dB).
+set -euo pipefail
+
+# Fraction 0.0–1.0 (override with AUDIO_BOOT_VOLUME=0.35 etc.)
+TARGET="${AUDIO_BOOT_VOLUME:-0.40}"
+# Never leave boot louder than this (fraction).
+MAX="${AUDIO_BOOT_MAX:-1.00}"
+
+wait_for_sink() {
+  local i
+  for i in $(seq 1 50); do
+    if wpctl get-volume @DEFAULT_AUDIO_SINK@ >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+clamp() {
+  # Read current as float (e.g. "Volume: 2.10" or "Volume: 0.40 [MUTED]")
+  local line vol
+  line="$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null || true)"
+  vol="$(printf '%s\n' "$line" | awk '{print $2}')"
+  [[ -n "$vol" ]] || return 0
+
+  # If over MAX or we always apply boot target when over TARGET, set TARGET.
+  # Always set TARGET on boot so a previous 200% session cannot stick.
+  wpctl set-volume @DEFAULT_AUDIO_SINK@ "$TARGET" 2>/dev/null || \
+    pactl set-sink-volume @DEFAULT_SINK@ "$(awk -v t="$TARGET" 'BEGIN{printf "%d%%", t*100}')" 2>/dev/null || true
+}
+
+if ! command -v wpctl >/dev/null 2>&1 && ! command -v pactl >/dev/null 2>&1; then
+  echo "audio-boot-volume: no wpctl/pactl" >&2
+  exit 0
+fi
+
+wait_for_sink || exit 0
+clamp
+# Second pass a moment later — profiles sometimes re-apply routes after first nodes appear.
+sleep 1
+clamp
+exit 0

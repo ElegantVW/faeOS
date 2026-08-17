@@ -1,8 +1,10 @@
 # FaeOS Plan
 
-**Last updated:** 2026-08-12
+**Last updated:** 2026-08-17
 **Status:** Active build toward v1.0 (Arch distro)
 **Location:** This file is the *single* main plan. Each app has its own short plan in `docs/plans/`; this file stays concise.
+
+**Engines:** Bulwark and Fairy Lantern are **external** source-only repos (`ElegantVW/bulwark`, `ElegantVW/fairy-lantern`). In-tree Rust (`seal`, `hearth`, `rift`) is also built on the machine — no prebuilt ELFs in git. Contract: [docs/engines.md](docs/engines.md).
 
 ## Goal
 
@@ -25,17 +27,17 @@
 | App | Role | Status | Plan |
 |-----|------|--------|------|
 | **Wizard's Tower** (faectl) | Control panel & service supervisor | stable, expand | [docs/plans/wizardtower.md](docs/plans/wizardtower.md) |
-| **Scroll** | Help menu / command directory (TUI picker) | stable | [docs/plans/scroll.md](docs/plans/scroll.md) |
+| **Scroll** | Command scroll + PATH launcher (merged Summon; tabbed TUI) | stable | [docs/plans/scroll.md](docs/plans/scroll.md) |
 | **Spellbook** | File manager (TUI) | stable | [docs/plans/spellbook.md](docs/plans/spellbook.md) |
 | **Ether** | Network manager (bt/wifi/lan, veil VPN, bridge hotspot) | stable | [docs/plans/ether.md](docs/plans/ether.md) |
 | **Siren** | Media player (single-file v2: mpv, fuzzy search, queue, playlists, config, trove) | stable | [docs/plans/siren.md](docs/plans/siren.md) |
 | **Pixie** | Local AI assistant with tools (qwen3-4b) | stable | [docs/plans/pixie.md](docs/plans/pixie.md) |
 | **Kur** | Haiku dragon — **easter egg, hidden from scroll** | stable | [docs/plans/kur.md](docs/plans/kur.md) |
-| **Imp** | Terminal art generator (pixie-art lineage) | in dev (separate instance) | [docs/plans/imp.md](docs/plans/imp.md) |
+| **Imp** | Terminal art generator (pixie-art lineage) | stable (TUI + CLI; tests) | [docs/plans/imp.md](docs/plans/imp.md) |
 | **Goblin** | Mail (aerc IMAP → local text, IDLE push) | stable | [docs/plans/goblin.md](docs/plans/goblin.md) |
 | **Magpie** | Browser/search (privacy, DDG) | search stable; browse in progress | [docs/plans/magpie.md](docs/plans/magpie.md) |
 | **Scry** | Command/output history (Shift-Tab visions) | stable | [docs/plans/scry.md](docs/plans/scry.md) |
-| **Summon** | Quick launcher (type-to-run over PATH, dmenu-style) | stable | [docs/plans/summon.md](docs/plans/summon.md) |
+| **Summon** | PATH tab of Scroll (short name; `summon -x` exec) | stable | [docs/plans/summon.md](docs/plans/summon.md) |
 | **The Eye** | Process watcher (CPU/RSS/kill) | new | [docs/plans/eye.md](docs/plans/eye.md) |
 | **Vault** | Disk map (recursive sizes, ncdu-style) | new | [docs/plans/vault.md](docs/plans/vault.md) |
 | **Alchemy** | Package cauldron (pacman brew/sip/distill) | new | [docs/plans/alchemy.md](docs/plans/alchemy.md) |
@@ -44,10 +46,10 @@
 | **Quests** | Todos (todo.txt) — independent | new | [docs/plans/quests.md](docs/plans/quests.md) |
 | **Hourglass** | Timer / pomodoro — independent | new | [docs/plans/hourglass.md](docs/plans/hourglass.md) |
 | **Almanac** | Calendar hub (feeds: quests + hourglass) | new | [docs/plans/almanac.md](docs/plans/almanac.md) |
-| **Bulwark** | Host protection (Aegis/Purity/Sentinel/Ward) — first-party Rust | new | [docs/plans/bulwark.md](docs/plans/bulwark.md) |
+| **Bulwark** | Host protection — external repo `ElegantVW/bulwark` | new | [docs/plans/bulwark.md](docs/plans/bulwark.md) |
 | **Imbue** | Clipboard memory (history / re-paste) | new | [docs/plans/imbue.md](docs/plans/imbue.md) |
 | **Reflection** | Screenshots & gallery (full / window / region) | new | [docs/plans/reflection.md](docs/plans/reflection.md) |
-| **Fairy Lantern** | GBA emulator from scratch (light a fable) | new | [docs/plans/fairy-lantern.md](docs/plans/fairy-lantern.md) |
+| **Fairy Lantern** | GBA emulator — external repo `ElegantVW/fairy-lantern` | new | [docs/plans/fairy-lantern.md](docs/plans/fairy-lantern.md) |
 | **Zen** | Fullscreen browser break | stable | [docs/plans/zen.md](docs/plans/zen.md) |
 | **Tome** | Document reader (Scriptorium pack) | new | [docs/plans/tome.md](docs/plans/tome.md) |
 | **Tick / Termfix** | Screen tick + TTY line-edit recovery | stable | [docs/plans/tick.md](docs/plans/tick.md) |
@@ -116,6 +118,8 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 - [ ] CONTRIBUTING.md, CHANGELOG.md, plugin seam
 
 ## Log
+
+- **2026-08-17 (engines + source-only)** — Stripped prebuilt ELFs from git (`bin/seal|hearth|rift`). Bulwark and Fairy Lantern remain independent repos; faeOS keeps thin launchers only. Install contract: binaries → `~/.local/lib/faeos/`, CLI → `~/bin` launchers. `install.sh --build` / `--build-engines`. Docs: [docs/engines.md](docs/engines.md).
 
 - **2026-08-12 (rift)** — Built faeOS terminal emulator from scratch in Rust (no alacritty_terminal, no vt100 crate). Custom VT/ANSI parser with state machine (~500 LOC): handles CSI sequences (cursor, erase, scroll, 16/256/TrueColor, attributes, alt screen), OSC, control chars, US keycode mapping. Terminal grid with scrollback, cursor blinking, bold (double-strike) and italic (shear) font rendering via rusttype. PTY management via portable-pty, X11 window via x11rb, pink theme throughout. Named "Rift" — a portal into the faeOS world. Replaces kitty as default terminal in i3 config.
 
