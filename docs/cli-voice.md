@@ -66,12 +66,17 @@ bulwark
 ├── purity baseline|check
 └── install | uninstall
 
-human (agreed direction)
-├── activate bulwark       → bulwark tui  or  install+status  [TBD exact]
+human (agreed)
+├── (bare) bulwark         → TUI look (primary all-ages ritual)
+├── look bulwark           → bulwark status
+├── activate bulwark       → ensure dirs + status; invite Raise Aegis if wall down
 ├── Ward report            → bulwark ward
-├── Aegis protect          → bulwark aegis apply desktop   (+ confirm flow)
-├── Aegis release          → bulwark aegis undo
-└── Purity photo           → bulwark purity baseline
+├── Raise Aegis / Aegis protect → sudo bulwark aegis apply desktop (+ confirm)
+├── Release Aegis / Aegis release → sudo bulwark aegis undo
+├── Purity photo           → bulwark purity baseline
+└── Purity check           → bulwark purity check
+
+Seal is not Bulwark (glass vs house). Never say "doctor" / healthcheck to humans.
 ```
 
 Capital Ward/Aegis/Purity may be case-insensitive in the human parser.

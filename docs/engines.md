@@ -65,6 +65,20 @@ cd ~/faeos && ./install.sh --build --build-engines
 - It **never** replaces a good launcher with a raw binary.
 - `faeos/install.sh` copies launchers + scripts only; use `--build` / `--build-engines` to compile.
 
+## Raise the wall (Bulwark)
+
+Building Bulwark installs the engine only. The front-door lock stays **down** until you raise Aegis:
+
+```bash
+sudo bulwark aegis apply desktop
+bulwark aegis confirm
+bulwark          # look — must not say SAFE if the wall is missing
+```
+
+- **desktop** profile: no SSH; fae AI ports only on `127.0.0.1`
+- **server-ssh** if you intentionally want port 22
+- Seal (screen lock) is separate — glass vs house
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -73,6 +87,7 @@ cd ~/faeos && ./install.sh --build --build-engines
 | Wrong binary | `export NAME_BIN=/path/to/binary` or reinstall |
 | Command missing | Ensure `~/bin` is on `PATH`; re-run `~/faeos/install.sh` |
 | Arch mismatch | Expected — rebuild on the target machine (no prebuilt ELFs) |
+| Bulwark CARE / door open | Raise Aegis (above); install alone is not enough |
 
 ## What never goes in git
 

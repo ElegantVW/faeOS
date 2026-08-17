@@ -1,62 +1,44 @@
-# Bulwark — first-party host protection
+# Bulwark — host ward
 
-**Role:** Firewall (Aegis), integrity (Purity), watch (Sentinel), hunt (Ward).  
-**Status:** v0.1 Phase‑1 MVP (Rust, zero *security product* package deps)  
-**Repo:** [ElegantVW/bulwark](https://github.com/ElegantVW/bulwark) → clone to `~/bulwark`
+**Role:** Network wall (Aegis), integrity photo (Purity), open windows (Sentinel), hunt (Ward).  
+**Status:** honest MVP in progress — default-deny desktop, posture that cannot flatter  
+**Repo:** [ElegantVW/bulwark](https://github.com/ElegantVW/bulwark) → `~/bulwark`  
+**Not Seal:** Seal seals the glass (lock/greeter). Bulwark watches the house.
 
-## Directives
-
-- No ufw / nft CLI / clamav / fail2ban at runtime
-- Kernel talk: raw `NETLINK_NETFILTER` (nf_tables) written in-tree
-- Language: **Rust** single binary — **not** committed to faeOS git
-- Installable / removable: `bulwark install` / `uninstall [--purge]`
-
-## Plug into faeOS
+## Plug in
 
 ```bash
 git clone git@github.com:ElegantVW/bulwark.git ~/bulwark
 cd ~/bulwark && ./build.sh install
-# binary → ~/.local/lib/faeos/bulwark ; launcher → ~/bin/bulwark
+# wall is still down until:
+sudo bulwark aegis apply desktop && bulwark aegis confirm
+bulwark   # look
 ```
 
-Contract: [docs/engines.md](../engines.md). Canonical docs: repo `README.md`.
+Contract: [docs/engines.md](../engines.md). Voice: [docs/cli-voice.md](../cli-voice.md).
 
-## Layers
+## Profiles
 
-| Layer | What |
-|-------|------|
-| **Sentinel** | `/proc/net/*` listeners → PID/comm (no ss) |
-| **Aegis** | Policy DSL → netlink nf_tables table `bulwark`; apply/undo; deadman confirm |
-| **Purity** | SHA-256 baselines; change/SUID detection |
-| **Ward** | Hostile patterns (PATH writable, LD_PRELOAD, deleted exe, tmp timers) |
+| Profile | Intent |
+|---------|--------|
+| `desktop` | Personal default: deny inbound, no SSH, fae ports 127.0.0.1 only |
+| `strict` | Tight inbound |
+| `server-ssh` | Like server — allows TCP 22 |
 
-## CLI
+## Human forms
 
-```
-bulwark                  # TUI
-bulwark status|ports|ward
-bulwark aegis show|status|apply <profile>|confirm|undo
-bulwark purity baseline|check
-bulwark install|uninstall [--purge]
-```
+| Human | Machine |
+|-------|---------|
+| bare `bulwark` | TUI truth ritual |
+| activate bulwark | dirs + posture; invite Raise Aegis if wall down |
+| Aegis protect / Raise Aegis | `aegis apply desktop` + confirm |
+| Aegis release | `aegis undo` |
+| Ward report | `ward` |
+| Purity photo | `purity baseline` |
 
-Profiles (embedded): `desktop`, `strict`, `server-ssh`.
+## Success bar (faeOS)
 
-## Apply (root)
-
-```
-sudo bulwark aegis apply desktop
-bulwark aegis confirm    # within deadman window (~90s)
-sudo bulwark aegis undo  # remove table
-```
-
-## State
-
-`$XDG_DATA_HOME/faeos/bulwark/` (or `BULWARK_DIR`)
-
-## Next
-
-- [ ] IPv6 rule parity tests in netns
-- [ ] Address-from match in Aegis (src IP)
-- [ ] Purity progress UI
-- [ ] Static musl release CI
+- Desktop policy does not open SSH  
+- Missing / unknown Aegis ⇒ never SAFE  
+- AI ports must not face the LAN while mood says SAFE  
+- Reboot persistence = later phase (system restore unit)  
