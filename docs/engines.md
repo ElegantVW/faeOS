@@ -65,6 +65,12 @@ cd ~/faeos && ./install.sh --build --build-engines
 - It **never** replaces a good launcher with a raw binary.
 - `faeos/install.sh` copies launchers + scripts only; use `--build` / `--build-engines` to compile.
 
+## Bulwark trust / attack (agents)
+
+Long-term path **D** (cold review). Near work: repo docs  
+`TRUST.md` (shield is not the attacker) → `ADVERSARIAL.md` (sandbox cards).  
+Do not claim “best/pro” until those cards pass with SHAs.
+
 ## Raise the wall (Bulwark)
 
 Building Bulwark installs the engine only. The front-door lock stays **down** until you raise Aegis:

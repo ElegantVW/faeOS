@@ -119,6 +119,8 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-18 (Bulwark path D)** — North star: cold professional review someday; next gates TRUST (not the attacker) + ADVERSARIAL sandbox cards in `ElegantVW/bulwark` docs. Small steps; no pro claims until cards PASS.
+
 - **2026-08-18 (Bulwark host ward)** — Honest posture (never SAFE if wall down); desktop without SSH; Aegis raise via sudo password (state under SUDO_USER); boot restore `bulwark-aegis.service`; Sentinel exposure faces (only-here vs whole network). Repo `ElegantVW/bulwark`.
 
 - **2026-08-17 (engines + source-only)** — Stripped prebuilt ELFs from git (`bin/seal|hearth|rift`). Bulwark and Fairy Lantern remain independent repos; faeOS keeps thin launchers only. Install contract: binaries → `~/.local/lib/faeos/`, CLI → `~/bin` launchers. `install.sh --build` / `--build-engines`. Docs: [docs/engines.md](docs/engines.md).
