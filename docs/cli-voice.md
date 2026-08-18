@@ -2,6 +2,7 @@
 
 > **Working document.** Human-facing command wording is decided **app by app**.
 > There is no single universal transform. Machine CLIs stay stable for scripts.
+> Failures / stderr voice: [error-voice.md](error-voice.md).
 
 ## Philosophy
 

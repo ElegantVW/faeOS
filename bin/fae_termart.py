@@ -117,6 +117,26 @@ def paint(text: str, *codes: str) -> str:
     return "".join(codes) + text + P.RESET
 
 
+def fae_error(creature: str, msg: str, next: str | None = None, *, detail: str | None = None) -> None:
+    """House-wide stderr voice — see docs/error-voice.md.
+
+    Prints: ``<creature>: <msg>`` plus optional ``next:`` / ``detail:``
+    (detail only when FAE_DEBUG is set, or when *detail* is forced by caller
+    after checking the env themselves).
+    """
+    import os
+    import sys
+
+    name = (creature or "fae").strip().lower() or "fae"
+    line = paint(f"{name}: {msg}", P.ERR) if color_ok() else f"{name}: {msg}"
+    print(line, file=sys.stderr)
+    if next:
+        print(f"  next:  {next}", file=sys.stderr)
+    dbg = os.environ.get("FAE_DEBUG", "").strip() not in ("", "0", "false", "no")
+    if dbg and detail:
+        print(f"  detail: {detail}", file=sys.stderr)
+
+
 def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s)
 

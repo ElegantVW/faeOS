@@ -51,5 +51,6 @@ Stay lean (suite ≪ 100 MB). No big-bang rewrite.
 ## Related
 
 - CLI human voice (per-app trees): [cli-voice.md](cli-voice.md)
+- Error voice (failures, all ages): [error-voice.md](error-voice.md)
 - Screen clear policy: [screen-policy.md](screen-policy.md)
 - Master plan: [../faeOSplan.md](../faeOSplan.md)
