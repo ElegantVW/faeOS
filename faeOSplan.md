@@ -119,6 +119,8 @@ A normal OS ships these; faeOS doesn't (yet). Names are fae-flavored proposals �
 
 ## Log
 
+- **2026-08-18 (Bulwark host ward)** — Honest posture (never SAFE if wall down); desktop without SSH; Aegis raise via sudo password (state under SUDO_USER); boot restore `bulwark-aegis.service`; Sentinel exposure faces (only-here vs whole network). Repo `ElegantVW/bulwark`.
+
 - **2026-08-17 (engines + source-only)** — Stripped prebuilt ELFs from git (`bin/seal|hearth|rift`). Bulwark and Fairy Lantern remain independent repos; faeOS keeps thin launchers only. Install contract: binaries → `~/.local/lib/faeos/`, CLI → `~/bin` launchers. `install.sh --build` / `--build-engines`. Docs: [docs/engines.md](docs/engines.md).
 
 - **2026-08-12 (rift)** — Built faeOS terminal emulator from scratch in Rust (no alacritty_terminal, no vt100 crate). Custom VT/ANSI parser with state machine (~500 LOC): handles CSI sequences (cursor, erase, scroll, 16/256/TrueColor, attributes, alt screen), OSC, control chars, US keycode mapping. Terminal grid with scrollback, cursor blinking, bold (double-strike) and italic (shear) font rendering via rusttype. PTY management via portable-pty, X11 window via x11rb, pink theme throughout. Named "Rift" — a portal into the faeOS world. Replaces kitty as default terminal in i3 config.

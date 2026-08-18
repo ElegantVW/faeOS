@@ -71,7 +71,7 @@ cd ~/faeos && ./install.sh --build --build-engines
 | `quests` / `quests add …` | Quests — todo.txt log |
 | `hourglass` / `hourglass 25` | Hourglass — timer / pomodoro |
 | `almanac` / `almanac today` | Almanac — calendar hub |
-| `bulwark` / `bulwark status` | Bulwark — firewall, integrity, hunt (**external repo**) |
+| `bulwark` / `bulwark status` | Bulwark — host ward; raise with `bulwark aegis apply desktop` (**external repo**) |
 | `fairy play game.gba` | Fairy Lantern — GBA from scratch (**external repo**) |
 | `seal` / `hearth` / `rift` | Greeter / guest session / terminal (**build with `--build`**) |
 | `spellbook` | File-manager TUI |
