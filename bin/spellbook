@@ -12,7 +12,10 @@ Controls:
   k / ↑        Move up
   l / →        Open file/directory
   h / ←        Go to parent directory
-  mouse        Click select · double-click open · wheel scroll
+  Ctrl+L / :   Edit the location bar
+  y / Y        Yank selected path / current shelf (imbue)
+  P            Go to the path on the board (imbue)
+  mouse        Click crumb · click bar to edit · click select · double-click open
   q           Quit
   ?           Help
 
@@ -50,6 +53,90 @@ else:
     SYM_FILE = "[F] "
     SYM_LINK = "[L] "
     SYM_LOCK = "[X] "
+
+REVERSE = "\033[7m"
+
+
+def path_crumbs(path: Path) -> list[tuple[str, Path]]:
+    """Breadcrumb (label, dest) pairs from root to *path*."""
+    path = Path(path)
+    parts = path.parts
+    if not parts:
+        return [(".", Path("."))]
+    crumbs: list[tuple[str, Path]] = []
+    acc: Path | None = None
+    for part in parts:
+        if acc is None:
+            acc = Path(part)
+            label = "/" if part in ("/", "\\") else part
+        else:
+            acc = acc / part
+            label = part
+        crumbs.append((label, acc))
+    return crumbs
+
+
+def clean_pasted_path(typed: str) -> str:
+    """First line, stripped; unwrap matching quotes."""
+    raw = (typed or "").replace("\r\n", "\n").replace("\r", "\n")
+    raw = raw.split("\n", 1)[0].strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        raw = raw[1:-1].strip()
+    return raw
+
+
+def resolve_goto(
+    current: Path, typed: str
+) -> tuple[Path | None, Path | None, str | None]:
+    """Map a typed/pasted location to (dir, select_file_or_None, error)."""
+    raw = clean_pasted_path(typed)
+    if not raw:
+        return None, None, "empty"
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = Path(current) / p
+    try:
+        p = p.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None, None, "missing"
+    if p.is_dir():
+        return p, None, None
+    if p.exists():
+        return p.parent, p, None
+    return None, None, "missing"
+
+
+def clipboard_set_path(text: str) -> bool:
+    """Put a path on Imbue's board (system clipboard + history)."""
+    try:
+        r = subprocess.run(
+            ["imbue", "set", text],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def clipboard_get_path() -> str:
+    """Read the board via `imbue get` (trailing newline from imbue stripped)."""
+    try:
+        r = subprocess.run(
+            ["imbue", "get"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if r.returncode != 0:
+        return ""
+    text = r.stdout
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text
 
 
 def tui_frame(
@@ -115,6 +202,9 @@ class FileManager:
         self.pick_mode = pick_mode
         self.output_path = output_path
         self.chosen_path: Path | None = None
+        self.path_editing = False
+        self.path_buf = ""
+        self.path_caret = 0
 
     def get_files(self) -> list[Path]:
         """Get list of files in current directory."""
@@ -169,7 +259,70 @@ class FileManager:
         return f"{size:.1f} PB"
 
     def _max_rows(self) -> int:
-        return max(4, art.term_height() - 11)
+        return max(4, art.term_height() - 12)
+
+    def _begin_path_edit(self) -> None:
+        self.path_editing = True
+        self.path_buf = str(self.current_path)
+        self.path_caret = len(self.path_buf)
+
+    def _end_path_edit(self) -> None:
+        self.path_editing = False
+        self.path_buf = ""
+        self.path_caret = 0
+
+    def _apply_goto(self, typed: str) -> None:
+        dest, select, err = resolve_goto(self.current_path, typed)
+        if err or dest is None:
+            shown = clean_pasted_path(typed) or typed
+            self.status = narrate(f"cd {shown}", "that path is not on the shelf", ok=False)
+            return
+        if select is None:
+            try:
+                if dest.resolve() == self.current_path.resolve():
+                    return
+            except OSError:
+                pass
+        self.current_path = dest
+        self.selected_index = 0
+        self.offset = 0
+        if select is not None:
+            files = self.get_files()
+            for i, f in enumerate(files):
+                if f.name == select.name:
+                    self.selected_index = i
+                    break
+            self._ensure_visible()
+            if self.pick_mode:
+                self.chosen_path = files[self.selected_index] if files else select
+                return
+            self.status = narrate(f"cd {select.name}", "a new path unfolds")
+            return
+        self.status = narrate(f"cd {dest}/", "a new path unfolds")
+
+    def _yank_path(self, target: Path) -> None:
+        ok = clipboard_set_path(str(target))
+        self.status = narrate(
+            f"yank {target}",
+            "the path is on the board" if ok else "the board would not take it",
+            ok=ok,
+        )
+
+    def _paste_goto(self) -> None:
+        text = clipboard_get_path()
+        if not clean_pasted_path(text):
+            self.status = narrate("paste", "the board is empty", ok=False)
+            return
+        self._apply_goto(text)
+
+    def _insert_clipboard_into_bar(self) -> None:
+        chunk = clean_pasted_path(clipboard_get_path())
+        if not chunk:
+            self.status = narrate("paste", "the board is empty", ok=False)
+            return
+        b, c = self.path_buf, self.path_caret
+        self.path_buf = b[:c] + chunk + b[c:]
+        self.path_caret = c + len(chunk)
 
     def _file_row(self, i: int, file: Path, width: int) -> tuple[str, tuple]:
         """One styled list row — selected rows wear the pink crown."""
@@ -185,16 +338,130 @@ class FileManager:
         pad = max(1, width - art.vis_len(mark) - art.vis_len(name) - art.vis_len(info) - 2)
         return f"{mark}{name}{' ' * pad}{info}", style
 
-    def draw_header(self) -> str:
-        """The Spell Book — header frame with path and the Aether's word."""
+    def _path_line_edit(self, body_w: int) -> str:
+        """Paint the location field with a reverse-video caret."""
+        text = self.path_buf
+        caret = max(0, min(self.path_caret, len(text)))
+        prefix = "> "
+        avail = max(1, body_w - art.vis_len(prefix))
+        # keep the caret cell visible; last col is the caret when at end
+        lo = 0
+        if caret >= avail:
+            lo = caret - avail + 1
+        shown = text[lo : lo + avail]
+        local = caret - lo
+        if local >= len(shown):
+            left, ch, right = shown[: max(0, avail - 1)], " ", ""
+        else:
+            left, ch, right = shown[:local], shown[local], shown[local + 1 :]
+        body = left + REVERSE + ch + P.RESET + P.BLUSH + right
+        return art.paint(prefix, P.BOLD, P.PINK) + P.BLUSH + body + P.RESET
+
+    def _path_line_crumbs(
+        self, body_w: int
+    ) -> tuple[str, list[tuple[int, int, Path]]]:
+        """Paint breadcrumbs; return (inner, hits as content-col x0,x1, dest)."""
+        crumbs = path_crumbs(self.current_path)
+        sep = "  "
+
+        def vis_labels(items: list[tuple[str, Path]], extra: str = "") -> int:
+            labels = ([extra] if extra else []) + [c[0] for c in items]
+            if not labels:
+                return 0
+            return sum(art.vis_len(x) for x in labels) + art.vis_len(sep) * (
+                len(labels) - 1
+            )
+
+        items = list(crumbs)
+        ell = ""
+        while items and vis_labels(items, ell) > body_w:
+            items = items[1:]
+            ell = "…"
+        while items and vis_labels(items, ell) > body_w:
+            items = items[1:]
+        if not items:
+            plain = art.pad_vis(str(self.current_path), body_w)
+            return art.paint(plain, P.PINK), []
+
+        parts: list[str] = []
+        hits: list[tuple[int, int, Path]] = []
+        col = 0
+        if ell:
+            parts.append(art.paint(ell, P.MUTED))
+            col += art.vis_len(ell) + art.vis_len(sep)
+            parts.append(sep)
+
+        last = len(items) - 1
+        for i, (label, dest) in enumerate(items):
+            style = (P.BOLD, P.PINK) if i == last else (P.PINK_DIM,)
+            x0 = col
+            x1 = col + max(0, art.vis_len(label) - 1)
+            hits.append((x0, x1, dest))
+            parts.append(art.paint(label, *style))
+            col = x1 + 1
+            if i != last:
+                parts.append(art.paint(sep, P.MUTED))
+                col += art.vis_len(sep)
+        inner = "".join(parts)
+        if art.vis_len(inner) > body_w:
+            inner = art.pad_vis(art.strip_ansi(inner), body_w)
+            return art.paint(inner, P.PINK), []
+        return inner, hits
+
+    def draw_header(self) -> tuple[str, int, list[tuple[int, int, Path]], int, int]:
+        """Header frame with location bar.
+
+        Returns (frame, path_rel_y_1based, crumb_hits_content_cols,
+                 content_x0_screen, body_w).
+        """
         files = self.get_files()
         dirs = sum(1 for f in files if f.is_dir())
         tome_w = "tome" if dirs == 1 else "tomes"
-        sub = f"{self.current_path} · {len(files)} scrolls · {dirs} {tome_w}"
+        status = f"{len(files)} scrolls · {dirs} {tome_w}"
         if self.status:
-            sub += f" · {self.status}"
-        frame, _, _ = tui_frame([], title="Spell Book", subtitle=sub, width=art.term_width())
-        return frame
+            status += f" · {self.status}"
+
+        tw = art.term_width()
+        unicode_mode = art.strip_ansi(os.environ.get("PIXIE_UNICODE", "")).lower() in (
+            "1", "on", "true", "yes", "unicode",
+        )
+        tl, tr, bl, br, hz, vt = (
+            ("╭", "╮", "╰", "╯", "─", "│") if unicode_mode
+            else ("+", "+", "+", "+", "-", "|")
+        )
+        mark = "✦" if unicode_mode else "*"
+        outer = max(8, tw)
+        inner_w = outer - 2
+        body_w = max(1, inner_w - 2)
+        content_x0 = 3  # border + space + first content cell (1-based)
+
+        if self.path_editing:
+            path_inner = self._path_line_edit(body_w)
+            crumb_hits: list[tuple[int, int, Path]] = []
+        else:
+            path_inner, crumb_hits = self._path_line_crumbs(body_w)
+
+        out: list[str] = []
+        tplain = "Spell Book"
+        label = f" {mark} {tplain} "
+        fill = max(0, inner_w - art.vis_len(label) - 1)
+        out.append(
+            art.paint(tl + hz, P.PINK_DIM)
+            + art.paint(label, P.BOLD, P.PINK)
+            + art.paint(hz * fill + tr, P.PINK_DIM)
+        )
+        out.append(
+            art.paint(vt, P.PINK_DIM)
+            + " "
+            + art.pad_vis(path_inner, body_w)
+            + " "
+            + art.paint(vt, P.PINK_DIM)
+        )
+        path_rel_y = 2
+        for ln in art.wrap_plain(art.strip_ansi(status), body_w):
+            out.append(art.paint(vt + " " + art.pad_vis(ln, body_w) + " " + vt, P.MUTED))
+        out.append(art.paint(bl + hz * inner_w + br, P.PINK_DIM))
+        return "\n".join(out), path_rel_y, crumb_hits, content_x0, body_w
 
     def draw_file_list(self, files: list[Path]) -> tuple[str, int, int, int, bool]:
         """Windowed scroll shelf.
@@ -248,6 +515,15 @@ class FileManager:
   {P.SILVER}h{P.RESET} / {P.SILVER}←{P.RESET}  Parent directory
   {P.SILVER}gg{P.RESET}    First file
   {P.SILVER}G{P.RESET}    Last file
+  {P.SILVER}Ctrl+L{P.RESET} / {P.SILVER}:{P.RESET}  Edit location bar
+  {P.SILVER}click{P.RESET} a crumb to jump · click the bar to type a path
+
+{P.DIM}The path:{P.RESET}
+  {P.SILVER}y{P.RESET}     Yank selected path onto the board (imbue)
+  {P.SILVER}Y{P.RESET}     Yank current shelf
+  {P.SILVER}P{P.RESET}     Go to the path on the board
+  {P.SILVER}Enter{P.RESET} in the bar to go · {P.SILVER}Esc{P.RESET} cancel
+  {P.SILVER}Ctrl+Y{P.RESET} / {P.SILVER}Ctrl+V{P.RESET}  Paste from the board into the bar
 
 {P.DIM}Actions:{P.RESET}
   {P.SILVER}o{P.RESET}     Open with default app
@@ -298,11 +574,12 @@ class FileManager:
     def draw_ui(self) -> tuple[str, art.HitMap]:
         """Draw the complete UI; return (frame, hitmap) for mouse."""
         hitmap = art.HitMap()
-        header = self.draw_header()
+        header, path_rel, crumb_hits, content_x0, path_body_w = self.draw_header()
         files = self.get_files()
         file_list, first_rel, top, n_vis, has_parent = self.draw_file_list(files)
         hint = (
             "j/k / wheel · enter/l/o / double-click open · h / click ↑ parent · "
+            "Ctrl+L/: path · y/Y yank · P paste-go · click crumbs · "
             "? help · s sort · . hidden · n new · d delete · r rename · e edit · q quit"
             + (" · p pick this dir" if self.pick_mode else "")
         )
@@ -311,6 +588,29 @@ class FileManager:
         rows = [(ln, (P.PINK_DIM,)) for ln in art.wrap_plain(art.strip_ansi(hint), body_w)]
         footer, _, _ = tui_frame(rows, title="runes", width=tw)
         # y layout: header, blank, file_list, blank, footer
+        header_y0 = 1
+        path_y = header_y0 + path_rel - 1
+        hitmap.add(art.Region(
+            id="path",
+            x0=content_x0,
+            y0=path_y,
+            x1=max(content_x0, content_x0 + path_body_w - 1),
+            y1=path_y,
+            z=1,
+            role="path",
+            data=None,
+        ))
+        for i, (cx0, cx1, dest) in enumerate(crumb_hits):
+            hitmap.add(art.Region(
+                id=f"crumb:{i}",
+                x0=content_x0 + cx0,
+                y0=path_y,
+                x1=content_x0 + cx1,
+                y1=path_y,
+                z=4,
+                role="crumb",
+                data=dest,
+            ))
         y = 1
         y += header.count("\n") + 1
         y += 1  # blank
@@ -389,6 +689,13 @@ class FileManager:
 
                     ev = art.tui_read_event(fd, timeout=0.1)
                     if isinstance(ev, art.MouseEvent):
+                        if self.path_editing:
+                            if ev.action == "press" and ev.button == 0:
+                                region = hitmap.hit(ev.x, ev.y)
+                                if region is not None and region.role == "crumb":
+                                    self._end_path_edit()
+                                    self._apply_goto(str(region.data))
+                            continue
                         files = self.get_files()
                         delta = art.wheel_delta(ev)
                         if delta and files:
@@ -404,6 +711,12 @@ class FileManager:
                             region = hitmap.hit(ev.x, ev.y)
                             if region is None:
                                 continue
+                            if region.role == "crumb":
+                                self._apply_goto(str(region.data))
+                                continue
+                            if region.role == "path":
+                                self._begin_path_edit()
+                                continue
                             if region.role == "parent":
                                 self._go_parent()
                                 continue
@@ -417,6 +730,12 @@ class FileManager:
                         continue
 
                     key = ev
+                    if self.path_editing:
+                        if key in ("q", "ctrl-c"):
+                            break
+                        if key:
+                            self._handle_path_edit_key(key)
+                        continue
                     if key in ("q", "ctrl-c", "esc"):
                         break
                     if key:
@@ -446,6 +765,62 @@ class FileManager:
         print("\033[2J\033[H", end="")
         sys.stdout.flush()
 
+    def _handle_path_edit_key(self, key: str) -> None:
+        """Keys while the location bar is focused."""
+        buf, caret = self.path_buf, self.path_caret
+        if key in ("enter",):
+            typed = self.path_buf
+            self._end_path_edit()
+            self._apply_goto(typed)
+            return
+        if key == "esc":
+            self._end_path_edit()
+            return
+        if key in ("ctrl-y", "ctrl-v"):
+            self._insert_clipboard_into_bar()
+            return
+        if key in ("left",):
+            self.path_caret = max(0, caret - 1)
+            return
+        if key in ("right",):
+            self.path_caret = min(len(buf), caret + 1)
+            return
+        if key in ("home", "ctrl-a"):
+            self.path_caret = 0
+            return
+        if key in ("end", "ctrl-e"):
+            self.path_caret = len(buf)
+            return
+        if key == "backspace":
+            if caret > 0:
+                self.path_buf = buf[: caret - 1] + buf[caret:]
+                self.path_caret = caret - 1
+            return
+        if key == "delete":
+            if caret < len(buf):
+                self.path_buf = buf[:caret] + buf[caret + 1 :]
+            return
+        if key == "ctrl-u":
+            self.path_buf = buf[caret:]
+            self.path_caret = 0
+            return
+        if key == "ctrl-w":
+            if caret <= 0:
+                return
+            i = caret
+            while i > 0 and buf[i - 1] in "/":
+                i -= 1
+            while i > 0 and buf[i - 1] not in "/":
+                i -= 1
+            self.path_buf = buf[:i] + buf[caret:]
+            self.path_caret = i
+            return
+        if key == "space":
+            key = " "
+        if len(key) == 1 and key.isprintable():
+            self.path_buf = buf[:caret] + key + buf[caret:]
+            self.path_caret = caret + 1
+
     def handle_key(self, key: str):
         """Handle a key press."""
         files = self.get_files()
@@ -465,6 +840,18 @@ class FileManager:
                 self.open_file(files[self.selected_index])
         elif key in ('left', 'h'):  # Left arrow or h
             self._go_parent()
+        elif key in ("ctrl-l", ":"):
+            self._begin_path_edit()
+        elif key == "y":
+            files = self.get_files()
+            if files and self.selected_index < len(files):
+                self._yank_path(files[self.selected_index])
+            else:
+                self._yank_path(self.current_path)
+        elif key == "Y":
+            self._yank_path(self.current_path)
+        elif key == "P":
+            self._paste_goto()
         elif key == 'gg':  # First file
             self.selected_index = 0
             self.offset = 0

@@ -1049,6 +1049,10 @@ def _decode_byte_key(ch: bytes) -> str:
         return "ctrl-p"
     if ch == b"\x0c":
         return "ctrl-l"
+    if ch == b"\x16":
+        return "ctrl-v"
+    if ch == b"\x19":
+        return "ctrl-y"
     try:
         return ch.decode("utf-8")
     except UnicodeDecodeError:

@@ -302,6 +302,7 @@ PAGES: list[AppPage] = [
         ],
         how=[
             "`spellbook` or `spellbook ~` · j/k or wheel · Enter/l open · h or click ↑ parent.",
+            "Location bar: click a crumb · Ctrl+L or : to type a path · y/Y yank · P paste-go (imbue).",
             "Mouse: click select · double-click open · ? help · q quit.",
             "Pick mode: spellbook --pick --output /tmp/out (used by friends).",
         ],

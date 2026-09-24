@@ -53,6 +53,9 @@ def close(fd: int) -> None:
     (b"\x04", "ctrl-d"),
     (b"\x12", "ctrl-r"),
     (b"\x15", "ctrl-u"),
+    (b"\x16", "ctrl-v"),
+    (b"\x19", "ctrl-y"),
+    (b"\x0c", "ctrl-l"),
     (b"\x7f", "backspace"),
     (b"\x08", "backspace"),
 ])
