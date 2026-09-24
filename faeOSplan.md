@@ -11,7 +11,7 @@
 **faeOS — a complete OS.** The suite on this Arch box is the fast house (CLI/TUI, pink, `scroll`). The product is a **kernel we write**, with that suite as userspace.
 
 - Today: terminal apps, discoverable via `scroll`, privacy-first, offline-first (local LLM, local mail, no telemetry).
-- Next long track: own kernel (separate repo, design first). Until it boots, daily life stays this suite on Arch.
+- Next long track: own kernel (`~/fae-kernel`, proposed name **Cerne**). Until it boots, daily life stays this suite on Arch.
 - An Arch ISO / RK3588 image is a shortcut, not the end.
 
 ## Principles (never broken)
