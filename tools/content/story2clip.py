@@ -45,14 +45,20 @@ def main() -> int:
     accent = np.array(hexrgb(args.accent), dtype=np.int16)
 
     n = int(args.secs * args.fps)
-    # glitter stars: fixed positions, twinkle phases
+    # glitter stars: fixed positions, twinkle phases (more + bigger = whimsy)
     stars = [
         (rng.randrange(W), rng.randrange(H), rng.random() * math.tau, rng.choice(GLITTER))
-        for _ in range(90)
+        for _ in range(120)
+    ]
+    # sparkle-burst pops: expanding rings that fade over ~8 frames
+    bursts = [
+        (rng.randrange(n // 8, n - n // 8), rng.randrange(100, W - 100),
+         rng.randrange(200, H - 300), rng.choice(GLITTER))
+        for _ in range(max(2, int(args.secs * 0.8)))
     ]
     # glitch events: (frame, band_y, band_h, shift, tint_strength)
     glitches = []
-    for _ in range(6):
+    for _ in range(max(2, int(args.secs * 1.2))):
         f = rng.randrange(n // 8, n - n // 8)
         glitches.append(
             (f, rng.randrange(0, H - 60), rng.randrange(24, 90),
@@ -62,13 +68,19 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="storyclip-")
     for i in range(n):
         t = i / max(n - 1, 1)
-        # slow zoom 1.00 -> 1.06 around center-upper (the sigil)
+        # slow zoom 1.00 -> 1.06 + gentle bob around the sigil
         z = 1.0 + 0.06 * t
         zw, zh = int(W * z), int(H * z)
         frame = base.resize((zw, zh), Image.BILINEAR)
-        cx, cy = zw // 2, int(zh * 0.42)
+        bob = int(10 * math.sin(t * math.tau * 1.2))
+        cx = min(max(zw // 2, W // 2), zw - W // 2)
+        cy = min(max(int(zh * 0.42) + bob, H // 2), zh - H // 2)
         frame = frame.crop((cx - W // 2, cy - H // 2, cx + W // 2, cy + H // 2))
         a = np.asarray(frame).astype(np.int16)
+
+        # breathing shimmer: faint accent lift oscillating over the clip
+        shimmer = 0.04 * (0.5 + 0.5 * math.sin(t * math.tau * 0.8))
+        a = a + (accent - a) * shimmer * (a.mean(axis=2, keepdims=True) > 40)
 
         # slice glitch on event frames (+1 decay frame)
         for (f, by, bh, sh, k) in glitches:
@@ -81,15 +93,26 @@ def main() -> int:
 
         img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
         d = ImageDraw.Draw(img)
-        # glitter twinkle
+        # glitter twinkle (slower, bigger)
         for (x, y, ph, col) in stars:
-            b = 0.5 + 0.5 * math.sin(ph + t * 9.0)
-            if b < 0.55:
+            b = 0.5 + 0.5 * math.sin(ph + t * 6.0)
+            if b < 0.5:
                 continue
-            r = 1 + int(2 * b)
+            r = 1 + int(3 * b)
             c = tuple(int(v * (0.35 + 0.65 * b)) for v in hexrgb(col))
             d.line([(x - r * 2, y), (x + r * 2, y)], fill=c)
             d.line([(x, y - r * 2), (x, y + r * 2)], fill=c)
+        # sparkle-burst pops
+        for (f, x, y, col) in bursts:
+            k = i - f
+            if 0 <= k < 9:
+                r = 6 + k * 9
+                al = 1.0 - k / 9.0
+                c = tuple(int(v * al) for v in hexrgb(col))
+                for dx, dy in ((r, 0), (-r, 0), (0, r), (0, -r),
+                               (int(r * 0.7), int(r * 0.7)), (int(-r * 0.7), int(r * 0.7)),
+                               (int(r * 0.7), int(-r * 0.7)), (int(-r * 0.7), int(-r * 0.7))):
+                    d.ellipse([(x + dx - 2, y + dy - 2), (x + dx + 2, y + dy + 2)], fill=c)
         # fade in/out
         if i < 12 or i >= n - 12:
             k = min(i, n - 1 - i) / 12.0
