@@ -48,12 +48,32 @@ bindsym $mod+r mode "resize"
 # status_command printed errors on screen. fae-cycle paints its cues inside the
 # windows instead (toast when a kitty socket exists, border pulse always).
 
-exec --no-startup-id kitty
-exec --no-startup-id kitty
+# kitty with remote control on, so fae-cycle can toast the window you land in.
+exec --no-startup-id kitty --listen-on "$HOME/.kitty/kitty.sock" -o allow_remote_control=yes
+exec --no-startup-id kitty --listen-on "$HOME/.kitty/kitty.sock" -o allow_remote_control=yes
 
 # desktop layer: compositor + wallpaper
 # Cycle cue. fae-cycle flashes the focused border (Lilac) while you move and
 # leaves it Rose when you land, so Alt+Tab is visible without a status bar.
 # Declared in the config so the color always returns home on reload.
+# ── mouse that behaves ────────────────────────────────────────────────────
+# Pointer warps into a dragged window otherwise, so kill it.
+mouse_warping output
+focus_follows_mouse no
+
+# Super + drag = move the window under the cursor (tiled windows float
+# first, so the pointer actually leads). Super+Mod1+drag stays tiled.
+bindsym $mod+button1 noprint, floating enable, drag move
+bindsym $mod+button3 noprint, floating enable, drag resize
+bindsym Mod1+$mod+button1 move container
+bindsym Mod1+$mod+button3 resize set 320 px 240 px, resize set 640 px 360 px, resize set 952 px 1072 px
+
+# Super + click a background gap: new shell on the floating layer.
+bindsym $mod+button2 focus
+bindsym $mod+button1 kill floating
+
+# Super + double click on a title bar flips tiled/floating.
+bindsym $mod+button2 floating toggle, focus
+
 exec_always --no-startup-id picom --config ~/.config/picom/picom.conf
 exec_always --no-startup-id feh --bg-fill $HOME/Pictures/wall.png

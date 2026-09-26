@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # fae-cycle — window cycling for the house, with visible proof.
-# Usage: fae-cycle [next|prev]   (alias: fae-tab; FAE_CYCLE_QUIET=1 = cues off)
-# Cycling is xprop + i3-msg. The CUES are the point:
-#   1) a themed toast lands inside the kitty window you arrived in,
-#   2) any other client gets a one-shot border pulse (Lilac → Rose).
-# No resident process, no bar: nothing to keep alive.
+# Usage: fae-cycle [next|prev]   (alias: fae-tab; FAE_CYCLE_QUIET=1 = quiet)
+# Cycling is xprop + i3-msg. The cue is a themed toast typed into the kitty
+# window you arrived in (kitty remote control is per-socket, so only sockets
+# that exist can carry it), plus a pink confirmation on stderr.
+# No resident process, no bar, no overlay window: nothing to keep alive.
 set -euo pipefail
 dir="${1:-next}"
 D="${DISPLAY:-:0}"
@@ -82,6 +82,7 @@ walk(t); print(found or '')" 2>/dev/null) ;;
   esac
 fi
 [ -n "$con" ] || { echo "fae-cycle: cannot focus $target" >&2; exit 1; }
+CON="$con"
 DISPLAY="$D" i3-msg "[con_id=$con] focus" >/dev/null
 
 # ── cue 1: name the window for the toast ────────────────────────────────
@@ -93,33 +94,25 @@ TOAST=$(printf '%b' \
 \033[38;5;175m│\033[0m \033[38;5;132m${name}\033[0m
 \033[38;5;175m╰──────────────────────────────────────────────╯\033[0m")
 
-# ── cue 2: the toast. kitty windows get it typed in place; everything else
-# gets a border pulse (i3 client.focused) via a one-shot timeout so no
-# resident process is involved.
-# Border pulse. i3 paints focus borders, so we flash the whole tree by
-# re-declaring client.focused twice. Two passes with a pause: Lilac flash,
-# then back to the house Rose. A backgrounded sleeper is the only process
-# involved and it exits on its own (~0.4s), so nothing needs babysitting.
-pulse_border() {
-  local -a LILAC_ROSE=( '#d4b4e8' '#2a1520' '#ffe3ee' )
-  local -a HOUSE_ROSE=( '#ff2d55' '#2a1520' '#ffe3ee' )
-  local a b
-  for step in 1 2; do
-    a=("${LILAC_ROSE[@]}"); b=("${HOUSE_ROSE[@]}")
-    [ "$step" = 2 ] && { a=("${HOUSE_ROSE[@]}"); b=("${LILAC_ROSE[@]}"); }
-    DISPLAY="$D" i3-msg "client.focused ${a[0]} ${a[1]} ${a[2]}" >/dev/null 2>&1 || true
-    sleep 0.2
-    DISPLAY="$D" i3-msg "client.focused ${b[0]} ${b[1]} ${b[2]}" >/dev/null 2>&1 || true
-    sleep 0.2
-  done
-  DISPLAY="$D" i3-msg "client.focused #ff2d55 #2a1520 #ffe3ee" >/dev/null 2>&1 || true
-}
+# ── cue: the toast, in the window you arrived in. Kitty remote control is
+# per-socket, so only sockets that exist can carry it.
+# Cue. What was measured, and what it killed:
+#   1) a 1px i3 border is invisible under most client chrome — killed: border.
+#   2) i3 will not repaint a runtime client.focused colour change — killed:
+#      runtime i3-msg colour flip.
+#   3) i3 owns the root window, so xsetroot/feh repaints never reach the
+#      screen — killed: root repaint.
+#   4) a throwaway fullscreen kitty paints over everything, but it takes focus
+#      and leaks windows if it dies early — killed: overlay window.
+# The only remaining painting surface that covers every client without a window
+# is the X root as the compositor sees it, which we do not own. So the cue is
+# honest and cheap: the terminal toast (kitty sockets that exist) plus a pink
+# confirmation on stderr. No flash, no lie. If you want a screen-wide flash, the
+# right place to build it is our own compositor (picom fork) — not this script.
+PULSE_LILAC="#d4b4e8"
+TOAST_LEN=46
 
-# Kitty's remote control is per-socket, not per-WM window, and a kitty started
-# without allow_remote_control has no socket at all. So: pulse the border on
-# every arrival, and paint the toast only when a reachable socket can carry it.
 if [ "${FAE_CYCLE_QUIET:-0}" != "1" ]; then
-  pulse_border
   for so in /tmp/opencode/kitty*.sock "$HOME/.kitty"/*.sock; do
     [[ -S "$so" ]] || continue
     kitty @ --to "unix:$so" transmit-text "$TOAST" >/dev/null 2>&1 && break
