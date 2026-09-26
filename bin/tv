@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# tv — CRT shader toggle for kitty (persistent: edits picom config).
+# Usage: tv on | off | status   (bare tv = status)
+set -euo pipefail
+
+CONF="$HOME/.config/picom/picom.conf"
+RULE='window-shader-fg-rule = [ "crt.frag:class_g = '"'"'kitty'"'"'" ]'
+DISPLAY_NUM="${DISPLAY:-:0}"
+
+rule_live() { grep -q "^window-shader-fg-rule" "$CONF" 2>/dev/null; }
+
+restart_picom() {
+  pkill -x picom 2>/dev/null || true
+  sleep 0.5
+  DISPLAY="$DISPLAY_NUM" setsid nohup picom --config "$CONF" >/dev/null 2>&1 < /dev/null &
+  disown 2>/dev/null || true
+}
+
+cmd="${1:-status}"
+case "$cmd" in
+  on)
+    if rule_live; then echo "tv: already on"; exit 0; fi
+    sed -i 's|^# tv-off: window-shader-fg-rule|window-shader-fg-rule|' "$CONF"
+    rule_live || { echo "$RULE" >> "$CONF"; }
+    restart_picom
+    echo "tv: on (crt.frag on kitty)"
+    ;;
+  off)
+    if ! rule_live; then echo "tv: already off"; exit 0; fi
+    sed -i 's|^window-shader-fg-rule|# tv-off: window-shader-fg-rule|' "$CONF"
+    restart_picom
+    echo "tv: off (clean glass)"
+    ;;
+  status)
+    if rule_live; then echo "tv: on"; else echo "tv: off"; fi
+    ;;
+  *) echo "Usage: tv on | off | status" >&2; exit 1 ;;
+esac
