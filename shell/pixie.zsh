@@ -6,6 +6,7 @@
 
 # ── PATH ──────────────────────────────────────────────────────
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
+typeset -U path 2>/dev/null || true  # no tripled PATH on re-source
 
 # ── SSH agent ──────────────────────────────────────────────────
 # One shared agent for every shell: systemd --user owns the socket at
