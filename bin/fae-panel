@@ -8,7 +8,7 @@ case "$name" in
   bulwark) cmd="kitty -T $title -e $HOME/bin/bulwark tui" ;;
   *) cmd="kitty -T $title -e python3 $HOME/bin/panels/$name.py" ;;
 esac
-id=$(DISPLAY=:1 i3-msg -t get_tree 2>/dev/null | python3 -c "
+id=$(DISPLAY="${DISPLAY:-:0}" i3-msg -t get_tree 2>/dev/null | python3 -c "
 import json,sys
 t=json.load(sys.stdin)
 out=[]
@@ -20,7 +20,7 @@ walk(t)
 print(out[0] if out else '')
 ")
 if [ -n "$id" ]; then
-  DISPLAY=:1 i3-msg "[con_id=\"$id\"] focus" >/dev/null
+  DISPLAY="${DISPLAY:-:0}" i3-msg "[con_id=\"$id\"] focus" >/dev/null
 else
-  DISPLAY=:1 setsid sh -c "$cmd" >/dev/null 2>&1 &
+  DISPLAY="${DISPLAY:-:0}" setsid sh -c "$cmd" >/dev/null 2>&1 &
 fi

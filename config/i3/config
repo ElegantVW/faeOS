@@ -34,8 +34,8 @@ bindsym $mod+d exec --no-startup-id rofi -show drun
 bindsym $mod+z exec --no-startup-id rofi -show run
 
 # classic alt+tab: global MRU window cycling
-bindsym Mod1+Tab exec --no-startup-id ~/.local/bin/i3-cycle-win.py next
-bindsym Mod1+Shift+Tab exec --no-startup-id ~/.local/bin/i3-cycle-win.py prev
+bindsym Mod1+Tab exec --no-startup-id ~/bin/i3-cycle-win.py next
+bindsym Mod1+Shift+Tab exec --no-startup-id ~/bin/i3-cycle-win.py prev
 bindsym $mod+Tab workspace next
 
 # Font for window titles. Will also be used by the bar unless a different font
