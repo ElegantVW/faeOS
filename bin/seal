@@ -12,7 +12,6 @@ fi
 CANDIDATES=(
   "${SEAL_BIN:-}"
   "$HOME/.local/lib/faeos/seal"
-  "$HOME/bulwark/target/release/seal"
   "$FAEOS/seal/target/release/seal"
   "$HOME/faeos/seal/target/release/seal"
 )
@@ -23,5 +22,5 @@ for c in "${CANDIDATES[@]}"; do
 done
 
 echo "seal: engine not built yet." >&2
-echo "  next:   cd ~/bulwark && ./build.sh install" >&2
+echo "  build:  cd ~/faeos/seal && ./build.sh install" >&2
 exit 127

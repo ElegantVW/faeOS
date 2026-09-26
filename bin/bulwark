@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
 # bulwark — thin launcher (never a prebuilt ELF in git)
 # Discovery: BULWARK_BIN → ~/.local/lib/faeos/bulwark → sibling tree
+# Works under sudo too if this script lives in /usr/local/bin (see build.sh).
 set -euo pipefail
+
+# Under sudo, $HOME may be /root — still prefer the invoking user's engine.
+USER_HOME="${HOME}"
+if [[ -n "${SUDO_USER:-}" ]]; then
+  USER_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+  USER_HOME="${USER_HOME:-$HOME}"
+fi
 
 CANDIDATES=(
   "${BULWARK_BIN:-}"
-  "$HOME/.local/lib/faeos/bulwark"
-  "$HOME/bulwark/target/release/bulwark"
+  "$USER_HOME/.local/lib/faeos/bulwark"
+  /usr/local/lib/faeos/bulwark
+  "$USER_HOME/bulwark/target/release/bulwark"
   "${BULWARK_ROOT:-}/target/release/bulwark"
 )
+here="$(cd "$(dirname "$0")" && pwd)"
+if [[ -x "$here/../target/release/bulwark" ]]; then
+  CANDIDATES+=("$here/../target/release/bulwark")
+fi
 
 for c in "${CANDIDATES[@]}"; do
   [[ -n "$c" && -x "$c" ]] || continue
@@ -18,4 +31,5 @@ done
 echo "bulwark: engine not built yet." >&2
 echo "  build:  git clone git@github.com:ElegantVW/bulwark.git ~/bulwark" >&2
 echo "          cd ~/bulwark && ./build.sh install" >&2
+echo "  sudo:   sudo $USER_HOME/.local/lib/faeos/bulwark …" >&2
 exit 127
