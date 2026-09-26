@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# fae-cycle — window cycling for the house (kitty tabs, panels, any X11 client)
+# Usage: fae-cycle [next|prev]   (default: next; alias: fae-tab)
+# Pure X11: xprop + i3-msg. No xdotool/wmctrl needed.
+set -euo pipefail
+dir="${1:-next}"
+
+ids=$(DISPLAY="${DISPLAY:-:0}" xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //') || exit 0
+focused=""
+for w in $ids; do
+  # the focused window is the one whose _NET_WM_STATE contains _NET_WM_STATE_FOCUSED
+  if DISPLAY="${DISPLAY:-:0}" xprop -id "$w" _NET_WM_STATE 2>/dev/null | grep -q "_NET_WM_STATE_FOCUSED"; then
+    focused="$w"; break
+  fi
+done
+# i3 is the WM: con_id and window-id are different numbers. Map X window -> con_id.
+conid_for() {  # $1 = X window id (hex)
+  DISPLAY="${DISPLAY:-:0}" i3-msg -t get_tree 2>/dev/null | python3 -c "
+import json,sys
+try: t=json.load(sys.stdin)
+except Exception: raise SystemExit
+want=int('$1',16); found=None
+def walk(n):
+    global found
+    if n.get('window')==want: found=n['id']; return True
+    for c in n.get('nodes',[])+n.get('floating_nodes',[]):
+        if walk(c): return True
+    return False
+walk(t)
+print(found if found else '')" 2>/dev/null
+}
+
+list=($ids)
+[ -n "$focused" ] || { echo "fae-cycle: no focused window" >&2; exit 1; }
+n=${#list[@]}
+i=0
+for ((k=0;k<n;k++)); do [ "${list[$k]}" = "$focused" ] && { i=$k; break; }; done
+step=1; [ "$dir" = "prev" ] && step=-1
+j=$(( (i + step + n) % n ))
+target=${list[$j]}
+
+# scratchpad-hidden windows have no con id until shown; reveal them first
+con=$(conid_for "$target")
+if [ -z "$con" ]; then
+  state=$(DISPLAY="${DISPLAY:-:0}" i3-msg -t get_tree 2>/dev/null | python3 -c "
+import json,sys
+try: t=json.load(sys.stdin)
+except Exception: raise SystemExit
+want=int('$target',16); out='none'
+def walk(n):
+    global out
+    if n.get('window')==want: out=n.get('scratchpad_state','none'); return True
+    for c in n.get('nodes',[])+n.get('floating_nodes',[]):
+        if walk(c): return True
+    return False
+walk(t); print(out)" 2>/dev/null)
+  case "$state" in
+    fresh|hidden) DISPLAY="${DISPLAY:-:0}" i3-msg "[window=$((target))] scratchpad show" >/dev/null 2>&1 && con=$(conid_for "$target") ;;
+  esac
+fi
+if [ -n "$con" ]; then
+  DISPLAY="${DISPLAY:-:0}" i3-msg "[con_id=$con] focus" >/dev/null
+else
+  echo "fae-cycle: cannot focus $target (no con id; scratchpad?)" >&2; exit 1
+fi
+echo "fae-cycle: → $target (con $con)"
