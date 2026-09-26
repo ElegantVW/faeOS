@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import json
+import re
 import os
 import subprocess
 import time
@@ -35,6 +36,13 @@ def _menagerie() -> str:
             return cand
     return "menagerie"
 
+def _strip_think(text):
+    """Drop Qwen-style thinking traces; keep only the spoken lines."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)  # unclosed tail
+    return text.strip()
+
+
 class KurRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
@@ -58,7 +66,7 @@ class KurRequestHandler(BaseHTTPRequestHandler):
                 llm_prompt = f"<|im_start|>user\nWrite a brief, beautiful 3-line haiku about: {prompt}. Return only the 3 lines.<|im_end|>\n<|im_start|>assistant\n"
                 req_data = json.dumps({
                     "prompt": llm_prompt,
-                    "n_predict": 48,
+                    "n_predict": 256,
                     "temperature": 0.7
                 }).encode("utf-8")
                 
@@ -72,9 +80,9 @@ class KurRequestHandler(BaseHTTPRequestHandler):
                 haiku_text = ""
                 for _attempt in range(2):
                     try:
-                        with urllib.request.urlopen(req, timeout=8) as resp:
+                        with urllib.request.urlopen(req, timeout=90) as resp:
                             res_json = json.loads(resp.read().decode("utf-8"))
-                            haiku_text = res_json.get("content", "").strip()
+                            haiku_text = _strip_think(res_json.get("content", ""))
                             break
                     except Exception:
                         # our own model may have been unloaded when kur quit last;
