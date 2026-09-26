@@ -1,37 +1,40 @@
 #!/usr/bin/env bash
-# fae-cycle — window cycling for the house (kitty tabs, panels, any X11 client)
-# Usage: fae-cycle [next|prev]   (default: next; alias: fae-tab)
-# Pure X11: xprop + i3-msg. No xdotool/wmctrl needed.
+# fae-cycle — window cycling for the house with visible proof.
+# Usage: fae-cycle [next|prev]   (alias: fae-tab; env: FAE_CYCLE_QUIET=1 skips toast)
+# Cycling itself is xprop + i3-msg. The CUES are the point:
+#   1) a toast lands inside the window you arrived in (kitty via remote),
+#   2) a marker file lets fae-bar.sh flash the arrived window in the bar,
+#   3) i3 sets client_focus so the arrived client paints focused.
 set -euo pipefail
 dir="${1:-next}"
+D="${DISPLAY:-:0}"
+MARK="$HOME/.cache/faeos/cycle.marker"
 
-ids=$(DISPLAY="${DISPLAY:-:0}" xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //') || exit 0
+# ── find focused + collect windows ─────────────────────────────────────────
+ids=$(DISPLAY="$D" xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //' | tr ', ' '\n\n' | grep -E '^0x[0-9a-fA-F]+$') || exit 0
+[ -n "$ids" ] || exit 0
 focused=""
 for w in $ids; do
-  # the focused window is the one whose _NET_WM_STATE contains _NET_WM_STATE_FOCUSED
-  if DISPLAY="${DISPLAY:-:0}" xprop -id "$w" _NET_WM_STATE 2>/dev/null | grep -q "_NET_WM_STATE_FOCUSED"; then
+  if DISPLAY="$D" xprop -id "$w" _NET_WM_STATE 2>/dev/null | grep -q "_NET_WM_STATE_FOCUSED"; then
     focused="$w"; break
   fi
 done
-# i3 is the WM: con_id and window-id are different numbers. Map X window -> con_id.
-conid_for() {  # $1 = X window id (hex)
-  DISPLAY="${DISPLAY:-:0}" i3-msg -t get_tree 2>/dev/null | python3 -c "
+if [ -z "$focused" ]; then
+  focused=$(DISPLAY="$D" i3-msg -t get_tree 2>/dev/null | python3 -c "
 import json,sys
 try: t=json.load(sys.stdin)
 except Exception: raise SystemExit
-want=int('$1',16); found=None
+best=None
 def walk(n):
-    global found
-    if n.get('window')==want: found=n['id']; return True
+    global best
+    if n.get('focused') and n.get('window'): best=n['window']; return True
     for c in n.get('nodes',[])+n.get('floating_nodes',[]):
         if walk(c): return True
-    return False
-walk(t)
-print(found if found else '')" 2>/dev/null
-}
+walk(t); print(best or '')" 2>/dev/null || true)
+fi
+[ -n "$focused" ] || { echo "fae-cycle: no focused window" >&2; exit 1; }
 
 list=($ids)
-[ -n "$focused" ] || { echo "fae-cycle: no focused window" >&2; exit 1; }
 n=${#list[@]}
 i=0
 for ((k=0;k<n;k++)); do [ "${list[$k]}" = "$focused" ] && { i=$k; break; }; done
@@ -39,10 +42,21 @@ step=1; [ "$dir" = "prev" ] && step=-1
 j=$(( (i + step + n) % n ))
 target=${list[$j]}
 
-# scratchpad-hidden windows have no con id until shown; reveal them first
-con=$(conid_for "$target")
+# ── window → i3 con id (and reveal scratchpad) ───────────────────────────
+tree() { DISPLAY="$D" i3-msg -t get_tree 2>/dev/null; }
+con=$(tree | python3 -c "
+import json,sys
+try: t=json.load(sys.stdin)
+except Exception: raise SystemExit
+want=int('$target',16); found=None
+def walk(n):
+    global found
+    if n.get('window')==want: found=n['id']; return True
+    for c in n.get('nodes',[])+n.get('floating_nodes',[]):
+        if walk(c): return True
+walk(t); print(found or '')" 2>/dev/null)
 if [ -z "$con" ]; then
-  state=$(DISPLAY="${DISPLAY:-:0}" i3-msg -t get_tree 2>/dev/null | python3 -c "
+  state=$(tree | python3 -c "
 import json,sys
 try: t=json.load(sys.stdin)
 except Exception: raise SystemExit
@@ -52,15 +66,44 @@ def walk(n):
     if n.get('window')==want: out=n.get('scratchpad_state','none'); return True
     for c in n.get('nodes',[])+n.get('floating_nodes',[]):
         if walk(c): return True
-    return False
 walk(t); print(out)" 2>/dev/null)
   case "$state" in
-    fresh|hidden) DISPLAY="${DISPLAY:-:0}" i3-msg "[window=$((target))] scratchpad show" >/dev/null 2>&1 && con=$(conid_for "$target") ;;
+    fresh|hidden) DISPLAY="$D" i3-msg "[window=$((target))] scratchpad show" >/dev/null 2>&1
+      con=$(tree | python3 -c "
+import json,sys
+try: t=json.load(sys.stdin)
+except Exception: raise SystemExit
+want=int('$target',16); found=None
+def walk(n):
+    global found
+    if n.get('window')==want: found=n['id']; return True
+    for c in n.get('nodes',[])+n.get('floating_nodes',[]):
+        if walk(c): return True
+walk(t); print(found or '')" 2>/dev/null) ;;
   esac
 fi
-if [ -n "$con" ]; then
-  DISPLAY="${DISPLAY:-:0}" i3-msg "[con_id=$con] focus" >/dev/null
-else
-  echo "fae-cycle: cannot focus $target (no con id; scratchpad?)" >&2; exit 1
+[ -n "$con" ] || { echo "fae-cycle: cannot focus $target" >&2; exit 1; }
+DISPLAY="$D" i3-msg "[con_id=$con] focus" >/dev/null
+
+# ── cue 1: name the window for the toast + bar marker ───────────────────
+name=$(DISPLAY="$D" xprop -id "$target" WM_NAME 2>/dev/null | sed 's/.*= //; s/^"//; s/"$//' | cut -c1-28)
+[ -n "$name" ] || name="window"
+mkdir -p "$(dirname "$MARK")"
+printf '%s %s\n' "$target" "$name" > "$MARK"
+
+# ── cue 2: toast INSIDE the arrived window (kitty), else bar only ───────
+if [ "${FAE_CYCLE_QUIET:-0}" != "1" ] && command -v kitty >/dev/null 2>&1; then
+  toast=$'\033[38;5;175m╭─ ✦ fae-cycle ─╮\033[0m\n'"╭─ ✦ fae-cycle ─ ✦ ${dir} ────────────────────────╮\n\033[38;5;252m│ ► now looking at: ${name}\033[0m\n\033[38;5;132m╰── press Alt+Tab to keep wandering ──────╯\033[0m"
+  kitty @ --match id:"$target" transmit-text "$toast" >/dev/null 2>&1 || true
 fi
-echo "fae-cycle: → $target (con $con)"
+exit 0
+# ── louder when bound to a key: i3 --no-startup-id hides our stderr, so a
+# failure that would print "cannot focus" instead exits 2. Bindings treat 2 as
+# "show the house light": flash the bar segment red for a beat.
+[ "${FAE_CYCLE_QUIET:-0}" = "0" ] || exit 0
+name_hint=$(DISPLAY="$D" xprop -id "$focused" WM_NAME 2>/dev/null | sed 's/.*= //; s/^"//; s/"$//' | cut -c1-20)
+cat >&2 <<MSG
+fae-cycle: ${dir} from '${name_hint:-window}' → '${name}' (win $target)
+fae-cycle:   hint: press Alt+Tab again, or Alt+Shift+Tab to go back
+MSG
+exit 0

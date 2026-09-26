@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -u
-exec 2>/dev/null
+# never exec away: our stdout is the i3 bar protocol stream
 pink="#E879A0"
 hot="#FF2D55"
 lilac="#C44D7A"
@@ -44,7 +44,7 @@ print("bad" if bad else "ok")
 
 wins() {
 python3 -c '
-import json,subprocess,sys
+import json,subprocess,sys,os,time
 t=json.loads(subprocess.run(["i3-msg","-t","get_tree"],capture_output=True,text=True).stdout)
 ws=None
 def find(n):
@@ -68,13 +68,28 @@ def allwin(n):
     if n.get("window"): yield n
 ws=find(t) or first_ws(t)
 if not ws: raise SystemExit
-pink="#E879A0"; cream="#FFE3EE"
+pink="#E879A0"; cream="#FFE3EE"; lilac="#D4B4E8"; hot="#FF2D55"
+marker=os.path.expanduser("~/.cache/faeos/cycle.marker")
+# (wins() shows only the FOCUSED workspace, so match on the cycle arrow, not the id)
+cycled=False
+if os.path.exists(marker):
+    try:
+        if time.time()-os.path.getmtime(marker) < 2.5:
+            cycled=True
+    except Exception: pass
 for n in [w for w in allwin(ws)][:8]:
     wp=n.get("window_properties") or {}
     label=(wp.get("title") or wp.get("class") or "?").strip()
     if len(label)>10: label=label[:9]+"…"
-    if n.get("focused"): label="• "+label
-    sys.stdout.write(label + "\x1f" + (pink if n.get("focused") else cream) + "\x1fwin:" + str(n["id"]) + "\x1f1\x00")
+    color=cream
+    if n.get("focused"):
+        label="• "+label
+        if cycled:
+            label="• ⇄ "+label[2:]
+            color=hot
+        else:
+            color=pink
+    sys.stdout.write(label + "\x1f" + color + "\x1fwin:" + str(n["id"]) + "\x1f1\x00")
 '
 }
 

@@ -230,6 +230,8 @@ bindsym $mod+r mode "resize"
 bar {
         font pango:DejaVu Sans Mono 12
         status_command $HOME/bin/fae-bar.sh
+        # NOTE: the bar is i3's only; fae-bar.sh owns the stream (it runs
+        # forever — no exec — or i3 prints "status_command exited").
         colors {
                 background #1a0a12
                 statusline #ffe3ee
