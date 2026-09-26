@@ -19,3 +19,9 @@ landscape 120x34 (masters) vs tall (stories), SHOOT_DISP selects.
 ## batch008 — pixie fit
 pixie boxes fit narrow terminals; menagerie echoes shortened. Portrait
 9:16 clips long lines (frame, not app) — captions carry meaning.
+
+## batch009 — not footage, but the record
+fae-cycle cue research: border, runtime colour flip, root repaint, and
+overlay window all measured and rejected (why is in bin/fae-cycle). Toast
++ stderr is what survived; a screen-wide flash belongs in our own
+compositor, not a shell script.
