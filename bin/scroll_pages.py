@@ -120,6 +120,7 @@ PAGES: list[AppPage] = [
         how=[
             'pixie "what is eating my disk?" — ask in quotes.',
             "She may call tools; `-v` shows the wires. Models wake through Menagerie.",
+            "Canonical repo: ElegantVW/pixie (faeOS keeps working copies).",
             "If she is silent, try: menagerie ensure pixie",
         ],
         cli=[
@@ -663,6 +664,7 @@ PAGES: list[AppPage] = [
         how=[
             "`seal` — lock now. `seald` — idle auto-lock (user service).",
             "`seal --greeter --session i3` or `seal-login` — graphical login face.",
+            "Source lives in the bulwark repo (glass/); faeOS keeps launchers.",
             "PAM: /etc/pam.d/seal (bootstrap installs). Failed attempts never unlock.",
         ],
         cli=[
@@ -785,6 +787,46 @@ PAGES: list[AppPage] = [
         ],
         runes=[B()],
     ),
+    AppPage(
+        id="mourama",
+        name="Mourama",
+        domain="Play",
+        tagline="Five-seat Iberian hillfort — the office box is the world.",
+        intro=[
+            "✦ Mourama ✦ keeps a citânia: cobre, estanho, seara, orvalho.",
+            "Five seats, no sixth. Native window, local icons, Tailscale reach.",
+            "Server stays on :4747 — LAN only, never the whole internet.",
+        ],
+        how=[
+            "mourama invite — one-time code, max five seats.",
+            "mourama play — native window (Linux).",
+            "Repo: ElegantVW/mourama. World saves stay 0600 on disk.",
+        ],
+        cli=[
+            ("mourama play", "Open the hillfort window"),
+            ("mourama invite", "Mint a one-time seat"),
+        ],
+        runes=[B()],
+    ),
+    AppPage(
+        id="grove",
+        name="Grove",
+        domain="Discover",
+        tagline="The mother clearing — fire, glass, house, suite.",
+        intro=[
+            "✦ Grove ✦ is the bigger picture: Kindling fire, Seal glass,",
+            "the house that does not lie, and the faeOS suite.",
+            "One page per layer, site and story in ElegantVW/grove.",
+        ],
+        how=[
+            "Read the map: faeos/docs/elegantvw.md.",
+            "Climb the site from the fire. Install order lives there.",
+        ],
+        cli=[
+            ("grove", "Front door (static site, serves anywhere)"),
+        ],
+        runes=[B()],
+    ),
     # Hermetic / egg pages are not in PAGES — built by curriculum() at runtime.
 ]
 
@@ -822,6 +864,8 @@ CURRICULUM: list[str] = [
     "tick",
     "hearth",
     "rift",
+    "mourama",
+    "grove",
     # then: hermetic OR kur (runtime), then PATH
 ]
 
@@ -900,7 +944,7 @@ def kur_page() -> AppPage:
         cli=[
             ('kur "…"', "Ask the dragon; hear a haiku"),
             ("menagerie ensure kur", "Summon his model"),
-            ("kur-server", "Voice daemon (usually via menagerie/systemd)"),
+            ("kur-server", "Voice daemon on :8083 (systemd kur-server.service)"),
         ],
         runes=[R("speak", 'kur "hello, old one"'), R("ensure", "menagerie ensure kur"), B()],
     )

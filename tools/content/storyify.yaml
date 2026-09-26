@@ -53,3 +53,12 @@ entries:
       - [18, 40, "voice law on paper"]
       - [40, 62, "kur and magpie"]
       - [62, 200, "faeOS bumper"]
+  kur:
+    title: "Kur wakes and speaks"
+    what: "pen on :8083, mind on :8081"
+    flavor: "answers only in three lines"
+    chapters:
+      - [0, 10, "wake the pen"]
+      - [10, 55, "first true-name speech"]
+      - [55, 81, "the leaf unfolds"]
+      - [81, 200, "Kur bumper"]

@@ -61,7 +61,8 @@ try:
 except Exception:
     print(
         "The quiet pen is asleep on 8083.\n"
-        "Wake the pen:  menagerie ensure kur\n"
+        "Wake the pen:  systemctl --user start kur-server\n"
+        "(menagerie ensure kur wakes his model on 8081)\n"
         "Then speak again.",
         file=sys.stderr,
     )

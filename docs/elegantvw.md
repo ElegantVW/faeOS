@@ -10,7 +10,7 @@ prebuilt blobs you can't rebuild.
 |-------|------|-------|
 | Fire | Firmware + kernel we write (Kindling) | [fae-kernel](https://github.com/ElegantVW/fae-kernel) |
 | Glass | Screen lock + guest + terminal | [bulwark](https://github.com/ElegantVW/bulwark) (`glass/`), faeOS `hearth/`, `rift/` (incomplete) |
-| House | Firewall ward, local AI agent, music, mail, emulator, hillfort game | [bulwark](https://github.com/ElegantVW/bulwark) (`house/`), [pixie](https://github.com/ElegantVW/pixie), [siren](https://github.com/ElegantVW/siren), [goblin](https://github.com/ElegantVW/goblin), [fairy-lantern](https://github.com/ElegantVW/fairy-lantern), [mourama](https://github.com/ElegantVW/mourama) |
+| House | Firewall ward, local AI agent, music, mail, emulator, hillfort game, haiku dragon | [bulwark](https://github.com/ElegantVW/bulwark) (`house/`), [pixie](https://github.com/ElegantVW/pixie), [siren](https://github.com/ElegantVW/siren), [goblin](https://github.com/ElegantVW/goblin), [fairy-lantern](https://github.com/ElegantVW/fairy-lantern), [mourama](https://github.com/ElegantVW/mourama), [kur](https://github.com/ElegantVW/kur) |
 | Suite | Pink terminal kit that ties it together | [faeOS](https://github.com/ElegantVW/faeOS) |
 | Shop | Car-interior atelier software (private) | `vanguarda-automovel` (private) |
 
