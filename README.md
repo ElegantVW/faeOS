@@ -1,3 +1,5 @@
+![faeOS hero](assets/hero/faeos.svg)
+
 # FaeOS
 
 A pink, **offline-first** terminal ecosystem: framed status prompt, local **Pixie** agent (llama.cpp), **Siren** media player, **Kur** haiku bard, **Scry** history, **Ether** network weaves, **Magpie** privacy search — all wrapped in a cute fae-colored status box.

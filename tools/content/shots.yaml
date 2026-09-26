@@ -1,0 +1,92 @@
+# Content shot list — one command re-shoots everything.
+# Each entry: display, run, keys (kitty send-text, \\n = Enter), wait, out.
+# Terminal shots use the kitty socket; window shots use a bare Xvfb display.
+# GIFs assemble grabbed frames (ffmpeg two-pass palette, 640 wide, ~10fps).
+
+kitty_socket: unix:/tmp/opencode/kitty.sock
+shots_dir: /tmp/opencode/shots
+
+terminal: # display :99, verified with kitty get-text
+  - name: faeos-prompt
+    run: "true"
+    wait_s: 2
+    out: faeos-prompt.png
+  - name: bulwark-status
+    run: "~/bin/bulwark status"
+    wait_s: 3
+    out: bulwark-status.png
+  - name: bulwark-tui
+    run: "~/bin/bulwark"
+    wait_s: 3
+    keys: ["s"]
+    keys_wait_s: 2
+    out: bulwark-tui.png
+    quit: "q"
+  - name: goblin-summon
+    run: "~/bin/goblin"
+    wait_s: 3
+    out: goblin-summon.png
+    quit: "\\x1b"
+  - name: goblin-steal
+    run: "~/bin/goblin steal"
+    wait_s: 3
+    out: goblin-steal.png
+  - name: siren-tui
+    run: "~/bin/siren"
+    wait_s: 3
+    keys: ["\\r"]
+    keys_wait_s: 2
+    out: siren-tui.png
+    quit: "q"
+  - name: pixie-hello
+    needs: "menagerie ensure pixie"
+    run: "~/bin/pixie \"say hi in five words\""
+    wait_s: 100
+    out: pixie-hello.png
+  - name: menagerie-tui
+    run: "~/bin/menagerie"
+    wait_s: 3
+    out: menagerie-tui.png
+    quit: "q"
+  - name: kindle-serial
+    run: "cd ~/fae-kernel && make kindle"
+    wait_s: 14
+    out: kindle-serial.png
+    note: "needs QEMU_TIMEOUT='--foreground 4' if serial is silent under make"
+
+gifs: # record first, act during recording
+  - name: kindle-boot
+    record_s: 16
+    during: "cd ~/fae-kernel && make kindle"
+    out: kindle-boot.gif
+  - name: prompt-type
+    record_s: 10
+    during: "~/bin/bulwark status"
+    out: prompt-type.gif
+
+windows: # display :98, static states only (no key injection exists)
+  - name: fairy-spark
+    run: "~/bin/fairy spark"
+    wait_s: 7
+    out: fairy-spark.png
+    gif_s: 5
+    gif_out: fairy-spark.gif
+    kill: "fairy spark"
+    note: "SPARK is one pixel awaiting keys; GIF is static by nature"
+  - name: mourama-play
+    run: "~/.local/lib/faeos/mourama-play"
+    wait_s: 7
+    out: mourama-play.png
+    kill: "mourama-play"
+    readonly: true
+  - name: seal-lock
+    run: "~/.local/lib/faeos/seal"
+    wait_s: 5
+    out: seal-lock.png
+    kill: "-9 -x seal"
+  - name: kindle-vga
+    run: "cd ~/fae-kernel && make hearth-see"
+    wait_s: 100
+    out: kindle-vga.png
+    kill: "qemu-system"
+    note: "this QEMU has no GUI backend; VNC/RFB capture instead of X grab"

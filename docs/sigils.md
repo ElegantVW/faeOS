@@ -17,10 +17,18 @@ CP437-safe text. PNGs are derived, never the source of truth.
 | Mourama | `mourama/assets/sigils/mourama.txt` (hillfort) | Dusk 1 (`34`) |
 | Siren | `siren/assets/sigils/siren.txt` (waves) | Mist 3 (`36`) |
 | Grove / faeOS | `faeOS/assets/sigils/grove.txt` (clearing) | Violet 5 (`35`) |
-| Kur (later) | three lines 5-7-5 | Moon 15 (`97`) |
-| Magpie (later) | forked feather | Periwinkle 9 (`94`) |
+| Kur | `faeOS/assets/sigils/kur.txt` (three lines 5-7-5) | Moon 15 (`97`) |
+| Magpie | `faeOS/assets/sigils/magpie.txt` (forked feather) | Periwinkle 9 (`94`) |
 
 Night (`40` bg) behind all. Lilac stays Kindling's first-glyph color.
+
+## Colorized forms (derived, committed)
+
+- `.ans` next to every `.txt`: same glyphs wrapped in the app accent code.
+  Generated, committed (dumb terminals ignore the codes gracefully enough).
+- `assets/hero/<app>.svg`: 720×360 repo-top hero (Night bg, accent sigil,
+  Parchment name, Dusk sub). Built by `tools/content/sigil2svg.py`.
+  Embedded as the first README line of all 8 public repos.
 
 ## Mascots
 
