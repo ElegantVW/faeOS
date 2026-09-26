@@ -90,3 +90,14 @@ windows: # display :98, static states only (no key injection exists)
     out: kindle-vga.png
     kill: "qemu-system"
     note: "this QEMU has no GUI backend; VNC/RFB capture instead of X grab"
+
+sequences: # make.sh sequence NAME — tested recipes, each >= 60s with story bumper
+  # lessons embedded: clean_prompt first (trove ate two takes), QEMU needs
+  # timeout --foreground (fixed in fae-kernel), 4B model for shoots (restore 8B)
+  - kindling: [kindle, below, bumper]
+  - bulwark: [tour x7 enter, status, ward, sentinel, bumper]
+  - pixie: [set 4B, haiku exchange, status all, restore 8B, bumper]
+  - siren: [TUI tour, audio, trove (quit after!), bumper]
+  - faeos: [scry/menagerie/kur/magpie help, voice doc, bumper]
+  - mourama: [client pan, icon montage, bumper] (built by montage agent)
+  # pending: goblin (fresh account), seal (hands), fairy (cart + input)
