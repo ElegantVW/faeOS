@@ -15,3 +15,7 @@ History preserved in git; this log is the map.
 :96 at 1080x1920, tall kitty (~80 cols, font 22). storyify portrait path
 is contain (scale-to-width + Night pad), never cover. Rig profiles:
 landscape 120x34 (masters) vs tall (stories), SHOOT_DISP selects.
+
+## batch008 — pixie fit
+pixie boxes fit narrow terminals; menagerie echoes shortened. Portrait
+9:16 clips long lines (frame, not app) — captions carry meaning.
