@@ -2,6 +2,8 @@
 
 A pink, **offline-first** terminal ecosystem: framed status prompt, local **Pixie** agent (llama.cpp), **Siren** media player, **Kur** haiku bard, **Scry** history, **Ether** network weaves, **Magpie** privacy search — all wrapped in a cute fae-colored status box.
 
+Part of [ElegantVW](docs/elegantvw.md) — the pink offline-first house (fire → glass → house → suite).
+
 Works on **Linux** (Arch + kmscon tested). **Source-only kit** — scripts, shell hooks, configs, and thin launchers. Rust engines (Bulwark, Fairy Lantern, Seal, …) are built on the machine; see [docs/engines.md](docs/engines.md).
 
 Single main plan: [faeOSplan.md](faeOSplan.md). Per-app plans: [docs/plans/](docs/plans/). Design: [docs/design.md](docs/design.md). CLI voice: [docs/cli-voice.md](docs/cli-voice.md).
