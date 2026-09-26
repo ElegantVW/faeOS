@@ -7,7 +7,8 @@
 # Env: KITTY_SOCK (default unix:/tmp/opencode/kitty.sock), SHOTS_DIR.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-KITTY_SOCK="${KITTY_SOCK:-unix:/tmp/opencode/kitty.sock}"
+KITTY_SOCK="${KITTY_SOCK:-unix:/tmp/opencode/kitty97.sock}"
+DISP="${SHOOT_DISP:-:97}"
 SHOTS_DIR="${SHOTS_DIR:-/tmp/opencode/shots}"
 MODE="${1:-shots}"
 mkdir -p "$SHOTS_DIR"
@@ -63,14 +64,14 @@ run_sequence() { # $1 entry — record a tested recipe, see shots.yaml sequences
   clean_prompt || { echo "no clean prompt; abort" >&2; return 1; }
   case "$entry" in
     kindling)
-      ffmpeg -y -v error -f x11grab -framerate 10 -i :99 -t 150 "$take" &
+      ffmpeg -y -v error -f x11grab -framerate 10 -i "$DISP" -t 150 "$take" &
       rec=$!; sleep 2
       kitty_send 'cd ~/fae-kernel && make kindle\n'; sleep 14
       kitty_send 'make below\n'; sleep 120
       wait $rec
       ;;
     bulwark)
-      ffmpeg -y -v error -f x11grab -framerate 10 -i :99 -t 110 "$take" &
+      ffmpeg -y -v error -f x11grab -framerate 10 -i "$DISP" -t 110 "$take" &
       rec=$!; sleep 2
       kitty_send '~/bin/bulwark tour\n'; sleep 5
       for _ in 1 2 3 4 5 6 7; do kitty_send '\r'; sleep 5; done
@@ -81,7 +82,7 @@ run_sequence() { # $1 entry — record a tested recipe, see shots.yaml sequences
       wait $rec
       ;;
     pixie)
-      ffmpeg -y -v error -f x11grab -framerate 10 -i :99 -t 95 "$take" &
+      ffmpeg -y -v error -f x11grab -framerate 10 -i "$DISP" -t 95 "$take" &
       rec=$!; sleep 2
       kitty_send '~/bin/menagerie set pixie qwen3-4b-instruct-q4_k_m\n'; sleep 22
       kitty_send '~/bin/pixie "haiku about my terminal"\n'; sleep 45
@@ -90,7 +91,7 @@ run_sequence() { # $1 entry — record a tested recipe, see shots.yaml sequences
       wait $rec
       ;;
     siren)
-      ffmpeg -y -v error -f x11grab -framerate 10 -i :99 -t 90 "$take" &
+      ffmpeg -y -v error -f x11grab -framerate 10 -i "$DISP" -t 90 "$take" &
       rec=$!; sleep 2
       kitty_send '~/bin/siren\n'; sleep 4
       kitty_send '\r'; sleep 4
@@ -103,7 +104,7 @@ run_sequence() { # $1 entry — record a tested recipe, see shots.yaml sequences
       wait $rec
       ;;
     faeos)
-      ffmpeg -y -v error -f x11grab -framerate 10 -i :99 -t 75 "$take" &
+      ffmpeg -y -v error -f x11grab -framerate 10 -i "$DISP" -t 75 "$take" &
       rec=$!; sleep 2
       kitty_send '~/bin/scry --help\n'; sleep 7
       kitty_send '~/bin/menagerie status all\n'; sleep 9
@@ -111,6 +112,16 @@ run_sequence() { # $1 entry — record a tested recipe, see shots.yaml sequences
       kitty_send '~/bin/kur --help\n'; sleep 7
       kitty_send '~/bin/magpie --help\n'; sleep 7
       kitty_send 'true\n'; sleep 3
+      wait $rec
+      ;;
+    scroll)
+      # protocol: pkill stale scrolls (bracket trick!), verify clean prompt,
+      # NEVER glue \x03 to a command, verify scroll open before rolling.
+      ffmpeg -y -v error -f x11grab -framerate 10 -i "$DISP" -t 72 "$take" &
+      rec=$!; sleep 2
+      kitty_send '~/bin/scroll\n'; sleep 6
+      for _ in 1 2 3 4 5 6 7 8; do kitty_send '\t'; sleep 6; done
+      kitty_send 'q'; sleep 2
       wait $rec
       ;;
   esac
@@ -123,8 +134,8 @@ case "$MODE" in
   sequence)
     ENTRY="${2:-}"
     case "$ENTRY" in
-      kindling|bulwark|pixie|siren|faeos) run_sequence "$ENTRY" ;;
-      *) echo "sequences: kindling bulwark pixie siren faeos (goblin/seal/fairy need hands or accounts)" >&2; exit 1 ;;
+      kindling|bulwark|pixie|siren|faeos|scroll) run_sequence "$ENTRY" ;;
+      *) echo "sequences: kindling bulwark pixie siren faeos scroll (goblin/seal/fairy need hands or accounts)" >&2; exit 1 ;;
     esac
     exit 0
     ;;

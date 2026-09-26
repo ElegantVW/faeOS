@@ -101,3 +101,11 @@ sequences: # make.sh sequence NAME — tested recipes, each >= 60s with story bu
   - faeos: [scry/menagerie/kur/magpie help, voice doc, bumper]
   - mourama: [client pan, icon montage, bumper] (built by montage agent)
   # pending: goblin (fresh account), seal (hands), fairy (cart + input)
+
+rig: # hard-won, do not relearn
+  display: ":97 (Xvfb :99 wedged its GL stack 2026-09-26; kitty draws black there)"
+  socket: "unix:/tmp/opencode/kitty97.sock"
+  pkill: "NEVER pkill -f with a literal pattern (kills own shell); use [b]racket trick"
+  sends: "NEVER glue \\x03 to a command (kitty eats following chars: echo->cho)"
+  tuis: "pkill stale instances + verify clean prompt + verify open before rolling"
+  verify: "get-text reads kitty's live grid; video may lie (frozen present) - two-grab diff test"

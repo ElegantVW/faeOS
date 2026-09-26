@@ -62,3 +62,20 @@ entries:
       - [10, 55, "first true-name speech"]
       - [55, 81, "the leaf unfolds"]
       - [81, 200, "Kur bumper"]
+  tv:
+    title: "tv flips the glass"
+    what: "crt shader on or off, persistent"
+    flavor: "clean glass or warm static"
+    chapters:
+      - [0, 12, "read the switch"]
+      - [12, 24, "off - clean glass"]
+      - [24, 35, "on - warm static"]
+      - [35, 200, "faeOS bumper"]
+  scroll:
+    title: "Scroll turns its leaves"
+    what: "35 pages, tab to walk"
+    flavor: "one page per familiar"
+    chapters:
+      - [0, 8, "open the living book"]
+      - [8, 60, "pixie, menagerie, imp and on"]
+      - [60, 200, "faeOS bumper"]
