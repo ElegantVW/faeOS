@@ -1,0 +1,55 @@
+# Story caption tracks for storyify.py — chapter text per entry (seconds).
+# Top box: title + what + flavor, always on. Bottom: chapter per segment.
+entries:
+  kindling:
+    title: "Kindling raises the spark"
+    what: "firmware to gate, live, no takes"
+    flavor: "phase 1 green - phase 2 shut"
+    chapters:
+      - [0, 15, "make kindle - the paved fire"]
+      - [15, 130, "make below - the full gate"]
+      - [130, 200, "Kindling bumper"]
+  bulwark:
+    title: "Bulwark shows its work"
+    what: "tour plus reports, nothing hidden"
+    flavor: "missing wall is never SAFE"
+    chapters:
+      - [0, 46, "first-run tour, wall sigil first"]
+      - [46, 99, "status, ward, sentinel"]
+      - [99, 200, "Bulwark bumper"]
+  pixie:
+    title: "Pixie answers on her own box"
+    what: "local model, 4B for camera, 8B after"
+    flavor: "cute after competence"
+    chapters:
+      - [0, 24, "summoning the 4B for speed"]
+      - [24, 69, "a live haiku exchange"]
+      - [69, 79, "bindings check"]
+      - [79, 87, "8B restored"]
+      - [87, 200, "Pixie bumper"]
+  siren:
+    title: "Siren opens the vessel"
+    what: "browser, audio, live archive"
+    flavor: "never blasts, never lies"
+    chapters:
+      - [0, 20, "TUI tour - browser to queue"]
+      - [20, 27, "audio routing"]
+      - [27, 80, "trove, live from the archive"]
+      - [80, 200, "Siren bumper"]
+  mourama:
+    title: "Mourama musters Kel Madje"
+    what: "buildings, garrison, icons"
+    flavor: "five seats, office box world"
+    chapters:
+      - [0, 43, "the seat, slow pan"]
+      - [43, 58, "icon muster"]
+      - [58, 200, "Mourama bumper"]
+  faeos:
+    title: "The suite checks itself"
+    what: "helps, bindings, voice law"
+    flavor: "keyboard stays the hero"
+    chapters:
+      - [0, 18, "scry and bindings"]
+      - [18, 40, "voice law on paper"]
+      - [40, 62, "kur and magpie"]
+      - [62, 200, "faeOS bumper"]
