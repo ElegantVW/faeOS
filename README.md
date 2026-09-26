@@ -10,6 +10,18 @@ Single main plan: [faeOSplan.md](faeOSplan.md). Per-app plans: [docs/plans/](doc
 
 **Terminal-first:** keyboard and CLI remain the hero path; mouse on TUIs is optional sugar. Pink crystal frames (`fae_termart`) unify the look.
 
+## Look
+
+![faeOS pink status prompt](assets/screenshots/faeos-prompt.png)
+
+```
+\  |  /
+ \| |/ 
+---+---
+ / | \ 
+/  |  \
+```
+
 ## Quick install (second machine)
 
 ```bash
