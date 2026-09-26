@@ -79,3 +79,70 @@ entries:
       - [0, 8, "open the living book"]
       - [8, 60, "pixie, menagerie, imp and on"]
       - [60, 200, "faeOS bumper"]
+  kindling6:
+    title: "Kindling raises the spark"
+    what: "firmware to gate, live, no takes"
+    flavor: "phase 1 green - phase 2 shut"
+    chapters:
+      - [0, 16, "make kindle - the paved fire"]
+      - [16, 141, "make below - the full gate"]
+      - [141, 200, "Kindling bumper"]
+  bulwark6:
+    title: "Bulwark shows its work"
+    what: "tour plus reports, nothing hidden"
+    flavor: "missing wall is never SAFE"
+    chapters:
+      - [0, 47, "first-run tour, wall sigil first"]
+      - [47, 91, "status, ward"]
+      - [91, 200, "Bulwark bumper"]
+  pixie6:
+    title: "Pixie answers on her own box"
+    what: "local model, 4B for camera, 8B after"
+    flavor: "cute after competence"
+    chapters:
+      - [0, 24, "summoning the 4B for speed"]
+      - [24, 69, "a live haiku exchange"]
+      - [69, 81, "8B restored"]
+      - [81, 200, "Pixie bumper"]
+  siren6:
+    title: "Siren opens the vessel"
+    what: "browser, audio, live archive"
+    flavor: "never blasts, never lies"
+    chapters:
+      - [0, 20, "TUI tour - browser to queue"]
+      - [20, 28, "audio routing"]
+      - [28, 71, "trove, live from the archive"]
+      - [71, 200, "Siren bumper"]
+  faeos6:
+    title: "The suite checks itself"
+    what: "helps, bindings, voice law"
+    flavor: "keyboard stays the hero"
+    chapters:
+      - [0, 26, "scry, bindings, voice law"]
+      - [26, 48, "kur and magpie"]
+      - [48, 61, "prompt returns"]
+      - [61, 200, "faeOS bumper"]
+  kur6:
+    title: "Kur wakes and speaks"
+    what: "a new haiku, same dragon"
+    flavor: "answers only in three lines"
+    chapters:
+      - [0, 50, "snow on the garden wall"]
+      - [50, 200, "Kur bumper"]
+  scroll6:
+    title: "Scroll turns its leaves"
+    what: "new pages, tab to walk"
+    flavor: "one page per familiar"
+    chapters:
+      - [0, 8, "open the living book"]
+      - [8, 61, "pixie through goblin"]
+      - [61, 200, "faeOS bumper"]
+  tv6:
+    title: "tv flips the glass"
+    what: "crt shader on or off, persistent"
+    flavor: "clean glass or warm static"
+    chapters:
+      - [0, 13, "read the switch"]
+      - [13, 25, "off - clean glass"]
+      - [25, 34, "on - warm static"]
+      - [34, 200, "faeOS bumper"]

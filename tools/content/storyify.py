@@ -112,7 +112,9 @@ def main() -> int:
     fc = ["ffmpeg", "-y", "-v", "error", "-i", args.src]
     filters = []
     if portrait:
-        filters.append("[0:v]scale=1080:1920,format=yuv420p[vbase]")
+        # contain narrow sources (e.g. window crops): scale to width, pad Night
+        filters.append("[0:v]scale=1080:-2,format=yuv420p[vfit]")
+        filters.append("[vfit]pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=#1A1218[vbase]")
         vy = "(1920-ih)/2"
     else:
         filters.append("[0:v]scale=1080:675,format=yuv420p[vvid]")

@@ -10,3 +10,8 @@ Terminal PNGs (905×800, full window) + GIFs + window shots, in
 Same files, bottom-trimmed to content + 40px (bg-mode sampling,
 root-black excluded). Siren shots kept full (genuinely tall).
 History preserved in git; this log is the map.
+
+## batch006 — portrait-native rig
+:96 at 1080x1920, tall kitty (~80 cols, font 22). storyify portrait path
+is contain (scale-to-width + Night pad), never cover. Rig profiles:
+landscape 120x34 (masters) vs tall (stories), SHOOT_DISP selects.
