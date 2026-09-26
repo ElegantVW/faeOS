@@ -54,7 +54,7 @@ def main() -> int:
         )
     parts.append("</g>")
     parts.append(
-        f'<text x="{cx}" y="{name_y}" fill="{PARCHMENT}" font-family="Fraunces, Georgia, serif" font-size="36" text-anchor="middle">{html.escape(args.name)}</text>'
+        f'<text x="{cx}" y="{name_y}" fill="{PARCHMENT}" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" font-size="30" font-weight="bold" text-anchor="middle">{html.escape(args.name)}</text>'
     )
     if args.sub:
         parts.append(
