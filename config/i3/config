@@ -41,18 +41,12 @@ bindsym Mod1+c exec --no-startup-id ~/bin/fae-cycle next
 bindsym Mod1+Shift+c exec --no-startup-id ~/bin/fae-cycle prev
 bindsym $mod+Tab workspace next
 
-# Font for window titles. Will also be used by the bar unless a different font
-# is used in the # No i3bar: the bar script needed a resident process to stay alive, and a
-# dying status_command printed errors in the corner of every screen. Cycling
-# cues live in the windows themselves (fae-cycle toast + border pulse).
-
+# Font for window titles (there is no bar; the title bar uses this).
 bindsym $mod+r mode "resize"
 
-# No i3bar on purpose. The bar script needed a resident process to survive,
-# and a dying status_command printed errors in the corner of every screen.
-# Cycling cues live inside the windows instead: fae-cycle paints a toast in
-# the window you arrive in and pulses its border.
-
+# No i3bar on purpose: its status script needed a resident process, and a dying
+# status_command printed errors on screen. fae-cycle paints its cues inside the
+# windows instead (toast when a kitty socket exists, border pulse always).
 
 exec --no-startup-id kitty
 exec --no-startup-id kitty
