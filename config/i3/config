@@ -50,6 +50,9 @@ font pango:monospace 8
 # https://wiki.archlinux.org/index.php/XDG_Autostart
 exec --no-startup-id dex --autostart --environment i3
 
+# faeOS keyboard: Portuguese layout on every i3 start/reload.
+exec --no-startup-id setxkbmap -layout pt -model pc105 -option terminate:ctrl_alt_bksp
+
 # The combination of xss-lock, nm-applet and pactl is a popular choice, so
 # they are included here as an example. Modify as you see fit.
 

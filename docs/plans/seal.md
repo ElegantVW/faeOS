@@ -1,7 +1,8 @@
-# Seal — screen lock + greeter
+# Seal — screen lock + greeter (glass, lives in bulwark repo)
 
-**Role:** Lock the graphical session; optional graphical login face.  
+**Role:** Lock the graphical session; optional graphical login face.
 **Status:** lock + PAM + greeter mode · startx integration via `seal-login`
+**Repo:** [ElegantVW/bulwark](https://github.com/ElegantVW/bulwark) → `~/bulwark/glass/` (faeOS keeps thin launchers only)
 
 ## Surface
 - `seal` — lock now (X11 animated face)

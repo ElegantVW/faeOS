@@ -186,13 +186,16 @@ def winsize(fd: int | None = None, default: tuple[int, int] = (80, 24)) -> tuple
         return default
 
 
-def term_width(default: int = 72, *, cap: int = 96, floor: int = 44, margin: int = 1) -> int:
+def term_width(default: int = 72, *, cap: int | None = 96, floor: int = 44, margin: int = 1) -> int:
     """Usable box width. margin keeps the last column free so print+newline
-    does not auto-wrap (kmscon/xterm xenl) and shatter right borders on n/p."""
+    does not auto-wrap (kmscon/xterm xenl) and shatter right borders on n/p.
+    cap=None: no upper clamp (fullscreen TUIs). Default cap 96 for one-shot boxes."""
     cols, _ = winsize(_size_fd)
     if cols <= 0:
         cols = default
     usable = max(1, cols - max(0, margin))
+    if cap is None:
+        return max(floor, usable)
     return max(floor, min(usable, cap))
 
 
@@ -552,6 +555,26 @@ def box(
     return "\n".join(out)
 
 
+def hrule(width: int, title: str = "", *, accent: str | None = None) -> str:
+    """Full-width box divider: ├─ title ─┤ (ASCII +-- title --+). vis_len == width."""
+    acc = accent if accent is not None else P.PINK_DIM
+    w = max(8, int(width))
+    inner = w - 2
+    if _ascii_box_enabled():
+        lt, rt, hz, mark, ell = "+", "+", "-", "*", "..."
+    else:
+        lt, rt, hz, mark, ell = "├", "┤", "─", "✦", "…"
+    if title:
+        tplain = strip_ansi(title)
+        label = f" {mark} {tplain} {mark} "
+        if vis_len(label) > inner - 2:
+            keep = max(1, inner - 8)
+            label = f" {mark} {tplain[:keep]}{ell} {mark} "
+        fill = max(0, inner - vis_len(label) - 1)
+        return paint(lt + hz, acc) + paint(label, P.BOLD, P.PINK) + paint(hz * fill + rt, acc)
+    return paint(lt + hz * inner + rt, acc)
+
+
 def rule(width: int | None = None, *, char: str | None = None) -> str:
     w = width or term_width()
     ch = char if char is not None else ("-" if _ascii_box_enabled() else "─")
@@ -706,7 +729,9 @@ LEAVE_ALT = "\033[?25h\033[?7h\033[?1049l"
 # 1000 = click, 1002 = drag, 1006 = SGR extended coords
 MOUSE_ON = "\033[?1000h\033[?1002h\033[?1006h"
 MOUSE_OFF = "\033[?1006l\033[?1002l\033[?1000l"
-_TUI_HYGIENE = "\033[0m\033[?25h\033[?7h\033[?2004l" + MOUSE_OFF
+PASTE_ON = "\033[?2004h"
+PASTE_OFF = "\033[?2004l"
+_TUI_HYGIENE = "\033[0m\033[?25h\033[?7h" + PASTE_OFF + MOUSE_OFF
 
 _tui_fd: int | None = None
 _tui_old = None
@@ -714,6 +739,13 @@ _tui_alt = False
 _tui_mouse = False
 _tui_hold_name: str | None = None
 _tui_active = False  # True while a tui_begin session is live
+
+
+@dataclass(frozen=True)
+class PasteEvent:
+    """Bracketed paste payload (newlines normalized)."""
+
+    text: str
 
 
 @dataclass(frozen=True)
@@ -987,7 +1019,7 @@ def tui_begin(fd: int, hold_name: str = "pixie", *, mouse: bool = True) -> None:
     atexit.register(tui_cleanup)
     bind_tty(fd, color=True)
     try:
-        tty_write(fd, ENTER_ALT + (MOUSE_ON if mouse else ""))
+        tty_write(fd, ENTER_ALT + PASTE_ON + (MOUSE_ON if mouse else ""))
         _tui_alt = True
         _tui_mouse = bool(mouse)
     except OSError:
@@ -1092,6 +1124,21 @@ def tui_read_event(fd: int, timeout: float | None = None) -> str | MouseEvent:
             me = parse_sgr_mouse(s)
             if me is not None:
                 return me
+            if s.startswith("200~"):
+                buf = bytearray()
+                while True:
+                    r, _, _ = select.select([fd], [], [], 5.0)
+                    if not r:
+                        break
+                    chunk = os.read(fd, 4096)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    mark = buf.find(b"\x1b[201~")
+                    if mark >= 0:
+                        text = buf[:mark].decode("utf-8", "replace")
+                        return PasteEvent(text.replace("\r\n", "\n").replace("\r", "\n"))
+                return PasteEvent(buf.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n"))
             return _decode_csi_key(s)
         if n1 == b"O":
             r, _, _ = select.select([fd], [], [], 0.05)
@@ -1123,11 +1170,9 @@ def tui_read_key(fd: int, timeout: float | None = None) -> str:
             if rem <= 0:
                 return ""
         ev = tui_read_event(fd, timeout=rem)
-        if isinstance(ev, MouseEvent):
+        if isinstance(ev, (MouseEvent, PasteEvent)):
             if deadline is None:
-                # Blocking mode: skip mouse and wait for a real key.
                 continue
-            # Timed mode: treat discarded mouse as idle tick (same as timeout).
             return ""
         return ev
 

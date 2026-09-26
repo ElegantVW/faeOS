@@ -8,10 +8,24 @@
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 
 # ── SSH agent ──────────────────────────────────────────────────
-if [[ -z "$SSH_AUTH_SOCK" ]]; then
+# One shared agent for every shell: systemd --user owns the socket at
+# ~/.ssh/agent.sock (see systemd/ssh-agent.service). Never clobbers an
+# agent inherited from `ssh -A`; falls back to a private spawn if the
+# unit can't be reached.
+_faeos_sock="$HOME/.ssh/agent.sock"
+if [[ -n "$SSH_AUTH_SOCK" && -S "$SSH_AUTH_SOCK" ]]; then
+  : # keep inherited/forwarded agent
+elif [[ -S "$_faeos_sock" ]]; then
+  export SSH_AUTH_SOCK="$_faeos_sock"
+elif command -v systemctl >/dev/null 2>&1 && \
+     systemctl --user start ssh-agent.service >/dev/null 2>&1 && \
+     [[ -S "$_faeos_sock" ]]; then
+  export SSH_AUTH_SOCK="$_faeos_sock"
+elif command -v ssh-agent >/dev/null 2>&1; then
   eval "$(ssh-agent -s)" >/dev/null 2>&1
 fi
-if [[ -f "$HOME/.ssh/faeos_push" ]]; then
+unset _faeos_sock
+if [[ -f "$HOME/.ssh/faeos_push" ]] && command -v ssh-add >/dev/null 2>&1; then
   ssh-add -l >/dev/null 2>&1 || ssh-add "$HOME/.ssh/faeos_push" >/dev/null 2>&1
 fi
 

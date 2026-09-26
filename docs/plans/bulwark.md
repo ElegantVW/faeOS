@@ -2,8 +2,8 @@
 
 **Role:** Network wall (Aegis), integrity photo (Purity), open windows (Sentinel), hunt (Ward).  
 **Status:** honest MVP + boot restore; entering **trust + adversarial** phase  
-**Repo:** [ElegantVW/bulwark](https://github.com/ElegantVW/bulwark) → `~/bulwark`  
-**Not Seal:** Seal seals the glass (lock/greeter). Bulwark watches the house.
+**Repo:** [ElegantVW/bulwark](https://github.com/ElegantVW/bulwark) → `~/bulwark`
+**Glass + house:** Seal (`glass/`, screen lock) ships in the same repo; Bulwark (`house/`) watches the house. Separate privilege/state/units.
 
 ## North star (for agents)
 

@@ -29,7 +29,11 @@ RUNNER="${PIXIE_MENAGERIE_RUNNER:-$SELF_DIR/menagerie-run}"
 [[ -x "$RUNNER" ]] || RUNNER="$HOME/bin/menagerie-run"
 HOST="127.0.0.1"
 NGL="${PIXIE_LLM_NGL:-0}"
-THREADS="${PIXIE_LLM_THREADS:-$(nproc 2>/dev/null || echo 4)}"
+# llama-bench (Ryzen 9 3950X, qwen3-4b Q4_K_M): tg 18.1 t/s @8t vs 10.1 @16t
+# vs 8.1 @32t — plain `nproc` (32) was the WORST. Gen threads 8; prompt/batch
+# threads 16 (pp512: 83.6 t/s @16t vs 72.7 @8t). Override per-box via env.
+THREADS="${PIXIE_LLM_THREADS:-8}"
+THREADS_BATCH="${PIXIE_LLM_THREADS_BATCH:-16}"
 
 APP=""
 PORT=""
@@ -179,13 +183,14 @@ cmd_start() {
 
   echo "summoning llama.cpp [$APP] on ${URL} …"
   echo "  model: $MODEL_PATH"
-  echo "  ctx=$CTX threads=$THREADS alias=$ALIAS"
+  echo "  ctx=$CTX threads=$THREADS (gen) / $THREADS_BATCH (prompt) alias=$ALIAS"
   nohup env \
     PIXIE_LLM_MODEL="$MODEL_PATH" \
     PIXIE_LLM_HOST="$HOST" \
     PIXIE_LLM_PORT="$PORT" \
     PIXIE_LLM_CTX="$CTX" \
     PIXIE_LLM_THREADS="$THREADS" \
+    PIXIE_LLM_THREADS_BATCH="$THREADS_BATCH" \
     PIXIE_LLM_NGL="$NGL" \
     PIXIE_LLM_ALIAS="$ALIAS" \
     "$RUNNER" >"$LOG_FILE" 2>&1 &

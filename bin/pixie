@@ -18,17 +18,33 @@ import urllib.request
 import time
 from pathlib import Path
 
+_BIN_DIR = Path(__file__).resolve().parent
+if str(_BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_BIN_DIR))
+import pixie_mind as mind  # noqa: E402
+
 API_URL = f"http://127.0.0.1:{os.environ.get('PIXIE_LLM_PORT', '8080')}/completion"
 
-SYSTEM_PROMPT = """You are Pixie, a sharp, helpful, and concise AI assistant running locally.
+
+def _system_prompt() -> str:
+    names = ", ".join(mind.spell_names()) or "(none)"
+    mem = mind.load_memory_inject()
+    return f"""You are Pixie, a sharp, helpful, and concise AI assistant running locally.
 You have access to local system tools. You can choose to call a tool by outputting a clean JSON object containing "name" and "arguments" fields.
 Your primary AI runtime is the menagerie: each app (pixie, ask, magpie, imp, kur) owns its own local llama-server instance — pixie's lives on port 8080.
 
 Available tools:
-1. execute_bash: {"name": "execute_bash", "arguments": {"command": "string"}}
-2. read_local_file: {"name": "read_local_file", "arguments": {"path": "string", "start_line": int, "end_line": int}}
-3. manage_systemd_service: {"name": "manage_systemd_service", "arguments": {"service_name": "string", "action": "status|restart|logs"}}
-4. check_mail: {"name": "check_mail", "arguments": {"sync": bool, "box": "unread|read|trash"}}
+1. execute_bash: {{"name": "execute_bash", "arguments": {{"command": "string"}}}}
+2. read_local_file: {{"name": "read_local_file", "arguments": {{"path": "string", "start_line": int, "end_line": int}}}}
+3. manage_systemd_service: {{"name": "manage_systemd_service", "arguments": {{"service_name": "string", "action": "status|restart|logs"}}}}
+4. check_mail: {{"name": "check_mail", "arguments": {{"sync": bool, "box": "unread|read|trash"}}}}
+5. house: {{"name": "house", "arguments": {{"spell": "string", "args": ["string"]}}}}
+6. remember: {{"name": "remember", "arguments": {{"fact": "string"}}}}
+
+Known house spells: {names}. Prefer house over inventing bash. execute_bash already sees ~/bin and rewrites those names.
+
+House memory:
+{mem}
 
 If you need to use a tool to answer the user, output ONLY the JSON object for that tool call. No other text.
 If you have the final answer or do not need a tool, output a clear, friendly conversational response."""
@@ -78,26 +94,20 @@ class _Confirm:
 
 
 def run_bash_command(command: str) -> dict:
-    """Run a command as an argument vector (no shell), so metacharacters
-    (pipes, `&&`, `;`, `$(...)`, redirects) are never interpreted."""
+    """Run a command as an argument vector (no shell). Spell names rewrite
+    to house bins; PATH includes ~/bin."""
     if not isinstance(command, str) or not command.strip():
         return {"error": "empty command"}
     try:
-        argv = shlex.split(command)
+        argv = mind.rewrite_bash(command)
     except ValueError as e:
         return {"error": f"could not parse command: {e}"}
     if not argv:
         return {"error": "empty command"}
-    argv = [os.path.expanduser(a) for a in argv]
-    if argv[0] in ("systemctl", "journalctl") and "--no-pager" not in argv:
+    head = Path(argv[0]).name
+    if head in ("systemctl", "journalctl") and "--no-pager" not in argv:
         argv.insert(1, "--no-pager")
-    try:
-        res = subprocess.run(argv, capture_output=True, text=True, timeout=20)
-        return {"stdout": res.stdout.strip(), "stderr": res.stderr.strip(), "exit_code": res.returncode}
-    except FileNotFoundError:
-        return {"error": f"command not found: {argv[0]}"}
-    except Exception as e:
-        return {"error": str(e)}
+    return mind.run_argv(argv)
 
 def read_local_file(path: str, start_line: int | None = None, end_line: int | None = None) -> dict:
     try:
@@ -181,78 +191,14 @@ def write_local_file(path: str, content: str) -> dict:
         return {"error": str(e)}
 
 def web_research(query: str, max_results: int = 5) -> dict:
-    """Search the web: DuckDuckGo HTML, then DuckDuckGo lite, then Wikipedia API."""
-    import html as _html
-    import re
-    ua = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) faeOS-pixie/1.0"}
+    """Search via Magpie (ddgr → DDG HTML → Marginalia)."""
+    return mind.search_web(query, max_results)
 
-    def parse_ddg(page: str, max_n: int) -> list:
-        items = []
-        for m in re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page):
-            href, title = m.group(1), re.sub(r"<[^>]+>", "", m.group(2))
-            if "uddg=" in href:
-                href = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
-            items.append({"title": _html.unescape(title).strip(), "url": href})
-            if len(items) >= max_n:
-                break
-        snips = [re.sub(r"<[^>]+>", "", m.group(1)) for m in
-                 re.finditer(r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', page)]
-        for i, s in enumerate(snips[:len(items)]):
-            items[i]["snippet"] = _html.unescape(s).strip()[:300]
-        return items
-
-    q = urllib.parse.quote(query)
-    engine = "duckduckgo"
-    items = []
-    try:
-        for base in ("https://html.duckduckgo.com/html/?q=",
-                     "https://lite.duckduckgo.com/lite/?q="):
-            req = urllib.request.Request(base + q, headers=ua)
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                page = resp.read().decode("utf-8", "replace")
-            items = parse_ddg(page, max_results)
-            if items:
-                break
-    except Exception:
-        pass
-    if not items:
-        # Wikipedia API fallback — reliable, real sources
-        engine = "wikipedia"
-        try:
-            wurl = ("https://en.wikipedia.org/w/api.php?action=query&list=search"
-                    f"&srsearch={q}&format=json&srlimit={max_results}")
-            req = urllib.request.Request(wurl, headers=ua)
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                d = json.loads(resp.read().decode("utf-8", "replace"))
-            for r in d.get("query", {}).get("search", []):
-                items.append({
-                    "title": r.get("title", ""),
-                    "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(r.get("title", "").replace(" ", "_")),
-                    "snippet": re.sub(r"<[^>]+>", "", r.get("snippet", "")),
-                })
-        except Exception as e:
-            return {"error": f"web_research failed: {e}"}
-    if not items:
-        return {"query": query, "results": [], "count": 0,
-                "note": "no results parsed (network may be offline or search engines blocked)"}
-    return {"query": query, "engine": engine, "results": items, "count": len(items)}
 
 def fetch_web_page(url: str, max_chars: int = 4000) -> dict:
-    """Fetch a URL and strip to readable text (title + paragraphs)."""
-    import html as _html
-    import re
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (faeOS pixie)"})
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            page = resp.read().decode("utf-8", "replace")
-        title = re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)
-        body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", page, flags=re.S | re.I)
-        body = re.sub(r"<[^>]+>", " ", body)
-        body = _html.unescape(re.sub(r"\s+", " ", body)).strip()
-        return {"url": url, "title": _html.unescape(title.group(1)).strip() if title else "",
-                "text": body[:max_chars]}
-    except Exception as e:
-        return {"error": f"fetch_web_page failed: {e}"}
+    """Read a URL through Magpie browse --dump."""
+    return mind.read_page(url, max_chars)
+
 
 # --- Mail (via goblin: aerc IMAP → ~/.cache/goblin/mail/{unread,read,trash}/*.txt) ---
 
@@ -315,7 +261,8 @@ def check_mail(sync: bool = True, box: str = "unread", max_messages: int = 20) -
     return result
 
 _KNOWN_TOOLS = ["execute_bash", "read_local_file", "manage_systemd_service",
-                "write_local_file", "web_research", "fetch_web_page", "check_mail"]
+                "write_local_file", "web_research", "fetch_web_page", "check_mail",
+                "house", "remember", "wiki", "search_house", "write_plan"]
 
 _TOOL_ALIASES = {
     "create_file": "write_local_file", "create": "write_local_file",
@@ -326,6 +273,9 @@ _TOOL_ALIASES = {
     "read_file": "read_local_file", "read": "read_local_file",
     "search_web": "web_research", "web_search": "web_research",
     "fetch_url": "fetch_web_page", "open_url": "fetch_web_page",
+    "read_page": "fetch_web_page", "wikipedia": "wiki", "wiki_search": "wiki",
+    "grep_house": "search_house", "search_docs": "search_house",
+    "save_plan": "write_plan", "plan": "write_plan",
     "systemctl": "manage_systemd_service",
     "check_email": "check_mail", "mail": "check_mail", "email": "check_mail",
     "get_mail": "check_mail", "list_mail": "check_mail", "read_mail": "check_mail",
@@ -338,6 +288,9 @@ _TOOL_ALIASES = {
     "execute_script": "execute_bash", "run_terminal_command": "execute_bash",
     "shell_command": "execute_bash", "terminal": "execute_bash",
     "run_script": "execute_bash", "run_python": "execute_bash",
+    "cast": "house", "spell": "house", "run_spell": "house", "invoke": "house",
+    "memory": "remember", "note": "remember", "memorize": "remember",
+    "save_memory": "remember",
 }
 
 def _norm_args(fname: str, fargs: dict) -> dict:
@@ -359,9 +312,46 @@ def _norm_args(fname: str, fargs: dict) -> dict:
         box = str(fargs.get("box", fargs.get("folder", fargs.get("mailbox", "unread"))) or "unread")
         limit = fargs.get("max_messages", fargs.get("limit", fargs.get("max_results", 20)))
         return {"sync": sync, "box": box, "max_messages": int(limit or 20)}
+    if fname == "house":
+        spell = next((fargs[k] for k in ("spell", "name", "command", "bin") if k in fargs), "")
+        args = fargs.get("args", fargs.get("arguments", fargs.get("extra", [])))
+        if isinstance(args, str):
+            try:
+                args = shlex.split(args)
+            except ValueError:
+                args = [args]
+        if not isinstance(args, list):
+            args = [str(args)] if args is not None else []
+        spell = str(spell).strip()
+        if " " in spell and not args:
+            try:
+                parts = shlex.split(spell)
+            except ValueError:
+                parts = spell.split()
+            if parts:
+                spell, args = parts[0], parts[1:]
+        return {"spell": spell, "args": [str(a) for a in args]}
+    if fname == "remember":
+        fact = next((fargs[k] for k in ("fact", "text", "note", "memory", "content") if k in fargs), "")
+        return {"fact": str(fact)}
+    if fname == "wiki":
+        q = next((fargs[k] for k in ("query", "q", "search", "topic") if k in fargs), "")
+        n = fargs.get("max_results", fargs.get("limit", 5))
+        return {"query": str(q), "max_results": int(n or 5)}
+    if fname == "search_house":
+        q = next((fargs[k] for k in ("query", "q", "search", "pattern") if k in fargs), "")
+        return {"query": str(q)}
+    if fname == "write_plan":
+        return {
+            "goal": str(fargs.get("goal", fargs.get("title", ""))),
+            "steps": fargs.get("steps", fargs.get("plan", [])),
+            "files": fargs.get("files", fargs.get("paths", [])),
+            "risks": fargs.get("risks", fargs.get("tradeoffs", [])),
+            "verify": str(fargs.get("verify", fargs.get("check", ""))),
+        }
     return fargs
 
-def run_tool(fname: str, fargs: dict, confirm=None) -> dict:
+def run_tool(fname: str, fargs: dict, confirm=None, session_id: str = "") -> dict:
     """Execute a single tool call (mirrors ask_pixie dispatch).
 
     `confirm` is an optional callable(fname, fargs) -> bool used to gate
@@ -392,11 +382,50 @@ def run_tool(fname: str, fargs: dict, confirm=None) -> dict:
     if fname == "write_local_file":
         return write_local_file(fargs.get('path', ''), fargs.get('content', ''))
     if fname == "web_research":
-        return web_research(fargs.get('query', ''), int(fargs.get('max_results', 5)))
+        r = web_research(fargs.get('query', ''), int(fargs.get('max_results', 5)))
+        if session_id:
+            for item in r.get("results") or []:
+                mind.note_source(session_id, item.get("url", ""), item.get("title", ""))
+        return r
     if fname == "fetch_web_page":
-        return fetch_web_page(fargs.get('url', ''), int(fargs.get('max_chars', 4000)))
+        r = fetch_web_page(fargs.get('url', ''), int(fargs.get('max_chars', 6000)))
+        if session_id:
+            mind.note_source(session_id, r.get("url") or fargs.get("url", ""), r.get("title", ""))
+        return r
+    if fname == "wiki":
+        r = mind.wiki(fargs.get("query", ""), int(fargs.get("max_results", 5)))
+        if session_id:
+            for item in r.get("results") or []:
+                mind.note_source(session_id, item.get("url", ""), item.get("title", ""))
+        return r
+    if fname == "search_house":
+        return mind.search_house(fargs.get("query", ""))
+    if fname == "write_plan":
+        return mind.write_plan(
+            fargs.get("goal", ""),
+            steps=fargs.get("steps"),
+            files=fargs.get("files"),
+            risks=fargs.get("risks"),
+            verify=fargs.get("verify", ""),
+            session_id=session_id,
+        )
     if fname == "check_mail":
         return check_mail(fargs.get('sync', True), fargs.get('box', 'unread'), fargs.get('max_messages', 20))
+    if fname == "house":
+        spell = str(fargs.get("spell") or "")
+        extra = list(fargs.get("args") or [])
+        r = mind.resolve_spell(spell, extra)
+        if "error" in r:
+            return r
+        if r.get("confirm"):
+            if confirm is None:
+                return {"error": (f"'house {spell}' needs approval and none is available here; "
+                                  "run `pixie` (interactive chat) to review and approve actions.")}
+            if not confirm(fname, {"spell": spell, "args": extra}):
+                return {"error": f"'house {spell}' was not approved by the user."}
+        return mind.run_argv(r["argv"])
+    if fname == "remember":
+        return mind.remember(fargs.get("fact", ""))
     return {"error": f"Unknown function mapping: {fname}"}
 
 _TOOL_RESULT_CAP = 1200
@@ -421,19 +450,8 @@ def tool_payload(results: list) -> str:
     return "[" + ", ".join(parts) + "]"
 
 def _drop_oldest(msgs: list, keep_ratio: float = 0.5) -> bool:
-    """Drop oldest non-system messages so a retry fits the context. Returns
-    True if anything was dropped."""
-    non_sys = [m for m in msgs if m["role"] != "system"]
-    drop = max(1, int(len(non_sys) * (1 - keep_ratio)))
-    dropped = False
-    for m in list(msgs[1:]):
-        if drop <= 0:
-            break
-        if m["role"] != "system":
-            msgs.remove(m)
-            drop -= 1
-            dropped = True
-    return dropped
+    """Drop oldest tool payloads first so a retry fits the context."""
+    return mind.drop_oldest(msgs, keep_ratio)
 
 def extract_tool_call(text: str):
     """Find a JSON object with name+arguments anywhere in text (handles
@@ -442,43 +460,8 @@ def extract_tool_call(text: str):
     return calls[0] if calls else None
 
 def extract_all_tool_calls(text: str, limit: int = 8) -> list:
-    """Extract every JSON object with name+arguments, in order."""
-    s = text
-    out = []
-    i = s.find("{")
-    while i != -1 and len(out) < limit:
-        depth = 0
-        in_str = False
-        esc = False
-        j = i
-        while j < len(s):
-            c = s[j]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    in_str = False
-            else:
-                if c == '"':
-                    in_str = True
-                elif c == "{":
-                    depth += 1
-                elif c == "}":
-                    depth -= 1
-                    if depth == 0:
-                        cand = s[i:j + 1]
-                        try:
-                            d = json.loads(cand)
-                        except (json.JSONDecodeError, ValueError):
-                            break
-                        if isinstance(d, dict) and "name" in d and "arguments" in d:
-                            out.append((d, i, j + 1))
-                        break
-            j += 1
-        i = s.find("{", i + 1)
-    return out
+    """Extract tool calls from JSON, fences, XML, or mixed prose."""
+    return mind.extract_tool_calls(text, limit=limit)
 # --- Raw Completion Communications ---
 
 def llm_up(verbose: bool = False) -> bool:
@@ -551,10 +534,13 @@ def query_raw_llm(raw_prompt: str) -> str:
 def ask_pixie(user_prompt: str, verbose: bool = False) -> str:
     os.environ["PIXIE_UNICODE"] = "1"
     os.environ["LANG"] = "en_US.UTF-8"
+    mind.seed_memory()
+    sid = "oneshot-" + time.strftime("%Y%m%d-%H%M%S")
+    mind.append_session(sid, "user", user_prompt, rune="oneshot")
 
     raw_prompt = (
         "<|im_start|>system\n"
-        f"{SYSTEM_PROMPT}<|im_end|>\n"
+        f"{_system_prompt()}<|im_end|>\n"
         f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
@@ -622,12 +608,18 @@ def ask_pixie(user_prompt: str, verbose: bool = False) -> str:
         )
         
         final_response = query_raw_llm(raw_prompt)
+        mind.append_session(
+            sid, "tool", rune="oneshot",
+            tool=func_name, args=func_args, result=result, raw=first_response,
+        )
+        mind.append_session(sid, "assistant", final_response, rune="oneshot")
         return final_response
         
     else:
         if sys.stderr.isatty():
             print("\033[F\033[K", end="", file=sys.stderr)
 
+    mind.append_session(sid, "assistant", first_response, rune="oneshot")
     return first_response
 
 _TOOL_LOG = os.path.expanduser("~/.cache/pixie/chat_tools.log")
@@ -681,20 +673,38 @@ def stream_completion(prompt: str, on_chunk, cancel: dict, err_sink=None) -> str
             err_sink(str(e))
     return "".join(full)
 
-def chat_messages(chat: list, rune: dict) -> list:
+def chat_messages(chat: list, rune: dict, session_id: str = "") -> list:
     tools_block = "\n".join(
         f"{i}. {name}: {schema}" for i, (name, schema) in enumerate(rune.get("tools", []), 1)
     )
+    extra = ""
+    plan = mind.load_plan(session_id) if session_id else ""
+    if plan:
+        extra += f"\n\nActive plan:\n{plan}\n"
+    srcs = mind.listed_sources(session_id) if session_id else []
+    if srcs:
+        extra += "\nSources gathered this session:\n" + "\n".join(
+            f"- {s.get('title') or s.get('url')} {s.get('url')}" for s in srcs[:16]
+        )
     sys_ctx = (f"You are running on the user's faeOS system.\n"
                f"Current working directory: {os.getcwd()}\n"
-               f"Use real, existing paths (relative to the working directory or absolute).\n\n"
+               f"Use real, existing paths (relative to the working directory or absolute).\n"
+               f"{mind.spells_line()}\n\n"
+               f"House memory:\n{mind.load_memory_inject()}\n"
+               f"{extra}\n"
                f"{rune['prompt']}\n\n"
                f"Available tools in this mode:\n{tools_block}")
     msgs = [{"role": "system", "content": sys_ctx}]
     history = chat[-14:]
+    last_tool = mind.last_tool_entry(history)
     n = len(history)
     for i, entry in enumerate(history):
-        role, text, *_ = entry
+        role, text, *rest = entry
+        if role == "tool":
+            if last_tool is not None and entry is last_tool:
+                body = rest[0] if rest else text
+                msgs.append({"role": "tool", "content": str(body)[:_TOOL_RESULT_CAP]})
+            continue
         if role not in ("user", "assistant"):
             continue
         content = text
@@ -706,7 +716,35 @@ def chat_messages(chat: list, rune: dict) -> list:
         msgs.append({"role": role, "content": content})
     return msgs
 
-def stream_chat(messages: list, on_chunk, cancel: dict, err_sink=None) -> str:
+def _rune_tools(rune: dict) -> list:
+    """OpenAI-style tools array from a rune's (name, schema-string) list."""
+    out = []
+    for name, schema in rune.get("tools") or []:
+        props = {}
+        try:
+            raw = json.loads(schema) if isinstance(schema, str) else schema
+        except json.JSONDecodeError:
+            raw = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                t = str(v).strip().lower()
+                if t in ("int", "integer"):
+                    props[k] = {"type": "integer"}
+                elif t in ("bool", "boolean"):
+                    props[k] = {"type": "boolean"}
+                else:
+                    props[k] = {"type": "string"}
+        out.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "parameters": {"type": "object", "properties": props},
+            },
+        })
+    return out
+
+
+def stream_chat(messages: list, on_chunk, cancel: dict, err_sink=None, tools=None) -> str:
     """Stream a chat completion (OpenAI-style /v1/chat/completions)."""
     body = {
         "messages": messages,
@@ -714,6 +752,9 @@ def stream_chat(messages: list, on_chunk, cancel: dict, err_sink=None) -> str:
         "max_tokens": 2048,
         "stream": True,
     }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
     url = API_URL.replace("/completion", "/v1/chat/completions")
     req = urllib.request.Request(
         url,
@@ -722,6 +763,7 @@ def stream_chat(messages: list, on_chunk, cancel: dict, err_sink=None) -> str:
         method="POST",
     )
     full = []
+    acc_tools: dict[int, dict] = {}
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             for raw in resp:
@@ -739,14 +781,37 @@ def stream_chat(messages: list, on_chunk, cancel: dict, err_sink=None) -> str:
                     continue
                 for ch in d.get("choices", []):
                     delta = ch.get("delta", {}) or {}
-                    chunk = delta.get("content", "")
+                    for tc in delta.get("tool_calls") or []:
+                        idx = int(tc.get("index") or 0)
+                        slot = acc_tools.setdefault(idx, {"name": "", "arguments": ""})
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            slot["arguments"] += fn["arguments"]
+                    chunk = delta.get("content") or ""
                     if chunk:
                         full.append(chunk)
                         on_chunk(chunk)
     except Exception as e:
         if err_sink:
             err_sink(str(e))
-    return "".join(full)
+    text = "".join(full)
+    if acc_tools and not mind.extract_tool_calls(text, limit=1):
+        parts = []
+        for idx in sorted(acc_tools):
+            slot = acc_tools[idx]
+            try:
+                args = json.loads(slot["arguments"]) if slot["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {"command": slot["arguments"]}
+            parts.append({"name": slot["name"], "arguments": args})
+        if parts:
+            synth = json.dumps(parts[0])
+            if not text:
+                on_chunk(synth)
+            text = synth if not text else text + "\n" + synth
+    return text
 
 def build_prompt(chat: list[tuple[str, str]], rune: dict) -> str:
     parts = [f"<|im_start|>system\n{rune['prompt']}<|im_end|>"]
@@ -762,6 +827,10 @@ Open every reply with a short, whimsical pixie remark that fits the user's reque
 End every reply with a tiny cute pixie sign-off. Never let the cute act delay or dilute the work — the information and the task come first, always."""
 
 _TOOL_RULES = """Tool calls: when you need a tool, your reply is EXACTLY one JSON object {"name": "<tool>", "arguments": {...}} — no markdown fences, no plan, no explanation, no pixie play, no trailing text. A tool-call reply is pure JSON, always. Personality, wings, and playfulness are ONLY for conversational replies. The harness executes your JSON and feeds back the result; then you continue. When the task is done, give a proper conversational answer."""
+
+_HOUSE_HINT = """Prefer the house tool for faeOS launchers (V, siren, play, magpie, …). Use remember for durable house facts — never secrets, never client names. execute_bash already includes ~/bin on PATH and rewrites spell names."""
+
+_FACTS = """If a tool returns empty or an error, say you do not know. Never invent sizes, torque, URLs, or quotes."""
 
 _FEWSHOT_BUILD = """
 Few-shot example of a build session:
@@ -794,34 +863,50 @@ _RUNES = [
     {
         "key": "chat", "name": "Chat",
         "desc": "friendly chats · quick tasks",
-        "tools": [("execute_bash", '{"command": "string"}'),
+        "tools": [("house", '{"spell": "string", "args": ["string"]}'),
+                  ("remember", '{"fact": "string"}'),
+                  ("search_house", '{"query": "string"}'),
+                  ("web_research", '{"query": "string", "max_results": int}'),
+                  ("wiki", '{"query": "string", "max_results": int}'),
+                  ("execute_bash", '{"command": "string"}'),
                   ("read_local_file", '{"path": "string", "start_line": int, "end_line": int}'),
                   ("manage_systemd_service", '{"service_name": "string", "action": "status|restart|logs"}'),
                   ("check_mail", '{"sync": bool, "box": "unread|read|trash", "max_messages": int}')],
         "prompt": f"""{_PERSONA}
 You are in Chat mode: a general assistant on the user's faeOS system. Be concise and helpful; ask one clarifying question if the request is ambiguous; use tools when they help.
+For facts about the world (cars, sizes, torque, news), use search_house then web_research or wiki. Do not guess.
+{_HOUSE_HINT}
+{_FACTS}
+Example: {{"name": "house", "arguments": {{"spell": "menagerie"}}}}
 {_TOOL_RULES}""",
     },
     {
         "key": "deep", "name": "Deep",
         "desc": "deep research · sources",
+        "rounds": 10,
         "tools": [("web_research", '{"query": "string", "max_results": int}'),
                   ("fetch_web_page", '{"url": "string", "max_chars": int}'),
+                  ("wiki", '{"query": "string", "max_results": int}'),
+                  ("search_house", '{"query": "string"}'),
                   ("read_local_file", '{"path": "string"}')],
         "prompt": f"""{_PERSONA}
 You are in Deep Research mode. Investigate thoroughly, like the best research assistant:
-1. Break the question into sub-questions and call web_research once per sub-question.
-2. Call fetch_web_page on promising sources to read the actual content.
-3. Cross-check sources; never invent URLs, facts, or quotes.
-4. Synthesize a complete, well-structured answer.
-5. Always end with a "Sources:" section listing every URL you used.
+1. Break the question into sub-questions. Use search_house for faeOS docs first when the question is about this house.
+2. Call web_research (Magpie: DDG then Marginalia) per sub-question. Use wiki for encyclopedia facts.
+3. Call fetch_web_page on promising URLs and actually read them.
+4. Cross-check sources; never invent URLs, facts, or quotes.
+5. Synthesize a complete, well-structured answer.
+6. Always end with a "Sources:" section listing every URL you used.
+{_FACTS}
 {_TOOL_RULES}
 {_FEWSHOT_RESEARCH}""",
     },
     {
         "key": "build", "name": "Build",
         "desc": "implement and verify code",
-        "tools": [("execute_bash", '{"command": "string"}'),
+        "rounds": 10,
+        "tools": [("house", '{"spell": "string", "args": ["string"]}'),
+                  ("execute_bash", '{"command": "string"}'),
                   ("read_local_file", '{"path": "string", "start_line": int, "end_line": int}'),
                   ("write_local_file", '{"path": "string", "content": "string"}')],
         "prompt": f"""{_PERSONA}
@@ -832,25 +917,78 @@ You are in Build mode, a coding agent like opencode's build mode. Implement what
 4. Report concisely: what you changed (files), how you verified it, and next steps.
 Work in this order: (a) inspect, (b) create/edit files, (c) run, (d) report. If a command fails because a file is missing (e.g. "No such file"), do NOT give up — create the file with write_local_file first, then re-run the command.
 Use multiple tool rounds when needed. Do not stop early. Do not pretend to run tools — you can only do what the harness actually executes.
+{_HOUSE_HINT}
 {_TOOL_RULES}
 {_FEWSHOT_BUILD}""",
     },
     {
         "key": "plan", "name": "Plan",
         "desc": "plan first · touch nothing",
+        "rounds": 10,
         "tools": [("execute_bash", '{"command": "string"}'),
-                  ("read_local_file", '{"path": "string", "start_line": int, "end_line": int}')],
+                  ("read_local_file", '{"path": "string", "start_line": int, "end_line": int}'),
+                  ("search_house", '{"query": "string"}'),
+                  ("web_research", '{"query": "string", "max_results": int}'),
+                  ("write_plan", '{"goal": "string", "steps": ["string"], "files": ["string"], "risks": ["string"], "verify": "string"}')],
         "prompt": f"""{_PERSONA}
 You are in Plan mode, like opencode's plan mode. Investigate and design before acting:
-1. Explore the relevant files and commands (read_local_file, read-only execute_bash like ls/git diff/whoami).
-2. Present a concise, concrete plan: goal, ordered steps, files to touch, risks/tradeoffs, and how to verify.
-3. Do NOT write or modify files and do NOT run mutating commands unless the user explicitly says to proceed.
+1. Explore with read_local_file, search_house, and read-only execute_bash (ls, git diff, whoami). web_research is allowed when the plan needs outside facts.
+2. Call write_plan with goal, ordered steps, files to touch, risks, and how to verify.
+3. Do NOT write project files and do NOT run mutating commands unless the user explicitly says to proceed.
+{_FACTS}
 {_TOOL_RULES}
 {_FEWSHOT_PLAN}""",
     },
 ]
 
-def chat_ui(verbose: bool = False) -> int:
+def _wall_row(text: str, tw: int, art) -> str:
+    body_w = max(1, tw - 4)
+    vis = art.vis_len(text)
+    if vis < body_w:
+        text = text + " " * (body_w - vis)
+    elif vis > body_w:
+        text = art.pad_vis(art.strip_ansi(text), body_w)
+    return "│ " + text + " │"
+
+
+def chrome_pack(
+    tw: int,
+    th: int,
+    title: str,
+    chat_lines: list[str],
+    prompt_lines: list[str],
+    status: str,
+    band: list[str] | None = None,
+    band_title: str = "plan",
+) -> list[str]:
+    """One outer frame. Every line vis_len == tw. Nested prompt/runes boxes stay out."""
+    import fae_termart as art
+
+    top = art.box("", title=title, width=tw, cap=None).splitlines()[0]
+    bot = art.box("", width=tw, cap=None).splitlines()[-1]
+    prompt_lines = list(prompt_lines) or [""]
+    band = list(band) if band else []
+    # top, bot, status, 2 hrules around prompt, optional (hrule + band)
+    overhead = 5 + len(prompt_lines) + (1 + len(band) if band else 0)
+    chat_area = max(1, th - overhead)
+    blank = _wall_row("", tw, art)
+    chat_lines = list(chat_lines)[:chat_area]
+    if len(chat_lines) < chat_area:
+        chat_lines = [blank] * (chat_area - len(chat_lines)) + chat_lines
+    out = [top]
+    out.extend(chat_lines)
+    if band:
+        out.append(art.hrule(tw, band_title))
+        out.extend(_wall_row(ln, tw, art) for ln in band)
+    out.append(art.hrule(tw))
+    out.extend(_wall_row(ln, tw, art) for ln in prompt_lines)
+    out.append(art.hrule(tw))
+    out.append(_wall_row(status, tw, art))
+    out.append(bot)
+    return out
+
+
+def chat_ui(verbose: bool = False, resume_id: str | None = None) -> int:
     import fae_termart as art
     from fae_termart import Palette as P
 
@@ -863,17 +1001,31 @@ def chat_ui(verbose: bool = False) -> int:
         return 1
     art.tui_begin(fd, "pixie")
 
-    chat: list = []
     buf = ""
+    cur = 0
+    help_on = False
+    menu = {"kind": None, "idx": 0}
     busy = False
     rune_idx = 0
     cancel = {"flag": False}
     pending = {"text": "", "full": "", "live": False, "done": True,
-               "cancelled": False, "err": None, "tool": None}
+               "cancelled": False, "err": None, "tool": None, "round": (0, 6)}
     view = {"off": 0}
     waking = {"flag": False}
     enter_pending = False
     confirm = _Confirm()
+    mind.seed_memory()
+    if resume_id:
+        chat, last_rune = mind.chat_from_session(resume_id)
+        session_id = resume_id
+        view["off"] = 10**9
+        for i, r in enumerate(_RUNES):
+            if r["key"] == last_rune:
+                rune_idx = i
+                break
+    else:
+        chat = []
+        session_id = time.strftime("%Y%m%d-%H%M%S")
 
     if not llm_up(verbose):
         waking["flag"] = True
@@ -893,6 +1045,11 @@ def chat_ui(verbose: bool = False) -> int:
                 lines.append(str(result["stdout"])[:260])
             elif result.get("written"):
                 lines.append(f"wrote {result.get('bytes', 0)} bytes to {result.get('path')}")
+            elif "wrote" in result:
+                if result.get("wrote"):
+                    lines.append(f"remembered in {result.get('path')}")
+                else:
+                    lines.append(str(result.get("note") or "already known"))
             elif result.get("count") is not None:
                 lines.append(f"{result.get('count', 0)} results for {result.get('query', '')}")
         else:
@@ -901,18 +1058,21 @@ def chat_ui(verbose: bool = False) -> int:
 
     def send(text: str) -> None:
         nonlocal busy
+        rune = _RUNES[rune_idx]
         chat.append(("user", text))
+        mind.append_session(session_id, "user", text, rune=rune["key"])
         busy = True
         cancel["flag"] = False
         pending.update(text="", full="", live=False, done=False,
                        cancelled=False, err=None, tool=None)
-        rune = _RUNES[rune_idx]
         t0 = time.time()
         threading.Thread(target=worker, args=(text, rune, t0), daemon=True).start()
 
     def worker(text: str, rune: dict, t0: float) -> None:
-        msgs = chat_messages(chat, rune)
+        msgs = chat_messages(chat, rune, session_id=session_id)
         rounds = 0
+        round_cap = int(rune.get("rounds") or 6)
+        pending["round"] = (0, round_cap)
         first = ""
         last_call: tuple = (None, None)
         repeat = 0
@@ -934,14 +1094,30 @@ def chat_ui(verbose: bool = False) -> int:
             pending["err"] = msg
 
         ctx_retry = False
+        tools_ok = True
+        nudged = False
+        deep_nudged = False
+        spec_nudged = False
+        fetch_count = 0
+        empty_tool = False
         while True:
             first = ""
             pending["live"] = False
-            stream_chat(msgs, show, cancel, fail)
+            stream_chat(msgs, show, cancel, fail,
+                        tools=(_rune_tools(rune) if tools_ok else None))
+            first = mind.strip_think(first)
+            pending["full"] = mind.strip_think(pending.get("full") or "")
+            pending["text"] = mind.strip_think(pending.get("text") or "")
             if cancel["flag"]:
                 pending["cancelled"] = True
                 pending["done"] = True
                 return
+            if pending["err"] and tools_ok and "400" in pending["err"].lower():
+                tools_ok = False
+                pending["err"] = None
+                pending["full"] = ""
+                pending["text"] = ""
+                continue
             if (pending["err"] and not ctx_retry and len(msgs) > 2
                     and any(k in pending["err"].lower() for k in ("400", "context", "too long"))):
                 # Context overflow: drop the oldest history and retry once.
@@ -969,7 +1145,45 @@ def chat_ui(verbose: bool = False) -> int:
                         pending["text"] = stripped
                         pending["full"] = stripped
                         first = stripped
-            if tool_calls and rounds < 6:
+            if (not tool_calls and rune.get("key") == "deep" and fetch_count == 0
+                    and not deep_nudged and first.strip()):
+                deep_nudged = True
+                msgs.append({"role": "assistant", "content": first})
+                msgs.append({"role": "user", "content": (
+                    "That answer has no fetched page. Call fetch_web_page on a URL "
+                    "from the search results, then answer with Sources."
+                )})
+                pending["full"] = ""
+                pending["text"] = ""
+                pending["live"] = False
+                continue
+            if (not tool_calls and empty_tool and fetch_count == 0
+                    and mind.looks_like_invented_specs(first)
+                    and not spec_nudged and first.strip()):
+                spec_nudged = True
+                msgs.append({"role": "assistant", "content": first})
+                msgs.append({"role": "user", "content": (
+                    "No source for those numbers. Search the web or say you do not know. "
+                    "Do not invent sizes or torque."
+                )})
+                pending["full"] = ""
+                pending["text"] = ""
+                pending["live"] = False
+                continue
+            if (not tool_calls and not nudged and first.strip()
+                    and mind.looks_like_narrated_tools(first)):
+                nudged = True
+                msgs.append({"role": "assistant", "content": first})
+                msgs.append({"role": "user", "content": (
+                    "That was narration, not a tool call. If you need a tool, reply with "
+                    "EXACTLY one JSON object {\"name\": \"...\", \"arguments\": {...}} "
+                    "and nothing else. If you are done, answer conversationally."
+                )})
+                pending["full"] = ""
+                pending["text"] = ""
+                pending["live"] = False
+                continue
+            if tool_calls and rounds < round_cap:
                 results = []
                 for obj in tool_calls[:4]:
                     fname = obj.get("name", "")
@@ -982,9 +1196,21 @@ def chat_ui(verbose: bool = False) -> int:
                     if repeat >= 3:
                         break
                     t1 = time.time()
+                    pending["round"] = (rounds + 1, round_cap)
                     pending["tool"] = (fname, fargs, None, 0.0, t1)
-                    result = run_tool(fname, fargs, confirm=confirm.ask)
+                    result = run_tool(fname, fargs, confirm=confirm.ask, session_id=session_id)
+                    if fname == "fetch_web_page" and isinstance(result, dict) and not result.get("error"):
+                        fetch_count += 1
+                    if mind.tool_was_empty(result):
+                        empty_tool = True
+                    if fname == "write_plan" and isinstance(result, dict) and result.get("wrote"):
+                        menu["kind"] = "plan"
+                        menu["idx"] = 0
                     _log_tool(fname, fargs, result)
+                    mind.append_session(
+                        session_id, "tool", rune=rune.get("key", ""),
+                        tool=fname, args=fargs, result=result, raw=first,
+                    )
                     pending["tool"] = None
                     if cancel["flag"]:
                         pending["cancelled"] = True
@@ -1010,8 +1236,14 @@ def chat_ui(verbose: bool = False) -> int:
         elif pending["full"].strip():
             chat.append(("assistant", pending["full"].strip(),
                          f"Thought for {time.time() - t0:.2f}s"))
+            mind.append_session(
+                session_id, "assistant", pending["full"].strip(),
+                rune=rune.get("key", ""),
+            )
         elif pending["err"]:
-            chat.append(("assistant", f"(✦ pixie lost the connection: {pending['err']})"))
+            err = f"(✦ pixie lost the connection: {pending['err']})"
+            chat.append(("assistant", err))
+            mind.append_session(session_id, "assistant", err, rune=rune.get("key", ""))
         pending["done"] = True
 
     def bubble_w_for(text: str, title: str, max_w: int) -> int:
@@ -1021,10 +1253,10 @@ def chat_ui(verbose: bool = False) -> int:
         return min(max_w, w)
 
     def compose() -> str:
-        tw = art.term_width()
+        tw = art.term_width(cap=None)
         th = art.term_height()
         rune = _RUNES[rune_idx]
-        max_bw = min(tw - 8, (tw * 3) // 5)
+        max_bw = min(tw - 8, (tw * 4) // 5)
         gap = tw - 4
         sections: list[list[str]] = []
 
@@ -1045,64 +1277,122 @@ def chat_ui(verbose: bool = False) -> int:
             if entry[0] == "user":
                 _, text = entry
                 push(art.box(text, title="you", accent=P.BLUSH,
-                             width=bubble_w_for(text, "you", max_bw)).splitlines(), "left")
+                             width=bubble_w_for(text, "you", max_bw),
+                             cap=None).splitlines(), "left")
             elif entry[0] == "assistant":
                 text = entry[1]
                 ts = entry[2] if len(entry) > 2 else time.strftime("%H:%M")
                 push(art.box(text, title=f"Pixie ✦ {ts}", accent=P.BLUSH,
-                             width=bubble_w_for(text, f"Pixie ✦ {ts}", max_bw)).splitlines(), "right")
+                             width=bubble_w_for(text, f"Pixie ✦ {ts}", max_bw),
+                             cap=None).splitlines(), "right")
             else:
                 _, title, body = entry
                 push(art.box(body, title=title, accent=P.PINK_DIM,
-                             width=min(max_bw, tw - 8)).splitlines(), "center")
+                             width=min(max_bw, tw - 8), cap=None).splitlines(), "center")
 
-        input_box_title = "Pixie is pondering" if busy else f"Pixie ✦ {rune['name']}"
+        inner = max(8, tw - 4)
         if confirm.pending is not None:
             cfname, cfargs = confirm.pending
-            ctext = f"approve {cfname}? {json.dumps(cfargs)}"
-            input_box = art.box(art.pad_vis(art.paint("✦ " + ctext, P.BOLD, P.BLUSH) + "  [y/N]", tw - 8),
-                                title="Confirm action", width=tw - 4)
+            prompt_lines = art.wrap_plain(
+                f"approve {cfname}? {json.dumps(cfargs, ensure_ascii=False)}  [y/N]",
+                inner,
+            )[:8]
         elif waking["flag"]:
-            input_box = art.box(art.pad_vis("✦ waking the menagerie brain…", tw - 8),
-                                title=input_box_title, width=tw - 4)
+            prompt_lines = ["✦ waking the menagerie brain…"]
         elif busy:
-            phase = "thinking…"
+            rc = pending.get("round") or (0, 6)
+            phase = f"round {rc[0]}/{rc[1]} · thinking…"
             if pending["tool"]:
-                phase = f"calling {pending['tool'][0]}… ({time.time() - pending['tool'][4]:.1f}s)"
-            input_box = art.box(art.pad_vis(f"✦ {phase}", tw - 8),
-                                title=input_box_title, width=tw - 4)
+                phase = (f"round {rc[0]}/{rc[1]} · {pending['tool'][0]} "
+                         f"({time.time() - pending['tool'][4]:.1f}s)")
+            prompt_lines = ["✦ " + phase]
+        elif not buf:
+            prompt_lines = [f"✦ {rune['desc']} · ↑↓ · ?"]
         else:
-            prompt_txt = f"✦ {buf}" if buf else f"✦ {rune['desc']} · ↑↓ scroll"
-            input_box = art.box(art.pad_vis(prompt_txt, tw - 8),
-                                title=input_box_title, width=tw - 4)
+            prefix = "✦ "
+            full = prefix + buf
+            pos = min(len(prefix) + max(0, min(cur, len(buf))), len(full))
+            spans: list[tuple[int, str]] = []
+            i = 0
+            while i < len(full) or not spans:
+                start = i
+                take = ""
+                while i < len(full):
+                    ch = full[i]
+                    if ch == "\n":
+                        i += 1
+                        break
+                    if art.vis_len(take + ch) > inner:
+                        break
+                    take += ch
+                    i += 1
+                spans.append((start, take))
+                if i >= len(full):
+                    break
+            painted = []
+            for start, ln in spans:
+                end = start + len(ln)
+                if start <= pos <= end:
+                    col = pos - start
+                    if col >= len(ln):
+                        painted.append(ln + "\033[7m \033[27m")
+                    else:
+                        painted.append(ln[:col] + "\033[7m" + ln[col] + "\033[27m" + ln[col + 1:])
+                else:
+                    painted.append(ln)
+            prompt_lines = painted[-8:]
 
-        # footer shows the keybinding legend: ^r to switch modes, ctrl+r to switch agent mode
-        rune_parts = [art.paint("^r", P.BOLD, P.PINK)]
+        pills = []
         for i, r in enumerate(_RUNES):
-            style = (P.BOLD, P.BLUSH) if i == rune_idx else (P.SILVER,)
-            rune_parts.append(art.paint(" ✦ " + r["name"] + " ", *style))
-        rune_line = "".join(rune_parts).strip() + " · esc · q"
-        runes_box = art.box(rune_line, title="Runes", width=tw - 4)
+            label = f"{i + 1} {r['name']}"
+            if i == rune_idx:
+                pills.append("[" + label + "]")
+            else:
+                pills.append(" " + label + " ")
+        status = " ".join(pills) + "  · ?"
 
-        # viewport: chat flows up from the prompt box; blank rows go above the
-        # chat (never between chat and the input box), so the newest message
-        # always hugs the prompt box and the prompt box is never buried
-        chat_area = max(3, th - 2 - len(input_box.splitlines()) - len(runes_box.splitlines()))
+        band: list[str] = []
+        if help_on or menu.get("kind") == "help":
+            band = [
+                "enter send · esc clear · q quit · 1–4 runes · tab cycle",
+                "←→ · ctrl-a/e/w/u · paste · ↑↓ scroll",
+                "Plan: after write_plan, y approve → Build · e stay · n drop",
+            ]
+        elif menu.get("kind") == "plan":
+            card = mind.plan_summary(session_id, max_lines=4)
+            if card:
+                band.extend(card.splitlines())
+            choices = mind.plan_menu_choices()
+            idx = int(menu.get("idx") or 0) % len(choices)
+            for i, (key, label, _act) in enumerate(choices):
+                mark = "▸ " if i == idx else "  "
+                band.append(f"{mark}{key}  {label}")
+        else:
+            card = mind.plan_summary(session_id, max_lines=4)
+            if card and rune.get("key") in ("plan", "build"):
+                band.extend(card.splitlines())
+
         all_lines: list[str] = []
         for sec in sections:
             all_lines.extend(sec)
+        prompt_n = len(prompt_lines)
+        band_n = len(band)
+        overhead = 5 + prompt_n + (1 + band_n if band else 0)
+        chat_area = max(1, th - overhead)
         max_off = max(0, len(all_lines) - chat_area)
         if view["off"] > max_off:
             view["off"] = max_off
-        out = all_lines[view["off"] : view["off"] + chat_area]
-        if len(out) < chat_area:
-            out = [""] * (chat_area - len(out)) + out
-        out.extend(input_box.splitlines())
-        out.extend(runes_box.splitlines())
-
-        top = art.box("", title=f"Pixie ✦ {rune['name']}", width=tw).splitlines()[0]
-        bottom = art.box("", width=tw).splitlines()[-1]
-        return top + "\n" + "\n".join(out) + "\n" + bottom
+        sliced = all_lines[view["off"] : view["off"] + chat_area]
+        pack = chrome_pack(
+            tw, th,
+            title=f"Pixie ✦ {rune['name']} · {session_id}",
+            chat_lines=sliced,
+            prompt_lines=prompt_lines,
+            status=status,
+            band=band or None,
+            band_title=("keys" if (help_on or menu.get("kind") == "help") else "plan"),
+        )
+        return "\n".join(pack)
 
     try:
         while True:
@@ -1112,18 +1402,71 @@ def chat_ui(verbose: bool = False) -> int:
             except OSError:
                 art.tty_write(fd, art.clear_screen() + frame + "\n")
 
-            key = art.tui_read_key(fd, timeout=0.05)
+            ev = art.tui_read_event(fd, timeout=0.05)
+            if isinstance(ev, art.MouseEvent):
+                if ev.action == "wheel":
+                    if ev.button == 64:
+                        view["off"] = max(0, view["off"] - 3)
+                    elif ev.button == 65:
+                        view["off"] += 3
+                continue
+            if isinstance(ev, art.PasteEvent):
+                ins = ev.text
+                buf = buf[:cur] + ins + buf[cur:]
+                cur += len(ins)
+                continue
+            key = ev if isinstance(ev, str) else ""
             if confirm.pending is not None:
                 if key in ("y", "Y", "enter"):
                     confirm.respond(True)
                 elif key in ("n", "N", "esc", "ctrl-c"):
                     confirm.respond(False)
                 continue
+            if menu.get("kind") == "plan" and not buf:
+                choices = mind.plan_menu_choices()
+                nch = len(choices)
+                if key in ("esc",):
+                    menu["kind"] = None
+                    continue
+                if key in ("j", "down"):
+                    menu["idx"] = (int(menu.get("idx") or 0) + 1) % nch
+                    continue
+                if key in ("k", "up"):
+                    menu["idx"] = (int(menu.get("idx") or 0) - 1) % nch
+                    continue
+                act = None
+                if key == "enter":
+                    act = choices[int(menu.get("idx") or 0) % nch][2]
+                else:
+                    for shortcut, _label, name in choices:
+                        if key == shortcut:
+                            act = name
+                            break
+                if act == "approve":
+                    menu["kind"] = None
+                    for i, r in enumerate(_RUNES):
+                        if r["key"] == "build":
+                            rune_idx = i
+                            break
+                    send("Implement the active plan.")
+                    buf = ""
+                    cur = 0
+                    continue
+                if act == "edit":
+                    menu["kind"] = None
+                    continue
+                if act == "drop":
+                    mind.drop_plan(session_id)
+                    menu["kind"] = None
+                    continue
+                if act:
+                    continue
             if not waking["flag"] and enter_pending:
                 enter_pending = False
                 if buf.strip():
                     send(buf.strip())
                     buf = ""
+                    cur = 0
                     continue
             if key == "up":
                 view["off"] = max(0, view["off"] - 1)
@@ -1147,32 +1490,82 @@ def chat_ui(verbose: bool = False) -> int:
                 if key in ("esc", "ctrl-c") and not pending["done"]:
                     cancel["flag"] = True
                     continue
-            if key in ("q", "Q", "ctrl-c", "ctrl-d", "esc") and not buf:
+            if help_on and key in ("esc", "?", "q"):
+                help_on = False
+                continue
+            if key in ("q", "Q", "ctrl-c", "ctrl-d") and not buf:
                 break
-            if key == "ctrl-r":
-                rune_idx = (rune_idx + 1) % len(_RUNES)
-            elif key in ("tab",):
+            if key == "esc" and not buf:
+                break
+            if not buf and key in ("1", "2", "3", "4"):
+                rune_idx = min(int(key) - 1, len(_RUNES) - 1)
+            elif not buf and key == "?":
+                help_on = True
+            elif key == "ctrl-r" or key == "tab":
                 rune_idx = (rune_idx + 1) % len(_RUNES)
             elif key == "esc":
                 buf = ""
+                cur = 0
             elif key == "ctrl-u":
                 buf = ""
+                cur = 0
+            elif key == "ctrl-a" or key == "home":
+                cur = 0
+            elif key == "ctrl-e" or key == "end":
+                cur = len(buf)
+            elif key == "left":
+                cur = max(0, cur - 1)
+            elif key == "right":
+                cur = min(len(buf), cur + 1)
+            elif key == "ctrl-w":
+                i = cur
+                while i > 0 and buf[i - 1].isspace():
+                    i -= 1
+                while i > 0 and not buf[i - 1].isspace():
+                    i -= 1
+                buf = buf[:i] + buf[cur:]
+                cur = i
             elif key == "enter":
                 if waking["flag"]:
-                    enter_pending = True  # send once the brain wakes
+                    enter_pending = True
                 elif buf.strip():
                     send(buf.strip())
                     buf = ""
+                    cur = 0
             elif key == "backspace":
-                buf = buf[:-1]
+                if cur:
+                    buf = buf[:cur - 1] + buf[cur:]
+                    cur -= 1
+            elif key == "delete":
+                buf = buf[:cur] + buf[cur + 1:]
             elif key == "space":
-                buf += " "
+                buf = buf[:cur] + " " + buf[cur:]
+                cur += 1
             elif key and len(key) == 1 and key.isprintable():
-                buf += key
+                buf = buf[:cur] + key + buf[cur:]
+                cur += 1
     finally:
         art.tui_cleanup()
-        unload_qwen()
+        # Keep the server warm on quit — menagerie-idle frees RAM after 300s
+        # anyway, and killing it forced a full 2.5 GB reload every session.
+        # Set PIXIE_STOP_LLM_ON_EXIT=1 to restore stop-on-quit.
+        if os.environ.get("PIXIE_STOP_LLM_ON_EXIT"):
+            unload_qwen()
     return 0
+
+def _print_chats() -> int:
+    print(mind.format_chat_list())
+    return 0
+
+
+def _print_chat(sid: str | None) -> int:
+    name = sid or mind.latest_session_id()
+    if not name:
+        print("pixie: no chats stored yet", file=sys.stderr)
+        return 1
+    print(mind.format_chat(name))
+    return 0
+
 
 def main() -> int:
     args = sys.argv[1:]
@@ -1183,6 +1576,21 @@ def main() -> int:
     if "--verbose" in args:
         verbose = True
         args.remove("--verbose")
+    if "--chats" in args:
+        return _print_chats()
+    if "--chat" in args:
+        i = args.index("--chat")
+        sid = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("-") else None
+        return _print_chat(sid)
+    if "--resume" in args:
+        i = args.index("--resume")
+        sid = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("-") else None
+        name = mind.resolve_session_id(sid)
+        if not name:
+            msg = f"pixie: no chat named {sid}" if sid else "pixie: no chats stored yet"
+            print(msg, file=sys.stderr)
+            return 1
+        return chat_ui(verbose, resume_id=name)
         
     if not args:
         return chat_ui(verbose)

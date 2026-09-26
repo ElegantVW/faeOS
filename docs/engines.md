@@ -7,11 +7,11 @@ This page is the canonical integration contract for:
 
 | Engine | Repo / tree | Public command |
 |--------|-------------|----------------|
-| **Bulwark** | `ElegantVW/bulwark` → `~/bulwark` | `bulwark` |
+| **Bulwark** (house) | `ElegantVW/bulwark` → `~/bulwark` (`house/`) | `bulwark` |
+| **Seal** (glass) | `ElegantVW/bulwark` → `~/bulwark` (`glass/`) | `seal` / `seal-login` / `seald` |
 | **Fairy Lantern** | `ElegantVW/fairy-lantern` → `~/fairy-lantern` | `fairy` / `fairy-lantern` |
-| **Seal** | in-tree `faeos/seal` | `seal` |
-| **Hearth** | in-tree `faeos/hearth` | `hearth` |
-| **Rift** | in-tree `faeos/rift` | `rift` |
+| **Hearth** | in-tree `faeos/hearth` (incomplete) | `hearth` |
+| **Rift** | in-tree `faeos/rift` (incomplete) | `rift` |
 
 ## Paths
 
@@ -39,15 +39,14 @@ cd ~/faeos && ./install.sh
 
 # 2. Optional engines — each is seamless after install
 git clone git@github.com:ElegantVW/bulwark.git ~/bulwark
-cd ~/bulwark && ./build.sh install
+cd ~/bulwark && ./build.sh install   # installs house (bulwark) + glass (seal)
 
 git clone git@github.com:ElegantVW/fairy-lantern.git ~/fairy-lantern
 cd ~/fairy-lantern && ./build.sh install
 
-# 3. In-tree greeter / guest / terminal (optional)
+# 3. In-tree guest / terminal (optional, incomplete)
 cd ~/faeos && ./install.sh --build
 # or individually:
-#   cd ~/faeos/seal && ./build.sh install
 #   cd ~/faeos/hearth && ./build.sh install
 #   cd ~/faeos/rift && ./build.sh install
 ```
@@ -85,7 +84,7 @@ bulwark          # look — must not say SAFE if the wall is missing
 - **desktop** profile: no SSH; fae AI ports only on `127.0.0.1`
 - **server-ssh** if you intentionally want port 22
 - Boot: `bulwark-aegis.service` runs `aegis restore` from `/var/lib/bulwark/`
-- Seal (screen lock) is separate — glass vs house
+- Seal (screen lock, `glass/`) ships in the bulwark repo — glass vs house, separate privilege/state/units
 
 ## Troubleshooting
 

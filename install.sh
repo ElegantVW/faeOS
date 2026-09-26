@@ -19,7 +19,7 @@ Usage: ./install.sh [options]
   --with-libs       Copy llama.cpp libs from this machine's ~/.local/lib/pixie
                     (or from kit vendor if present). Needed if you don't install
                     system llama-cpp / have a bundled llama-server.
-  --build           Build in-tree Rust engines (seal, hearth, rift) if present
+  --build           Build in-tree Rust engines (hearth, rift) if present; seal lives in ~/bulwark/glass
   --build-engines   If ~/bulwark or ~/fairy-lantern exist, run their build.sh install
   --enable-llm      Hint for on-demand AI (menagerie) — no boot service
   --no-zsh          Don't touch ~/.zshrc
@@ -84,6 +84,9 @@ fi
 if [[ ! -f "$PIXIE_CFG/seal.json" ]]; then
   cp -a "$ROOT/config/seal.default.json" "$PIXIE_CFG/seal.json"
 fi
+if [[ ! -f "$PIXIE_CFG/spells.toml" ]]; then
+  cp -a "$ROOT/config/pixie/spells.toml" "$PIXIE_CFG/spells.toml"
+fi
 
 echo "==> desktop configs"
 for dir in kitty i3 picom kmscon rofi dunst; do
@@ -123,11 +126,11 @@ if (( WITH_LIBS )); then
 fi
 
 if (( DO_BUILD )); then
-  echo "==> build in-tree engines (seal / hearth / rift)"
+  echo "==> build in-tree engines (hearth / rift; seal lives in ~/bulwark/glass)"
   if ! command -v cargo >/dev/null 2>&1; then
     echo "    WARN: cargo not found — skip --build" >&2
   else
-    for crate in seal hearth rift; do
+    for crate in hearth rift; do
       if [[ -x "$ROOT/$crate/build.sh" ]]; then
         echo "    → $crate"
         "$ROOT/$crate/build.sh" install || echo "    WARN: $crate build failed" >&2

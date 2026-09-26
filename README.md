@@ -44,17 +44,17 @@ cd ~/faeos && ./install.sh --build --build-engines
 
 | Command | Purpose |
 |---------|---------|
-| `pixie "…"` | Local agent (files + tools); summons its own llama-server |
+| `pixie "…"` | Local agent (files + tools); summons its own llama-server ([ElegantVW/pixie](https://github.com/ElegantVW/pixie)) |
 | `menagerie` | AI control center (TUI): models, per-app bindings, RAM budget |
 | `menagerie status all` / `set <app> <model>` / `models` / `budget` | Which model each app uses, switching, add/remove models |
 | `siren` | Interactive media player TUI (arrow keys) |
 | `siren play` / `next` / `prev` / `stop` / `pause` / `now` | Music controls (recursive `~/Music`) |
 | `siren trove 10 music lofi` | Free & legal media (Internet Archive) |
 | `siren trove get <id>` | Download one archive item to `~/Music/trove` / `~/Videos/trove` |
-| `magpie …` / `duck …` | Privacy search via DuckDuckGo (`duck` → magpie) |
+| `magpie …` / `duck …` | Privacy search via DuckDuckGo (`duck` → magpie); `magpie browse` opens the TUI browser |
 | `kur` | Haiku bard (local LLM + TTS voice) |
 | `goblin` | Mail spirit — interactive TUI, aerc IMAP → local text |
-| `goblin sync` | Instant new-mail push (IMAP IDLE watcher) + 5-min timer safety net |
+| `goblin steal` | New letters (IMAP → local text); `goblin watch` = instant push (IDLE) + 5-min safety net |
 | `faectl` | FaeOS control panel (status / restart-llm) |
 | `ether net` / `ether veil [on\|off]` / `ether bridge` | Connectivity / VPN / phone-hotspot boot fallback |
 | `ether` | Live TUI: bluetooth · wifi · lan |
@@ -73,7 +73,7 @@ cd ~/faeos && ./install.sh --build --build-engines
 | `almanac` / `almanac today` | Almanac — calendar hub |
 | `bulwark` / `bulwark status` | Bulwark — host ward; raise with `bulwark aegis apply desktop` (**external repo**) |
 | `fairy play game.gba` | Fairy Lantern — GBA from scratch (**external repo**) |
-| `seal` / `hearth` / `rift` | Greeter / guest session / terminal (**build with `--build`**) |
+| `seal` / `hearth` / `rift` | Seal lock (external: ElegantVW/bulwark `glass/`) / hearth guest + rift terminal (in-tree, incomplete — build with `--build`) |
 | `spellbook` | File-manager TUI |
 | `tick` / `termfix` | Screen tick + TTY line-edit recovery |
 
@@ -86,7 +86,7 @@ cd ~/faeos && ./install.sh --build --build-engines
 | **Kur** | Haiku + TTS voice |
 | **Scry** | Past commands / replies |
 | **Ether** | Network paths / hotspot |
-| **Magpie** | Private web search |
+| **Magpie** | Private web search + TUI browser |
 | **The Eye** | Processes / CPU / RAM |
 | **Vault** | Disk usage map |
 | **Alchemy** | Packages (pacman) |

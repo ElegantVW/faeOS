@@ -35,7 +35,7 @@
 | **Kur** | Haiku dragon — **easter egg, hidden from scroll** | stable | [docs/plans/kur.md](docs/plans/kur.md) |
 | **Imp** | Terminal art generator (pixie-art lineage) | stable (TUI + CLI; tests) | [docs/plans/imp.md](docs/plans/imp.md) |
 | **Goblin** | Mail (aerc IMAP → local text, IDLE push) | stable | [docs/plans/goblin.md](docs/plans/goblin.md) |
-| **Magpie** | Browser/search (privacy, DDG) | search stable; browse in progress | [docs/plans/magpie.md](docs/plans/magpie.md) |
+| **Magpie** | Browser/search (privacy, DDG) | search stable; browse v0.1 | [docs/plans/magpie.md](docs/plans/magpie.md) |
 | **Scry** | Command/output history (Shift-Tab visions) | stable | [docs/plans/scry.md](docs/plans/scry.md) |
 | **Summon** | PATH tab of Scroll (short name; `summon -x` exec) | stable | [docs/plans/summon.md](docs/plans/summon.md) |
 | **The Eye** | Process watcher (CPU/RSS/kill) | new | [docs/plans/eye.md](docs/plans/eye.md) |

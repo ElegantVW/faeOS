@@ -1,9 +1,16 @@
 # 🎵 SIREN MEDIA PLAYER - COMPREHENSIVE DEVELOPMENT PLAN
 
 **Version:** 2.0  
-**Last Updated:** 2026-08-05  
-**Status:** Active Development  
+**Last Updated:** 2026-09-23  
+**Status:** Active Development — Rust migration in progress (`ElegantVW/siren`, public)  
 **Maintainer:** evenweaker  
+
+> **2026-09-23 cutover:** `~/bin/siren` is now the thin launcher → Rust engine
+> (`~/.local/lib/faeos/siren` v0.1.0: config, library/fuzzy, mpv IPC,
+> queue/playlist, transport CLI, two-box TUI, audio menu + DLNA cast —
+> all live-verified). Python `faeOS/bin/siren` remains fallback until
+> parity sign-off (mutagen tags, dir-browser nav, trove/IA deferred).
+> Rollback: `cp ~/faeOS/bin/siren ~/bin/siren`.
 
 ---
 

@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""magpie — privacy-first terminal search. Formerly `duck`.
+"""magpie — privacy-first terminal search + TUI browser. Formerly `duck`.
 
   magpie arch linux              # auto: DDG → DDG HTML → Marginalia
   magpie -a ufw tutorial         # fetch top pages, then ONE AI summary
-  magpie --tor query             # engines via Tor
+  magpie browse example.com      # full TUI browser (images · video · JS)
+  magpie --browse cute cats      # browse mode, starting from a search
+  magpie --tor query             # engines via Tor (strict: needs torsocks)
   magpie --engine marginalia q   # force independent index
   magpie --any query             # if all fail: Wikipedia extras (no Google)
 
 Design:
   - Privacy engines only (DDG + Marginalia). Never Google.
-  - Cookie-less HTTP (no jar, no Cookie headers). Pixie LLM is local only.
+  - Cookie-less search HTTP (no jar, no Cookie headers). Pixie LLM is local only.
   - -a deepens top results once, then one local AI pass.
   - Never print URLs in normal output (privacy/UX).
+  - browse mode keeps its own ephemeral cookie jar (memory only, cleared on
+    quit); page scripts run in Magpie's own JS engine, per-site opt-in.
 """
 from __future__ import annotations
 
@@ -35,6 +39,7 @@ _sys.path.insert(0, str(Path.home() / "bin"))
 import fae_termart as art  # noqa: E402
 
 from fae_termart import Palette as P, PIXIE_WAIT
+import magpie_config as mconfig  # noqa: E402
 
 # Force Unicode box drawing for smooth round corners
 os.environ["PIXIE_UNICODE"] = "1"
@@ -92,6 +97,9 @@ def strip_urls(text: str) -> str:
 
 def _http_get(url: str, *, timeout: float = 12, tor: bool = False) -> bytes | None:
     """Cookie-less GET. No Cookie header, no jar — nothing stored for the engines."""
+    if tor and not shutil.which("torsocks"):
+        # Strict: never silently fall back to clearnet when Tor was asked for.
+        return None
     if tor and shutil.which("torsocks"):
         try:
             proc = subprocess.run(
@@ -135,6 +143,8 @@ def _http_post_form(
     url: str, fields: dict[str, str], *, timeout: float = 12, tor: bool = False
 ) -> bytes | None:
     data = urllib.parse.urlencode(fields).encode()
+    if tor and not shutil.which("torsocks"):
+        return None
     if tor and shutil.which("torsocks"):
         try:
             proc = subprocess.run(
@@ -406,6 +416,8 @@ def search_chain(
     Never Google. No cookie jars.
     """
     errors: list[str] = []
+    if tor and not shutil.which("torsocks"):
+        return [], "", "Tor requested but torsocks is not installed (refusing clearnet)"
 
     if page == 1:
         results, err = run_ddgr(query, n=n, tor=tor)
@@ -782,7 +794,98 @@ def ai_summary(query: str, context: str) -> str:
     return (text or "").strip()
 
 
+def browse_dispatch(argv: list[str]) -> int:
+    """Manual argv split for browse mode (see main() for why)."""
+    try:
+        from magpie_tui import browse_main
+    except ImportError as e:
+        eprint(art.paint("magpie: browse half missing: ", P.BOLD, P.ERR) + str(e))
+        return 2
+    cmd: list[str] = []
+    words: list[str] = []
+    i = 0
+    # A leading `browse` is the subcommand; `--browse` is a flag.
+    rest = list(argv)
+    if rest and rest[0] == "browse":
+        rest = rest[1:]
+    while i < len(rest):
+        a = rest[i]
+        if a == "--browse":
+            pass
+        elif a in ("--tor", "--dump"):
+            cmd.append(a)
+        elif a == "--js" and i + 1 < len(rest):
+            cmd += ["--js", rest[i + 1]]
+            i += 1
+        elif a.startswith("--js="):
+            cmd.append(a)
+        elif a in ("-h", "--help"):
+            print("magpie browse [url|words] [--tor] [--js on|off|ask] [--dump]")
+            print("  TUI browser. Bare words search the quiet web first.")
+            return 0
+        else:
+            words.append(a)
+        i += 1
+    return browse_main(cmd + words)
+
+
+def config_dispatch(argv: list[str]) -> int:
+    """magpie config [list|get|set|reset|wizard]."""
+    import magpie_config as cfg
+
+    def show_all() -> None:
+        current = cfg.effective()
+        for section, keys in cfg.SECTIONS:
+            print(f"[{section}]")
+            for key in keys:
+                print(f"  {key} = {current[key]}")
+        print(f"\nfile: {cfg.config_path()}")
+
+    if not argv or argv[0] in ("list", "ls", "show"):
+        show_all()
+        return 0
+    cmd = argv[0]
+    if cmd == "get" and len(argv) == 2:
+        try:
+            print(f"{argv[1]} = {cfg.get(argv[1])}")
+        except cfg.ConfigError as e:
+            eprint(art.paint(f"magpie: {e}", P.BOLD, P.ERR))
+            return 2
+        return 0
+    if cmd == "set" and len(argv) == 3:
+        try:
+            value = cfg.set_key(argv[1], argv[2])
+            print(f"{argv[1]} = {value}")
+        except cfg.ConfigError as e:
+            eprint(art.paint(f"magpie: {e}", P.BOLD, P.ERR))
+            eprint(art.paint("next: magpie config list", P.MUTED))
+            return 2
+        return 0
+    if cmd == "reset" and len(argv) == 1:
+        cfg.reset()
+        print(f"magpie: settings reset to defaults ({cfg.config_path()})")
+        return 0
+    if cmd == "wizard":
+        sections = argv[1:] or None
+        try:
+            cfg.run_wizard(sections=sections)
+        except cfg.ConfigError as e:
+            eprint(art.paint(f"magpie: {e}", P.BOLD, P.ERR))
+            return 2
+        return 0
+    eprint(art.paint("magpie config: list | get <key> | set <key> <value> | reset | wizard [section…]", P.BOLD, P.ERR))
+    return 2
+
+
 def main() -> int:
+    # Browse/config routing happens before argparse: argparse cannot mix a "*"
+    # positional with optionals in any order (`magpie browse --dump <url>`
+    # would otherwise die with "unrecognized arguments").
+    argv = sys.argv[1:]
+    if argv and argv[0] == "config":
+        return config_dispatch(argv[1:])
+    if (argv and argv[0] == "browse") or "--browse" in argv:
+        return browse_dispatch(argv)
     ap = argparse.ArgumentParser(
         description="Privacy-first terminal search & CLI browser (DDG + Marginalia; no Google)"
     )
@@ -801,6 +904,7 @@ def main() -> int:
         help=f"fetch top N pages for richer text (default with -a: {DEEP_DEFAULT})",
     )
     ap.add_argument("--tor", action="store_true", help="search + fetches via Tor")
+    ap.add_argument("--no-tor", action="store_true", help="ignore the configured Tor default")
     ap.add_argument(
         "--any",
         action="store_true",
@@ -809,47 +913,69 @@ def main() -> int:
     ap.add_argument(
         "--engine",
         choices=("auto", "ddg", "ddg-html", "marginalia"),
-        default="auto",
-        help="force one engine (default: auto chain)",
+        default=None,
+        help="force one engine (default: configured search.engine)",
     )
-    ap.add_argument("-n", type=int, default=8, help="number of results (default 8)")
+    ap.add_argument("-n", type=int, default=None, help="number of results (default: configured)")
     ap.add_argument("-p", "--page", type=int, default=1, help="search result page (default 1)")
+    ap.add_argument(
+        "--browse",
+        action="store_true",
+        help="open the Magpie TUI browser (same as: magpie browse [url])",
+    )
+    ap.add_argument(
+        "--js",
+        choices=("on", "off", "ask"),
+        default="ask",
+        help="page scripts in browse mode (default: ask per site)",
+    )
+    ap.add_argument(
+        "--dump",
+        action="store_true",
+        help="with --browse: print page text instead of opening the TUI",
+    )
     args = ap.parse_args()
 
     if not args.query:
-        try:
-            query_input = input(art.paint("magpie browser > Enter search query: ", P.BOLD, P.PINK)).strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            return 0
-        if not query_input:
-            return 0
-        q = query_input
-    else:
-        q = " ".join(args.query).strip()
+        # Bare magpie opens the TUI den (address bar searches from there).
+        cmd: list[str] = []
+        if args.tor:
+            cmd.append("--tor")
+        if args.js != "ask":
+            cmd += ["--js", args.js]
+        if args.dump:
+            cmd.append("--dump")
+        return browse_dispatch(cmd)
+
+    q = " ".join(args.query).strip()
+
+    cfgv = mconfig.effective()
+    use_tor = bool(args.tor) or (bool(cfgv["search.tor"]) and not args.no_tor)
+    engine = args.engine or str(cfgv["search.engine"])
+    per_page = args.n if args.n else int(cfgv["search.results"])
 
     page = args.page
     ai_requested = args.ai
 
     while True:
-        mode = "tor" if args.tor else "clearnet"
+        mode = "tor" if use_tor else "clearnet"
         eprint(
             art.paint("◆ magpie browser", P.BOLD, P.PINK)
             + art.paint(f"  {q}", P.SILVER)
             + art.paint(f"  (page {page}, {mode})", P.MUTED)
         )
 
-        n = max(1, min(args.n, 25))
-        if args.engine == "auto":
-            results, eng, err = search_chain(q, n=n, tor=args.tor, page=page)
-        elif args.engine == "ddg":
-            results, err = run_ddgr(q, n=n, tor=args.tor)
+        n = max(1, min(per_page, 25))
+        if engine == "auto":
+            results, eng, err = search_chain(q, n=n, tor=use_tor, page=page)
+        elif engine == "ddg":
+            results, err = run_ddgr(q, n=n, tor=use_tor)
             eng = "ddg/ddgr" if results else ""
-        elif args.engine == "ddg-html":
-            results, err = run_ddg_html(q, n=n, tor=args.tor, page=page)
+        elif engine == "ddg-html":
+            results, err = run_ddg_html(q, n=n, tor=use_tor, page=page)
             eng = "ddg/html" if results else ""
         else:
-            results, err = run_marginalia(q, n=n, tor=args.tor, page=page)
+            results, err = run_marginalia(q, n=n, tor=use_tor, page=page)
             eng = "marginalia" if results else ""
 
         if results and eng:
@@ -862,7 +988,7 @@ def main() -> int:
 
         if results:
             if deep_n > 0:
-                results = deepen_results(results, k=deep_n, tor=args.tor)
+                results = deepen_results(results, k=deep_n, tor=use_tor)
             src_label = f"{mode} · {eng} · page {page}" if eng else mode
             human = format_results(results, src_label, show_body=bool(deep_n))
             text_parts.append(re.sub(r"\033\[[0-9;]*m", "", human))
@@ -924,7 +1050,7 @@ def main() -> int:
                 url = r.get("url")
                 title = r.get("title")
                 eprint(art.paint(f"Fetching full page: {title}...", P.WARN))
-                raw = fetch_url(url, tor=args.tor)
+                raw = fetch_url(url, tor=use_tor)
                 if raw:
                     article_text = html_to_text(raw)
                     if not article_text:

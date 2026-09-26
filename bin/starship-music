@@ -113,8 +113,65 @@ def music_note() -> str:
     return NOTE_FRAMES[i % len(NOTE_FRAMES)]
 
 
+def siren_cache() -> dict | None:
+    """~/.cache/siren/now.json via `siren now --cached --json` (instant).
+
+    Returns the dict with `age` (seconds) or None when unavailable.
+    The Rust engine refreshes it on a 10s timer; this reader never
+    touches the network (precmd budget is milliseconds).
+    """
+    import shutil
+    import time
+    siren = shutil.which("siren")
+    if not siren:
+        return None
+    try:
+        out = subprocess.check_output(
+            [siren, "now", "--cached", "--json"],
+            text=True, timeout=0.6, stderr=subprocess.DEVNULL,
+        )
+        d = json.loads(out.strip() or "{}")
+        if not isinstance(d, dict):
+            return None
+        ts = d.get("ts") or 0
+        d["age"] = max(0.0, time.time() - ts) if ts else None
+        return d
+    except Exception:
+        return None
+
+
+def siren_output_mode() -> str:
+    """local|heos from siren config (fast file read, no subprocess)."""
+    try:
+        raw = (Path.home() / ".config" / "siren" / "config.json").read_text(encoding="utf-8")
+        v = json.loads(raw)
+        if isinstance(v, dict) and v.get("audio_output") == "heos":
+            return "heos"
+    except Exception:
+        pass
+    return "local"
+
+
 def main() -> int:
     note = music_note()
+    # Speaker path: cache only (live HEOS = ~2s, way over precmd budget).
+    # fresh <60s → full color · 60-600s → dim · >600s/missing → idle line.
+    if siren_output_mode() == "heos":
+        d = siren_cache() or {}
+        age = d.get("age")
+        label = str(d.get("label") or "")
+        state = str(d.get("state") or "")
+        if age is None or age > 600 or not label:
+            sys.stdout.write(f"{SILVER_DIM}{note} Not playing{RESET}")
+            return 0
+        if state in ("pause", "stop"):
+            sys.stdout.write(f"{SILVER_DIM}{note} Paused: {label}{RESET}")
+            return 0
+        if age > 60:
+            sys.stdout.write(f"{SILVER_DIM}{note} {label} (stale){RESET}")
+            return 0
+        sys.stdout.write(f"{BOLD}{MUSIC}{note} Playing: {label}{RESET}")
+        return 0
     path = mpv(["get_property", "filename/no-ext"])
     if path is None:
         sys.stdout.write(f"{SILVER_DIM}{note} Not playing{RESET}")

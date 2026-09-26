@@ -22,6 +22,7 @@ Free media lives under Siren now:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pty
 import re
@@ -31,6 +32,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / "bin"))
@@ -440,8 +443,385 @@ def cmd_weave(verb: str, token: str | None) -> int:
 # status TUI
 # ---------------------------------------------------------------------------
 
+# ── HEOS speakers (Denon / D&M) on the LAN ────────────────────────────
+# Discovery is deliberately UNICAST first: SSDP multicast
+# (239.255.255.250:1900) often gets zero replies here — ufw/conntrack
+# drops the unicast replies to our M-SEARCH — while a fast parallel TCP
+# sweep of port 1255 (the HEOS control API) always works. Any HEOS box
+# answers get_players with the WHOLE fleet roster, one connection is
+# enough. Protocol: newline-terminated `heos://…` URIs, JSON replies.
+_HEOS_PORT = 1255
+_HEOS_CACHE = os.path.expanduser("~/.config/ether/heos.json")
+
+
+def _heos_rpc(ip: str, uris: list[str], timeout: float = 3.0) -> list[dict]:
+    """Send newline-terminated heos:// commands; parse every JSON reply."""
+    try:
+        s = socket.create_connection((ip, _HEOS_PORT), timeout=timeout)
+        s.settimeout(timeout)
+        for u in uris:
+            s.sendall((u + "\n").encode())
+        data = b""
+        while len(data) < 65536:
+            try:
+                chunk = s.recv(8192)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            data += chunk
+            s.settimeout(0.5)  # idle gap → end of a batched reply
+        s.close()
+    except OSError:
+        return []
+    objs: list[dict] = []
+    dec = json.JSONDecoder()
+    txt = data.decode("utf-8", "replace")
+    idx = 0
+    while idx < len(txt):
+        while idx < len(txt) and txt[idx] in " \r\n\t":
+            idx += 1
+        if idx >= len(txt):
+            break
+        try:
+            obj, idx = dec.raw_decode(txt, idx)
+        except ValueError:
+            break
+        if isinstance(obj, dict):
+            objs.append(obj)
+    return objs
+
+
+def _heos_ssdp(timeout: float = 1.0) -> list[str]:
+    """Secondary path: SSDP M-SEARCH for HEOS devices (needs multicast)."""
+    ips: list[str] = []
+    msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+           'MAN: "ssdp:discover"\r\nMX: 1\r\n'
+           "ST: urn:schemas-upnp-org:device:HEOSDevice:1\r\n\r\n")
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        s.bind(("", 0))
+        s.settimeout(timeout)
+        s.sendto(msg.encode(), ("239.255.255.250", 1900))
+        t_end = time.time() + timeout
+        while time.time() < t_end:
+            try:
+                data, addr = s.recvfrom(2048)
+            except socket.timeout:
+                break
+            if b"HEOS" in data.upper() and addr[0] not in ips:
+                ips.append(addr[0])
+        s.close()
+    except OSError:
+        pass
+    return ips
+
+
+def _heos_local_ip() -> str:
+    """Best-effort local IPv4 (UDP route lookup — no packets flow)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.3)
+        s.connect(("1.1.1.1", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip if not ip.startswith("127.") else ""
+    except OSError:
+        return ""
+
+
+def _heos_sweep(timeout: float = 0.6) -> list[str]:
+    """Primary path: parallel TCP/1255 sweep of the local /24."""
+    local = _heos_local_ip()
+    if not local:
+        return []
+    base = local.rsplit(".", 1)[0]
+
+    def probe(n: int) -> str | None:
+        cand = f"{base}.{n}"
+        if cand == local:
+            return None
+        try:
+            s = socket.create_connection((cand, _HEOS_PORT), timeout=timeout)
+            s.close()
+            return cand
+        except OSError:
+            return None
+
+    hits: list[str] = []
+    with ThreadPoolExecutor(max_workers=128) as pool:
+        for hit in pool.map(probe, range(1, 255)):
+            if hit:
+                hits.append(hit)
+    return hits
+
+
+def _heos_fleet_from(ip: str) -> list[dict]:
+    """get_players on one device — every HEOS box lists the whole fleet."""
+    for obj in _heos_rpc(ip, ["heos://player/get_players"]):
+        pl = obj.get("payload")
+        if obj.get("heos", {}).get("result") == "success" and isinstance(pl, list):
+            return [p for p in pl if isinstance(p, dict)]
+    return []
+
+
+def _heos_cache_write(players: list[dict]) -> None:
+    try:
+        os.makedirs(os.path.dirname(_HEOS_CACHE), exist_ok=True)
+        with open(_HEOS_CACHE, "w") as f:
+            json.dump({"ts": int(time.time()), "players": players}, f)
+    except OSError:
+        pass
+
+
+def _heos_cached() -> list[dict]:
+    try:
+        with open(_HEOS_CACHE) as f:
+            d = json.load(f)
+        ps = d.get("players")
+        return ps if isinstance(ps, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def heos_roster(refresh: bool = True) -> list[dict]:
+    """Every HEOS speaker on the LAN: name, model, ip, pid, network…"""
+    if not refresh:
+        return _heos_cached()
+    try:
+        for ip in _heos_ssdp() + _heos_sweep():
+            players = _heos_fleet_from(ip)
+            if players:
+                _heos_cache_write(players)
+                return players
+    except OSError:
+        pass
+    return _heos_cached()  # nothing found — last known roster
+
+
+def _heos_enrich(players: list[dict]) -> list[dict]:
+    """Best effort: play state, volume, now-playing (one device answers all)."""
+    ip = players[0].get("ip") if players else ""
+    if not ip:
+        return players
+    for p in players:
+        pid = p.get("pid")
+        if not isinstance(pid, int):
+            continue
+        objs = _heos_rpc(ip, [
+            f"heos://player/get_play_state?pid={pid}",
+            f"heos://player/get_volume?pid={pid}",
+        ])
+        for o in objs:
+            pl = o.get("payload")
+            if isinstance(pl, dict):
+                if "state" in pl:
+                    p["state"] = pl.get("state")
+                if "level" in pl:
+                    p["volume"] = pl.get("level")
+            he = o.get("heos", {})
+            # some firmwares put state/volume in message querystring
+            msg = he.get("message", "")
+            if isinstance(msg, str) and "state=" in msg:
+                for kv in msg.split("&"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        if k == "state":
+                            p["state"] = v
+                        elif k == "level":
+                            try: p["volume"] = int(v)
+                            except: pass
+        if p.get("state") == "play":
+            for o in _heos_rpc(ip, [f"heos://player/get_now_playing_info?pid={pid}"]):
+                pl = o.get("payload")
+                if isinstance(pl, dict):
+                    bits = [x for x in (pl.get("artist"), pl.get("song") or pl.get("station")) if x]
+                    if bits:
+                        p["now"] = " — ".join(bits)
+    return players
+
+
+# ── HEOS controls (transport + cast) ──────────────────────────────
+_HEOS_DEFAULT = "Vanguarda Office"
+_HEOS_HTTP_PORT = 8099
+_HEOS_HTTP_INFO = os.path.expanduser("~/.config/ether/heos-http.json")
+
+
+def _heos_resolve(name: str | None) -> tuple[str, int, dict] | None:
+    roster = heos_roster(refresh=False)
+    if not roster:
+        roster = heos_roster(refresh=True)
+    if not roster:
+        return None
+    if not name:
+        for p in roster:
+            if "vanguarda" in str(p.get("name","")).lower():
+                return (str(p["ip"]), int(p["pid"]), p)
+        p = roster[0]
+        return (str(p["ip"]), int(p["pid"]), p)
+    lo = name.lower()
+    for p in roster:
+        if lo in str(p.get("name","")).lower():
+            return (str(p["ip"]), int(p["pid"]), p)
+        if lo == str(p.get("pid")):
+            return (str(p["ip"]), int(p["pid"]), p)
+    # refresh once more with that hint
+    roster = heos_roster(refresh=True)
+    for p in roster:
+        if lo in str(p.get("name","")).lower():
+            return (str(p["ip"]), int(p["pid"]), p)
+    return None
+
+
+def _heos_ok(objs: list[dict]) -> bool:
+    return any(o.get("heos",{}).get("result") == "success" for o in objs)
+
+def _heos_set_state(pid: int, ip: str, state: str) -> bool:
+    return _heos_ok(_heos_rpc(ip, [f"heos://player/set_play_state?pid={pid}&state={state}"]))
+
+def _heos_set_volume(pid: int, ip: str, level: int) -> bool:
+    level = max(0, min(100, int(level)))
+    return _heos_ok(_heos_rpc(ip, [f"heos://player/set_volume?pid={pid}&level={level}"]))
+
+def _heos_set_mute(pid: int, ip: str, on: bool) -> bool:
+    return _heos_ok(_heos_rpc(ip, [f"heos://player/set_mute?pid={pid}&state={'on' if on else 'off'}"]))
+
+def _heos_next(pid: int, ip: str) -> bool:
+    return _heos_ok(_heos_rpc(ip, [f"heos://player/play_next?pid={pid}"]))
+
+def _heos_prev(pid: int, ip: str) -> bool:
+    return _heos_ok(_heos_rpc(ip, [f"heos://player/play_previous?pid={pid}"]))
+
+def _heos_play_url(pid: int, ip: str, url: str) -> bool:
+    q = urllib.parse.quote(url, safe="")
+    return _heos_ok(_heos_rpc(ip, [f"heos://browse/play_stream?pid={pid}&url={q}"]))
+
+def _heos_find_dlna_sid(ip: str) -> int | None:
+    """Find VANGUARDA-DLNA sid via get_music_sources -> browse 1024."""
+    for obj in _heos_rpc(ip, ["heos://browse/get_music_sources"]):
+        for src in obj.get("payload",[]):
+            if isinstance(src, dict) and src.get("type")=="heos_server" and "VANGUARDA" in str(src.get("name","")).upper():
+                try: return int(src["sid"])
+                except: pass
+    # fallback: browse Local Music
+    for obj in _heos_rpc(ip, ["heos://browse/browse?sid=1024"]):
+        for src in obj.get("payload",[]):
+            if isinstance(src, dict) and "VANGUARDA" in str(src.get("name","")).upper():
+                try: return int(src["sid"])
+                except: pass
+    return None
+
+def _heos_dlna_find(ip: str, sid: int, query: str) -> tuple[str,str] | None:
+    """Search DLNA for query via browsing known containers. Returns (cid,mid)."""
+    # known DLNA browse roots that contain music
+    cands = ["1$4","1$14","64","1","64$0"]
+    ql = query.lower()
+    for cid in cands:
+        for obj in _heos_rpc(ip, [f"heos://browse/browse?sid={sid}&cid={cid}"]):
+            for item in obj.get("payload",[]):
+                if not isinstance(item, dict): continue
+                name = str(item.get("name","")).lower()
+                if ql in name or ql.replace(" ","") in name.replace(" ",""):
+                    if "mid" in item and "cid" in item:
+                        return (str(item["cid"]), str(item["mid"]))
+                    # also try via payload's container
+                    if item.get("playable")=="yes" and "mid" in item:
+                        return (cid, str(item["mid"]))
+    return None
+
+def _heos_dlna_cast(ip: str, pid: int, path: Path) -> bool:
+    """Cast local file via DLNA (minidlna on 192.168.8.186:8200)."""
+    # ensure file is in a DLNA media_dir
+    dlna_dirs = [Path("/tmp/dlna"), Path.home()/"Music"]
+    in_dlna = any(str(path.resolve()).startswith(str(d.resolve())) for d in dlna_dirs if d.exists())
+    target = path
+    if not in_dlna:
+        dl = Path("/tmp/dlna"); dl.mkdir(parents=True, exist_ok=True)
+        target = dl / path.name
+        try:
+            if not target.exists() or target.stat().st_size != path.stat().st_size:
+                import shutil as _sh
+                _sh.copy2(str(path), str(target))
+        except Exception as e:
+            raise RuntimeError(f"copy to DLNA failed: {e}")
+        # trigger rescan: minidlnad inotify should pick it up, wait a bit
+        time.sleep(1.2)
+        # also force rescan if needed
+        try:
+            import subprocess as _sp
+            _sp.run(["pkill","-USR1","minidlnad"], timeout=2)
+        except: pass
+        time.sleep(0.8)
+    # find DLNA sid
+    sid = _heos_find_dlna_sid(ip)
+    if sid is None:
+        # retry after short wait (minidlna notify interval 30s, but we poked)
+        time.sleep(2)
+        sid = _heos_find_dlna_sid(ip)
+    if sid is None:
+        raise RuntimeError("DLNA server VANGUARDA-DLNA not found — is minidlna running on 192.168.8.186:8200?")
+    # find track
+    query = target.stem if len(target.stem) >= 4 else target.name
+    # try stem, then basename without ext, then full
+    for q in [target.stem, target.name, query[:12]]:
+        found = _heos_dlna_find(ip, sid, q)
+        if found:
+            cid, mid = found
+            # add_to_queue with aid=1 = play now
+            ok = _heos_ok(_heos_rpc(ip, [f"heos://browse/add_to_queue?pid={pid}&sid={sid}&cid={cid}&mid={mid}&aid=1"]))
+            if ok:
+                return True
+    raise RuntimeError(f"track not found in DLNA for query '{query}' (sid {sid})")
+
+def _heos_serve_file(path: Path) -> tuple[str, int]:
+    """Serve file's directory on LAN, return (url, port). Keeps daemon alive."""
+    abspath = path.resolve()
+    d = str(abspath.parent)
+    fname = abspath.name
+    lan = _heos_local_ip()
+    if not lan:
+        raise RuntimeError("no LAN IP — not on 192.168.8.x?")
+    # find free port near _HEOS_HTTP_PORT
+    port = _HEOS_HTTP_PORT
+    for cand in range(port, port+20):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        try:
+            s.bind(("0.0.0.0", cand)); s.close(); port = cand; break
+        except OSError:
+            s.close(); continue
+    # launch daemon if not already serving same dir/port
+    info = {}
+    try:
+        with open(_HEOS_HTTP_INFO) as f: info = json.load(f)
+    except: pass
+    # kill stale if port changed or dir changed
+    if info.get("port") != port or info.get("dir") != d:
+        try:
+            old_pid = int(info.get("pid",0))
+            os.kill(old_pid, 15)
+        except: pass
+    # start new http.server
+    log = os.path.expanduser("~/.cache/ether-heos-http.log")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    # detach
+    proc = subprocess.Popen(
+        ["python3","-m","http.server",str(port),"--bind","0.0.0.0","--directory",d],
+        stdout=open(log,"a"), stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    info = {"port": port, "dir": d, "pid": proc.pid, "lan": lan}
+    os.makedirs(os.path.dirname(_HEOS_HTTP_INFO), exist_ok=True)
+    with open(_HEOS_HTTP_INFO,"w") as f: json.dump(info,f)
+    time.sleep(0.6)  # let it bind
+    url = f"http://{lan}:{port}/{urllib.parse.quote(fname)}"
+    return url, port
+
+
 def _collect_status() -> dict:
-    data: dict = {"bt": [], "wifi": [], "lan": [], "sinks": [], "conns": [], "dls": []}
+    data: dict = {"bt": [], "wifi": [], "lan": [], "sinks": [], "conns": [], "dls": [],
+                  "heos": []}
 
     for mac, name in _bt_devices():
         state = _bt_state(mac)
@@ -496,6 +876,7 @@ def _collect_status() -> dict:
 
     data["sinks"] = _wpctl_sinks()
     data["dls"] = _collect_downloads()
+    data["heos"] = _heos_cached()  # cache only — live sweep is `ether speakers`
     return data
 
 
@@ -553,6 +934,14 @@ def _lan_panel(data: dict, width: int) -> str:
     if default:
         lines.append("")
         lines.append(art.paint(f"  default sink: {default[1]}  (sink {default[0]})", P.MUTED))
+    heos = data.get("heos") or []
+    if heos:
+        lines.append("")
+        for p in heos:
+            mark = "▶" if p.get("state") == "play" else "·"
+            vol = f"  {p['volume']}%" if p.get("volume") is not None else ""
+            lines.append(f"  {mark}  {art.paint(str(p.get('name', '?')), P.PINK_DIM)}"
+                         f"  {p.get('model', '')}  {p.get('ip', '')}{vol}")
     return art.box(lines, title="lan · weave", width=width, body_style=(P.SILVER,))
 
 
@@ -1194,6 +1583,10 @@ def cmd_status(_: argparse.Namespace | None = None) -> int:
 
 def cmd_info(_: argparse.Namespace | None = None) -> int:
     """ether status / status ether — one-shot report (no TUI)."""
+    try:
+        heos_roster(refresh=True)  # warm the cache with a live sweep
+    except Exception:
+        pass
     data = _collect_status()
     width = art.term_width()
     panel_w = max(44, min(width - 2, 88))
@@ -1208,6 +1601,151 @@ def cmd_info(_: argparse.Namespace | None = None) -> int:
     print(_downloads_panel(data.get("dls", []), panel_w))
     print()
     return 0
+
+
+def cmd_speakers(args: argparse.Namespace) -> int:
+    """ether speakers — HEOS discovery + transport + cast to Vanguarda Office."""
+    # action routing: ether speakers [action] [value] [--speaker NAME] [--cached]
+    act = (getattr(args, "action", None) or "list").lower()
+    val = getattr(args, "value", None)
+    speaker_hint = getattr(args, "speaker", None)
+    cached = bool(getattr(args, "cached", False))
+
+    # ── list / status ──────────────────────────────────────────────
+    if act in ("list","ls","status","show"):
+        players = heos_roster(refresh=not cached)
+        players = _heos_enrich(players) if players else []
+        lines = []
+        if not players:
+            lines.append(art.paint("  no HEOS speakers found — SSDP + tcp/1255 sweep came up empty", P.MUTED))
+        for p in players:
+            playing = p.get("state") == "play"
+            name = art.paint(str(p.get("name", "?")), P.OK if playing else P.SILVER)
+            state = str(p.get("state", "?")).upper()
+            vol = f" {p['volume']}%" if p.get("volume") is not None else ""
+            line = (f"  {'▶' if playing else '·'}  {name}  {p.get('model', '?')}"
+                    f"  {p.get('ip', '?')}  {p.get('network', '')}  ·  {state}{vol}")
+            if p.get("now"):
+                line += f"  —  {p['now']}"
+            lines.append(line)
+        print(); print(art.box(lines, title="heos speakers", subtitle="the voices in the walls", width=art.term_width(), body_style=(P.SILVER,))); print()
+        return 0
+
+    # resolve target for all control actions
+    tgt = _heos_resolve(speaker_hint)
+    if not tgt:
+        eprint("no HEOS speaker found — try: ether speakers"); return 1
+    ip, pid, info = tgt
+    sp_name = info.get("name","?")
+
+    # ── pause / resume / stop / next / prev ───────────────────────
+    if act in ("pause",):
+        ok = _heos_set_state(pid, ip, "pause"); print(art.paint(f"  {'✓' if ok else '✗'} pause {sp_name}", P.OK if ok else P.WARN)); return 0 if ok else 1
+    if act in ("resume","play") and not val:
+        ok = _heos_set_state(pid, ip, "play"); print(art.paint(f"  {'✓' if ok else '✗'} resume {sp_name}", P.OK if ok else P.WARN)); return 0 if ok else 1
+    if act in ("stop",):
+        ok = _heos_set_state(pid, ip, "stop"); print(art.paint(f"  {'✓' if ok else '✗'} stop {sp_name}", P.OK if ok else P.WARN)); return 0 if ok else 1
+    if act in ("next","skip"):
+        ok = _heos_next(pid, ip); print(art.paint(f"  {'✓' if ok else '✗'} next {sp_name}", P.OK if ok else P.WARN)); return 0 if ok else 1
+    if act in ("prev","previous"):
+        ok = _heos_prev(pid, ip); print(art.paint(f"  {'✓' if ok else '✗'} prev {sp_name}", P.OK if ok else P.WARN)); return 0 if ok else 1
+    if act in ("vol","volume"):
+        if val is None:
+            # show current
+            cur = _heos_rpc(ip, [f"heos://player/get_volume?pid={pid}"])
+            lvl = None
+            for o in cur:
+                if isinstance(o.get("payload"), dict) and "level" in o["payload"]: lvl = o["payload"]["level"]
+                msg = o.get("heos",{}).get("message","")
+                if "level=" in msg: lvl = int(msg.split("level=")[-1].split("&")[0])
+            print(f"  {sp_name} volume: {lvl if lvl is not None else '?'}"); return 0
+        try: lvl = int(str(val).strip().rstrip("%"))
+        except: eprint("volume must be 0-100"); return 1
+        ok = _heos_set_volume(pid, ip, lvl); print(art.paint(f"  {'✓' if ok else '✗'} {sp_name} volume → {lvl}%", P.OK if ok else P.WARN)); return 0 if ok else 1
+    if act in ("mute",):
+        # mute [on|off|toggle]
+        mode = str(val or "toggle").lower() if val else "toggle"
+        if mode == "toggle":
+            # read current mute if possible, else just toggle off->on
+            cur = _heos_rpc(ip, [f"heos://player/get_mute?pid={pid}"])
+            is_muted = False
+            for o in cur:
+                msg = o.get("heos",{}).get("message","")
+                if "state=on" in msg: is_muted = True
+                if isinstance(o.get("payload"), dict) and o["payload"].get("state")=="on": is_muted = True
+            mode = "off" if is_muted else "on"
+        on = mode in ("on","1","true","mute")
+        ok = _heos_set_mute(pid, ip, on); print(art.paint(f"  {'✓' if ok else '✗'} {sp_name} mute → {mode}", P.OK if ok else P.WARN)); return 0 if ok else 1
+    if act == "cast":
+        if not val:
+            eprint("usage: ether speakers cast <file> [--speaker NAME]"); return 1
+        p = Path(val).expanduser()
+        if not p.exists():
+            import glob as _glob
+            cands = _glob.glob(str(Path.home()/f"Music/**/{val}*"), recursive=True)
+            cands = [c for c in cands if os.path.isfile(c)]
+            if cands:
+                p = Path(cands[0])
+            else:
+                eprint(f"file not found: {val}"); return 1
+        # primary: DLNA via minidlna (works for both HEOS 1+5)
+        try:
+            ok = _heos_dlna_cast(ip, pid, p)
+            tag = art.paint("✓", P.OK) if ok else art.paint("✗", P.WARN)
+            print(f"  {tag} cast {p.name} → {sp_name} (DLNA)")
+            if not ok:
+                raise RuntimeError("DLNA queue failed")
+            return 0
+        except Exception as e:
+            # fallback: direct HTTP via UPnP (HEOS 5) / play_stream
+            try:
+                url, port = _heos_serve_file(p)
+                # try UPnP first (more reliable for local http than HEOS CLI)
+                # HEOS CLI play_stream as last resort
+                ok2 = _heos_play_url(pid, ip, url)
+                # also try UPnP if HEOS side failed and it's a HEOS 5 (Cave) — via AVTransport
+                if not ok2 and "Cave" in sp_name:
+                    # try UPnP AVTransport directly
+                    try:
+                        import socket as _s
+                        body = f'<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID><CurrentURI>{url}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData></u:SetAVTransportURI></s:Body></s:Envelope>'
+                        hdr = f'POST /upnp/control/renderer_dvc/AVTransport HTTP/1.0\r\nHost: {ip}:60006\r\nContent-Type: text/xml; charset="utf-8"\r\nSOAPAction: "urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"\r\nContent-Length: {len(body.encode())}\r\n\r\n{body}'
+                        s=_s.create_connection((ip,60006),timeout=4); s.sendall(hdr.encode()); s.settimeout(4); d=b""
+                        try:
+                            while len(d)<4096:
+                                ch=s.recv(4096)
+                                if not ch: break
+                                d+=ch
+                        except: pass
+                        s.close()
+                        if b"200 OK" in d:
+                            body2='<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID><Speed>1</Speed></u:Play></s:Body></s:Envelope>'
+                            hdr2=f'POST /upnp/control/renderer_dvc/AVTransport HTTP/1.0\r\nHost: {ip}:60006\r\nContent-Type: text/xml; charset="utf-8"\r\nSOAPAction: "urn:schemas-upnp-org:service:AVTransport:1#Play"\r\nContent-Length: {len(body2.encode())}\r\n\r\n{body2}'
+                            s=_s.create_connection((ip,60006),timeout=4); s.sendall(hdr2.encode()); s.settimeout(4); d=b""
+                            try:
+                                while len(d)<4096:
+                                    ch=s.recv(4096)
+                                    if not ch: break
+                                    d+=ch
+                            except: pass
+                            s.close()
+                            ok2 = b"200 OK" in d
+                    except: pass
+                tag = art.paint("✓", P.OK) if ok2 else art.paint("✗", P.WARN)
+                print(f"  {tag} cast {p.name} → {sp_name} (HTTP fallback)")
+                print(f"    url: {url}  (port {port}, pid {pid})")
+                if not ok2:
+                    eprint(f"  DLNA failed: {e}")
+                    print(art.paint("  cast failed — is minidlna on 192.168.8.186:8200 running? check: curl http://192.168.8.186:8200/", P.WARN))
+                    return 1
+                return 0
+            except Exception as e2:
+                eprint(f"cast failed: {e} / fallback: {e2}"); return 1
+    if act == "play" and val and str(val).startswith("http"):
+        ok = _heos_play_url(pid, ip, str(val))
+        print(art.paint(f"  {'✓' if ok else '✗'} play url → {sp_name}", P.OK if ok else P.WARN)); return 0 if ok else 1
+
+    eprint(f"unknown speakers action: {act} — try: list, pause, resume, stop, next, prev, vol <n>, mute [on|off], cast <file>, play <url>"); return 1
 
 
 def cmd_about(_: argparse.Namespace) -> int:
@@ -1278,6 +1816,13 @@ def main() -> int:
     p = sub.add_parser("bridge", help="boot fallback: tether to phone hotspot (systemd)")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_bridge)
+
+    p = sub.add_parser("speakers", help="HEOS speakers on the LAN (Denon HEOS API)")
+    p.add_argument("action", nargs="?", default="list", help="list|status|pause|resume|stop|next|prev|vol|mute|cast|play")
+    p.add_argument("value", nargs="?", default=None, help="volume level, url, or file for cast/play")
+    p.add_argument("--speaker","-s", default=None, help="speaker name (default Vanguarda Office)")
+    p.add_argument("--cached", action="store_true", help="last known roster only (no sweep)")
+    p.set_defaults(func=cmd_speakers)
 
     p = sub.add_parser("about")
     p.set_defaults(func=cmd_about)

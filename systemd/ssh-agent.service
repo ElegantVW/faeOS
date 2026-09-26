@@ -1,0 +1,12 @@
+[Unit]
+Description=faeOS shared SSH auth agent
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh-agent -D -a %h/.ssh/agent.sock
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
