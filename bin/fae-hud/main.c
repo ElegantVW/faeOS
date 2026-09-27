@@ -25,6 +25,7 @@ static void usage(void)
         "fae-hud — themed window cycler panel\n"
         "  --focus=0xID   highlight this X window (default: _NET_ACTIVE_WINDOW)\n"
         "  --dump         print the EWMH window list, draw nothing\n"
+        "  --opaque       skip translucency (the no-compositor fallback)\n"
         "  --display=:N   X display (default: $DISPLAY)\n"
         "  --help\n");
 }
@@ -34,6 +35,7 @@ int main(int argc, char **argv)
     Window focus = None;
     const char *dpy_name = NULL;
     int dump = 0;
+    int force_opaque = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--focus=", 8) == 0) {
@@ -42,6 +44,8 @@ int main(int argc, char **argv)
             dpy_name = argv[i] + 10;
         } else if (strcmp(argv[i], "--dump") == 0) {
             dump = 1;
+        } else if (strcmp(argv[i], "--opaque") == 0) {
+            force_opaque = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             usage();
             return 0;
@@ -85,7 +89,7 @@ int main(int argc, char **argv)
                    list->v[i].on_current_workspace ? "" : "  (other ws)");
         rc = 0;
     } else {
-        rc = hud_run(dpy, scr, list);
+        rc = hud_run(dpy, scr, list, force_opaque);
     }
 
     wm_list_free_titles(list);

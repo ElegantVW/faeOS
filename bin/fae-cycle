@@ -46,16 +46,15 @@ walk(t); print(best or '')" 2>/dev/null || true)
 fi
 [ -n "$focused" ] || { echo "fae-cycle: no focused window" >&2; exit 1; }
 
-list=($ids)
-n=${#list[@]}
-i=0
-for ((k=0;k<n;k++)); do [ "${list[$k]}" = "$focused" ] && { i=$k; break; }; done
 step=1; [ "$dir" = "prev" ] && step=-1
-j=$(( (i + step + n) % n ))
-target=${list[$j]}
 
 # ── window → i3 con id (and reveal scratchpad) ───────────────────────────
 tree() { DISPLAY="$D" i3-msg -t get_tree 2>/dev/null; }
+
+# Sets `con` from `target`, waking a hidden scratchpad window if that is why
+# no container was found. Returns non-zero when there is genuinely nothing to
+# focus, which is what the retry loop below reacts to.
+resolve_con() {
 con=$(tree | python3 -c "
 import json,sys
 try: t=json.load(sys.stdin)
@@ -93,6 +92,56 @@ def walk(n):
         if walk(c): return True
 walk(t); print(found or '')" 2>/dev/null) || con="" ;;
   esac
+fi
+[ -n "$con" ]
+}
+
+# Targets we have already found to be dead. _NET_CLIENT_LIST can keep listing a
+# window for a moment after its client exits, so a retry that just re-reads the
+# list picks the same corpse again — which is exactly what the first version of
+# this retry did, failing 5 times out of 30 under churn.
+dead=()
+
+is_dead() {
+  local c="$1" d
+  for d in "${dead[@]}"; do [ "$d" = "$c" ] && return 0; done
+  return 1
+}
+
+# Choose a target from the client list, stepping from whatever has focus, and
+# skipping anything already known to be gone.
+pick_target() {
+  list=($ids)
+  n=${#list[@]}
+  [ "$n" -gt 0 ] || return 1
+  i=0
+  for ((k=0;k<n;k++)); do [ "${list[$k]}" = "$focused" ] && { i=$k; break; }; done
+  for ((try=0; try<n; try++)); do
+    j=$(( (i + step + n) % n ))
+    is_dead "${list[$j]}" || { target=${list[$j]}; return 0; }
+    i=$j
+  done
+  return 1
+}
+
+pick_target || { faelog "giveup: no windows to cycle to"; exit 0; }
+con=""
+resolve_con || true
+
+# ── a window can die between listing and focusing ──────────────────────────
+# _NET_CLIENT_LIST is read first, then the tree is scraped for the container.
+# A client that exits in that gap leaves us holding an X id with no container,
+# which used to be a hard failure: fae-cycle exited 1 having done nothing at
+# all. But "cycle" should never fail because something else happened to close
+# — it should just take the next one. So re-read the list and try again.
+if [ -z "$con" ]; then
+  for attempt in 1 2 3 4; do
+    dead+=("$target")
+    faelog "retry $attempt: target=$target vanished; skipping it"
+    ids=$(DISPLAY="$D" xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //' | tr ', ' '\n\n' | grep -E '^0x[0-9a-fA-F]+$') || ids=""
+    pick_target || break
+    resolve_con && { faelog "retry $attempt: resolved target=$target"; break; }
+  done
 fi
 [ -n "$con" ] || { faelog "FAIL: cannot focus target=$target"; echo "fae-cycle: cannot focus $target" >&2; exit 1; }
 CON="$con"

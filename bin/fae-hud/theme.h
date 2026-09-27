@@ -1,50 +1,79 @@
-/* theme.h — the house palette, in one place.
+/* theme.h — the house palette, shape and motion, in one place.
  *
- * Every colour the HUD paints comes from here. If the house palette moves,
- * this file is the only thing that changes.
+ * Every colour, dimension, duration and glyph the HUD uses is defined here.
+ * If the house moves, this is the only file that changes.
  *
- * Values are the i3 config's client.* colours, so the HUD and the window
+ * Colours are the i3 config's client.* colours, so the panel and the window
  * borders agree (faeOS/config/i3/config).
  */
 #ifndef FAE_HUD_THEME_H
 #define FAE_HUD_THEME_H
 
-/* the void the HUD fades up out of */
+/* ── palette ─────────────────────────────────────────────────────────────── */
+
+/* the void the panel blooms out of */
 #define THEME_VOID      "#0a0508"
-
-/* panel */
 #define THEME_PANEL     "#2a1520"
-#define THEME_PANEL_DIM "#1a0a12"
 
-/* the accent: focused window, highlighted row */
-#define THEME_PINK      "#ff2d55"
+#define THEME_PINK      "#ff2d55"   /* focus: border, selected row */
 #define THEME_PINK_SOFT "#e879a0"
-
-/* text */
 #define THEME_FG        "#ffe3ee"
 #define THEME_FG_DIM    "#b0b0b8"
-#define THEME_LILAC     "#d4b4e8"
+#define THEME_LILAC     "#d4b4e8"   /* header, hairlines, corner facets */
 
 /* a row whose window lives on another workspace */
 #define THEME_FAR       "#9d5c75"
 
+/* ── type ────────────────────────────────────────────────────────────────── */
+
 /* all-mono type, house rule */
-#define THEME_FONT      "DejaVu Sans Mono"
-#define THEME_FONT_SIZE 13
+#define THEME_FONT       "DejaVu Sans Mono"
+#define THEME_SIZE_TITLE 13
+#define THEME_SIZE_META  11
 
-/* stringify, so the font pattern is built from the two macros above */
-#define THEME_STR_(x) #x
-#define THEME_STR(x)  THEME_STR_(x)
-#define THEME_FONT_PATTERN THEME_FONT ":size=" THEME_STR(THEME_FONT_SIZE)
+/* ── glyphs ──────────────────────────────────────────────────────────────── */
 
-/* metrics, in pixels */
-#define THEME_PAD_X     16
-#define THEME_PAD_Y     12
-#define THEME_LINE_GAP  7
+/* Verified present in DejaVu Sans Mono on this machine with
+ * `fc-list ':charset=2B21' family`. The face does NOT have the hexagons
+ * (U+2B21/2B22), so the crystal vocabulary is built from diamonds — which is
+ * luckier, because a diamond inside a diamond is the most gem-like thing the
+ * house face actually has. */
+#define THEME_GLYPH_FOCUS "\xe2\x97\x88"   /* ◈ U+25C8 */
+#define THEME_GLYPH_IDLE  "\xe2\x97\x87"   /* ◇ U+25C7 */
+#define THEME_GLYPH_DOT   "\xc2\xb7"       /* · U+00B7 */
 
-/* timing, milliseconds */
-#define THEME_FADE_IN   90
-#define THEME_HOLD      1100
-#define THEME_FADE_OUT  260
+/* ── shape ───────────────────────────────────────────────────────────────── */
+
+#define THEME_RADIUS      14   /* round corners; the Xft version had none */
+#define THEME_PAD_X       20
+#define THEME_PAD_Y       18
+#define THEME_GLYPH_COL    2   /* cells reserved for ◈ / ◇ */
+#define THEME_GAP         10
+#define THEME_LINE_GAP     5   /* title to meta, inside a row */
+#define THEME_ROW_GAP     12   /* row to row */
+#define THEME_RULE_GAP     9   /* around the header/footer hairlines */
+#define THEME_FACET_INSET 21   /* corner diamonds: clear of the 14px arc */
+#define THEME_FACET_R      5
+#define THEME_GLOW_STEPS   5
+
+/* Narrower and taller than the first version: the rows are two lines now, so
+ * the panel spends its height instead of its width. */
+#define THEME_MAX_W        560
+#define THEME_MIN_W        470  /* short titles should not look stubby */
+#define THEME_W_FRACTION  0.34   /* or this share of the screen, whichever is less */
+
+/* more rows than this and the panel would outgrow the screen */
+#define THEME_MAX_ROWS     14
+
+/* ── motion, milliseconds ────────────────────────────────────────────────── */
+
+#define THEME_BLOOM_IN     130   /* inset 14 -> 0, alpha 0 -> 1 */
+#define THEME_ROW_START     60   /* first row begins here */
+#define THEME_ROW_LAG       22   /* each row starts this much later */
+#define THEME_ROW_FADE     130   /* one row's own fade */
+#define THEME_WIPE_START   200   /* selected band begins wiping in */
+#define THEME_WIPE         180
+#define THEME_HOLD        1200   /* measured from the last row landing */
+#define THEME_FADE_OUT     220
 
 #endif /* FAE_HUD_THEME_H */

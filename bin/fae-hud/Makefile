@@ -1,8 +1,8 @@
 # fae-hud — themed window cycler panel.
 #
-# Zero runtime dependencies beyond X11 itself: Xlib for the window, Xft for
-# antialiased DejaVu Sans Mono (core X bitmap fonts would break the house
-# all-mono rule), fontconfig to find the face.
+# Libraries: Xlib for the window and its properties, cairo for the drawing
+# (round corners and per-pixel alpha both need it — Xft has no arc primitive),
+# pangocairo for shaped, ellipsised text.
 #
 #   make            build ./fae-hud
 #   make install    copy to ~/bin
@@ -10,7 +10,7 @@
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter
-PKGS     = x11 xft fontconfig
+PKGS     = x11 cairo pangocairo
 CFLAGS  += $(shell pkg-config --cflags $(PKGS))
 LDLIBS   = $(shell pkg-config --libs $(PKGS))
 

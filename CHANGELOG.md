@@ -73,3 +73,46 @@
   made the breakage look like "i3 ignores my drag".
   Measured: floating_modifier + drag on a floating window moves it exactly
   the dragged distance; the `drag` *command* produces 0px on this machine.
+
+## hud-crystal-2026-09-27
+- fae-hud rebuilt on cairo + pangocairo. Xft cannot round a corner — it has
+  no arc primitive, only Rect/String/Glyphs — so the panel had been a hard
+  rectangle and any softness was picom's shadow, not our drawing. Cairo also
+  gives genuine per-pixel alpha, which plain X11 cannot do on its own.
+  README amended: the old "no runtime deps beyond X11" claim is no longer
+  true, and it says so rather than letting it quietly become false.
+- Shape: rows are now two lines (title, then `workspace · app class`), so the
+  panel spends height instead of width — 470..560 wide by ~235 tall for three
+  windows, against 1220x120 before. Content-driven width with a 470 floor so
+  short titles are not stubby, capped at min(560, 34% of screen). Past 14 rows
+  it says `+N more` instead of outgrowing the screen.
+- Crystal: 14px round corners, four drawn corner diamonds, a hairline under
+  the header and above the footer, a hairline splitting the glyph column from
+  the text, and a soft pink glow (concentric strokes, not a cairo shadow, so it
+  survives without a compositor). Glyphs are U+25C8/U+25C7/U+00B7, all verified
+  present in DejaVu Sans Mono; the hexagons U+2B21/2B22 are NOT, which is why
+  the vocabulary is diamonds. All in THEME_GLYPH_* in theme.h.
+- Motion: panel blooms from a 14px inset (no window resize, so no flicker),
+  rows cascade 22ms apart, the focused band wipes in from the left, hold, fade.
+  ~1.65s for two windows.
+- Translucent via an ARGB32 visual when a compositor is present, detected by
+  looking for an owned _NET_WM_CM_S* selection. Plain X11 has no per-window
+  alpha, so with no compositor it falls back to a solid fill rather than
+  black holes. FAE_HUD_VERBOSE=1 reports the choice; --opaque forces the
+  fallback so it can be tested without stopping picom.
+- BUGFIX (hud): the header, footer and corner facets rode the global fade
+  envelope while the rows had their own stagger, so at ~80ms you got a
+  fully-lit footer sitting under an empty body. They now join the cascade.
+  Only visible by capturing frames across the timeline, not one screenshot.
+- BUGFIX (hud): the focused band was drawn row_h tall, and row_h includes the
+  gap *under* a row, so it reached up over the title into the header rule.
+  It now hugs the row's two lines.
+- HUD now sets WM_NAME as well as _NET_WM_NAME; with only the latter the
+  window is invisible to `xdotool search` and `wmctrl`.
+- BUGFIX (fae-cycle): a client that exits between reading _NET_CLIENT_LIST and
+  scraping the tree left us holding an X id with no container, and the script
+  exited 1 having done nothing. Now resolve_con/pick_target are functions and a
+  dead target is retried, with the dead ids remembered — re-reading the list
+  alone was not enough, because _NET_CLIENT_LIST keeps listing a window for a
+  moment after its client exits, so the retry re-picked the same corpse (5
+  failures in 30 under churn; now 0 in 40 each way under the same churn).
