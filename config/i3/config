@@ -64,10 +64,23 @@ exec --no-startup-id kitty -o allow_remote_control=yes -o listen_on="unix:@faeos
 mouse_warping output
 focus_follows_mouse no
 
-# Super + drag = move the window under the cursor (tiled windows float
-# first, so the pointer actually leads). Super+Mod1+drag stays tiled.
-bindsym $mod+button1 noprint, floating enable, drag move
-bindsym $mod+button3 noprint, floating enable, drag resize
+# Super + Enter: a new terminal. Nothing was bound here before, which is why
+# Super+Enter did nothing at all. Every kitty gets the house socket so
+# fae-cycle can toast the window you land in.
+bindsym $mod+Return exec --no-startup-id kitty -o allow_remote_control=yes -o listen_on="unix:@faeos-kitty"
+bindsym $mod+Shift+Return exec --no-startup-id kitty -o allow_remote_control=yes -o listen_on="unix:@faeos-kitty" -o initial_window_width=120c -o initial_window_height=36c
+# Ctrl+Shift+Return: a terminal where the mouse does not move windows.
+bindsym Ctrl+Shift+Return exec --no-startup-id kitty -o allow_remote_control=yes -o listen_on="unix:@faeos-kitty" -o initial_window_width=120c
+
+# Super + drag: two steps, because i3 mishandles `floating enable, drag …`
+# in one chain (the client converts after i3 already started the drag).
+# Press floats the window, the same press then drags it; a second binding
+# keeps drag working on windows that are already floating.
+bindsym $mod+button1 noprint, floating enable
+bindsym $mod+button1 noprint, drag move
+bindsym $mod+button3 noprint, floating enable
+bindsym $mod+button3 noprint, drag resize
+# Super+Mod1+drag stays in the layout (no floating).
 bindsym Mod1+$mod+button1 move container
 bindsym Mod1+$mod+button3 resize set 320 px 240 px, resize set 640 px 360 px, resize set 952 px 1072 px
 

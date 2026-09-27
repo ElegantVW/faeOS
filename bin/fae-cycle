@@ -113,14 +113,12 @@ PULSE_LILAC="#d4b4e8"
 TOAST_LEN=46
 
 if [ "${FAE_CYCLE_QUIET:-0}" != "1" ]; then
-  # Kitty appends its pid to a listen_on path (kitty.sock-2172), so a *.sock
-  # glob never matches. The house kitty listens on the abstract socket
-  # @faeos-kitty instead, and we ask kitty itself whether each address is live.
+  # Kitty appends its pid to a listen_on name — files become kitty.sock-2172
+  # and abstract sockets become @faeos-kitty-2172 (measured in /proc/net/unix).
+  # So we ask kitty directly, trying the bare name and every pid-suffixed
+  # abstract name the kernel currently knows about.
   toasted=0
-  for addr in "unix:@faeos-kitty" "unix:$HOME/.kitty/kitty.sock" /tmp/opencode/kitty*.sock; do
-    case "$addr" in
-      */*) [ -S "$addr" ] || continue; addr="unix:$addr" ;;
-    esac
+  for addr in "unix:@faeos-kitty" $(awk '$NF ~ /^@faeos-kitty-[0-9]+$/ {print "unix:" $NF}' /proc/net/unix 2>/dev/null | sort -u); do
     kitty @ --to "$addr" transmit-text "$TOAST" >/dev/null 2>&1 && { toasted=1; break; }
   done
   cat >&2 <<MSG
