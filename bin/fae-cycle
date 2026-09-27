@@ -88,11 +88,11 @@ DISPLAY="$D" i3-msg "[con_id=$con] focus" >/dev/null
 # ── cue 1: name the window for the toast ────────────────────────────────
 name=$(DISPLAY="$D" xprop -id "$target" WM_NAME 2>/dev/null | sed 's/.*= //; s/^"//; s/"$//' | cut -c1-28)
 [ -n "$name" ] || name="window"
-TOAST=$(printf '%b' \
-"\033[38;5;175m╭──────────────────────────────────────────────╮\033[0m
-\033[38;5;175m│\033[0m \033[38;5;252m✦ fae-cycle: ${dir} ─ you are here\033[0m
-\033[38;5;175m│\033[0m \033[38;5;132m${name}\033[0m
-\033[38;5;175m╰──────────────────────────────────────────────╯\033[0m")
+# The toast is PLAIN ASCII on purpose. `send-key` types real key events into
+# the window, and the shell would then try to *run* them; colour escapes arrive
+# as literal junk (it once complained about `8`, `5`, `175m|m`). So no colour
+# here: the house prompt frame is already on screen, and the text only says
+# where the cycle landed.
 
 # ── cue: the toast, in the window you arrived in. Kitty remote control is
 # per-socket, so only sockets that exist can carry it.
@@ -113,15 +113,38 @@ PULSE_LILAC="#d4b4e8"
 TOAST_LEN=46
 
 if [ "${FAE_CYCLE_QUIET:-0}" != "1" ]; then
-  # Kitty appends its pid to a listen_on name — files become kitty.sock-2172
-  # and abstract sockets become @faeos-kitty-2172 (measured in /proc/net/unix).
-  # The subcommand is `send-text` (there is no `transmit-text`, and this kitty
-  # build has no --match), so the toast lands in the focused window of the
-  # first kitty that answers.
+  # Kitty appends its pid to a listen_on name — abstract sockets become
+  # @faeos-kitty-2172 (measured in /proc/net/unix). Three ids have to agree
+  # before a keystroke can be targeted, and they are NOT the same number:
+  #   socket  @faeos-kitty-<X11 pid>
+  #   X11     $target (_NET_WM_PID)
+  #   kitty   its own window id from `kitty @ ls` (1, 2, 3 …)
+  # `send-key --match id:` wants the third one. So: pid -> socket -> kitty id.
+  # No trailing newline, so the text lands on the prompt line, unexecuted.
   toasted=0
-  for addr in "unix:@faeos-kitty" $(awk '$NF ~ /^@faeos-kitty-[0-9]+$/ {print "unix:" $NF}' /proc/net/unix 2>/dev/null | sort -u); do
-    kitty @ --to "$addr" send-text "$TOAST" >/dev/null 2>&1 && { toasted=1; break; }
-  done
+  tpid=$(DISPLAY="$D" xprop -id "$target" _NET_WM_PID 2>/dev/null | grep -oE '[0-9]+$')
+  if [ -n "$tpid" ]; then
+    kid=$(kitty @ --to "unix:@faeos-kitty-$tpid" ls 2>/dev/null | python3 -c "
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: raise SystemExit
+best=None
+for w in d:
+    for t in w.get('tabs',[]):
+        for win in t.get('windows',[]):
+            if win.get('is_focused'): best=win['id']
+if best is None:
+    for w in d:
+        for t in w.get('tabs',[]):
+            if t.get('is_active'):
+                for win in t.get('windows',[]): best=win['id']
+print(best or '')" 2>/dev/null)
+    if [ -n "$kid" ]; then
+      kitty @ --to "unix:@faeos-kitty-$tpid" send-key --match "id:$kid" \
+        lbracket space f a e c y c l e colon space ${dir} space minus greater space \
+        "${name// /space}" space rbracket >/dev/null 2>&1 && toasted=1
+    fi
+  fi
   cat >&2 <<MSG
 fae-cycle: ${dir} → '${name}'
 fae-cycle:   hint: Alt+Tab again, Alt+Shift+Tab to go back${toasted:+ · toasted}
