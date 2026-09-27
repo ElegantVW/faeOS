@@ -57,7 +57,18 @@ inside its configuration language.
 
 ## What is drawn
 
-Two lines per window, so the panel spends height instead of width.
+A macOS Cmd+Tab row: **one entry per application**, not per window. Deduped by
+`WM_CLASS`, ordered most-recently-used, so three terminals collapse into one
+`kitty` entry and the strip stays as short as the number of *apps* — the thing
+a human actually counts. Each entry is the app's icon from `_NET_WM_ICON`,
+cropped to its visible content and scaled to fit, with the app name below and
+a count badge when the app owns more than one window.
+
+The cost is real: you cannot reach the second kitty window with Tab. macOS
+solves that with Cmd+` — a separate within-app cycle — and `--all-workspaces`
+opts out of the workspace scoping.
+
+Centred horizontally, a fifth of the way down, opaque, no backdrop dim.
 
     ◆ windows ────────────────────────── 3 ┐
                                           │
@@ -182,3 +193,34 @@ particular is optional, and a handsome render of absent data is still wrong.
 For the motion, capture frames across the timeline and look at each one. A
 single screenshot cannot show a cascade; the frame at 80ms is where the
 footer bug was visible.
+
+
+## Two things that are not ours to fix, and bit us
+
+**picom was making the strip see-through.** The panel declares itself
+`_NET_WM_WINDOW_TYPE_DOCK`, so picom classified it as an *inactive* window and
+applied `inactive-opacity = 0.92` to it — no matter what alpha cairo filled the
+surface with. And `round-borders = 12` was rounding the panel's corners,
+clipping the ones cairo drew and cutting the corner facets. picom.conf now
+sets `inactive-opacity = 1.0` and excludes `name = 'fae-hud'` from rounding.
+
+**`pango_cairo_show_layout` positions by the layout's top-left, not the text
+baseline.** Every `y` in the paint code is therefore a top edge. Treating it
+as a baseline is what put the window-count number *underneath* its badge
+instead of inside it.
+
+## A note on verification
+
+Several apparent rendering bugs this round turned out to be my own
+stale-coordinate misreads: the strip's width and position change with the
+number of apps, so a crop taken using the geometry from an earlier run lands
+beside the panel and shows desktop instead. Pixel sampling of known points
+(`c_panel` at the panel centre) settles what is actually on screen; a
+misaligned crop does not.
+
+## Building on the icon path
+
+`_NET_WM_ICON` really is populated — kitty publishes a 128x128 image plus three
+small ones. Do not check this with `xprop`: this system's xprop renders
+CARDINAL icon data as coloured blocks, which reads exactly like an empty
+property. The property is read directly in C, so that is all moot.

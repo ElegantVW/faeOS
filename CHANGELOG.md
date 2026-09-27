@@ -202,3 +202,29 @@ an empty workspace.
 - Verified by pixel-diffing the panel region against a no-panel frame and
   counting lit pixels — the check that would have caught the coordinate bug.
   Lit: 0 windows (message), 1, 2, 6 rows, ARGB32 and --opaque.
+
+## strip-2026-09-27
+Alt+Tab is now a macOS-style strip: one icon per APPLICATION, centred, a fifth
+of the way down, opaque, no backdrop dim. Deduped by WM_CLASS and ordered MRU,
+so the row is as short as the number of apps rather than the number of
+windows. Icons come from _NET_WM_ICON, cropped to their visible content and
+scaled to fit so they line up; apps that publish nothing get a monogram disc
+so a row never has a hole. A count badge appears when an app owns more than one
+window.
+- FOCUS NOW COMMITS FIRST AND THE STRIP FADES AFTER. The previous version sat
+  for 850ms on screen before moving focus, which read as lag and stacked a
+  panel on every tap. Every modern switcher commits on release and uses the
+  panel as confirmation. This was my worst call in the switcher work.
+- The row scrolls (ensure_visible) when there are more apps than fit, and the
+  icons shrink down to a floor before that.
+- BUGFIX (picom.conf): the strip declares _NET_WM_WINDOW_TYPE_DOCK, so picom
+  treated it as an INACTIVE window and applied inactive-opacity = 0.92 — the
+  panel was see-through no matter what alpha cairo used. round-borders = 12 was
+  also rounding the strip's corners, clipping cairo's and cutting the corner
+  facets. Now inactive-opacity = 1.0 and rounding-exclude for fae-hud.
+- BUGFIX: pango_cairo_show_layout() positions by the layout's top-left, not the
+  text baseline. Every y in the paint path is a top edge; treating it as a
+  baseline put the window-count number underneath its badge.
+- Icons: _NET_WM_ICON is populated (kitty ships 128x128 + three small images).
+  xprop on this system renders CARDINAL icon data as coloured blocks and looks
+  empty, which is what made me nearly abandon the icon path.

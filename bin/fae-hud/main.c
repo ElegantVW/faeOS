@@ -1,34 +1,32 @@
-/* fae-hud — the visible layer of the house desktop.
+/* main.c — fae-hud, the house switcher.
  *
- * Usage:  fae-hud [--focus=0x240000e] [--hold=1100]
+ *   fae-hud --cycle        the Alt+Tab gesture (this is what i3 calls)
+ *   fae-hud --dump         print the application list, draw nothing
+ *   fae-hud --opaque       the no-compositor fallback
+ *   fae-hud --all-workspaces
  *
- * Spawned by fae-cycle after it moves focus. It reads the window list from
- * X (EWMH) and paints it. It never focuses, kills, moves or resizes anything,
- * so a bug in here cannot cost you a window.
- *
- * Not a resident process: it paints, holds, fades, exits. That is deliberate
- * — the house rule that came out of the i3bar incident is that nothing on
- * this desktop needs to stay running.
+ * Read-only except for the one focus request on commit, which goes through the
+ * EWMH _NET_ACTIVE_WINDOW message rather than i3-msg: this program has no idea
+ * which window manager is running.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <X11/Xlib.h>
 
-#include "wm.h"
+#include "entry.h"
 #include "hud.h"
 #include "hold.h"
+#include "theme.h"
+#include "wm.h"
 
-/* Xlib's default error handler calls exit() on any protocol error, and that
- * is fatal for a window list. We read _NET_CLIENT_LIST, then read properties
- * off each window in it — and a client can perfectly well exit in between.
- * That is a race, not a bug, and it produced:
- *   X Error of failed request: BadWindow ... X_GetProperty
- * which killed the panel mid-paint, at the exact moment you press Alt+Tab.
- * So every X error is absorbed here. Genuinely unexpected ones are reported
- * to stderr, which i3 routes to /dev/tty1 and nobody reads, so FAE_HUD_VERBOSE
- * is the only way to see them. */
+/* Xlib's default error handler calls exit() on any protocol error, and that is
+ * fatal for a window list: we read _NET_CLIENT_LIST and then read properties
+ * off each window in it, and a client can exit in between. That is a race, not
+ * a bug, and it killed the strip mid-paint at the exact moment you press
+ * Alt+Tab. Every X error is absorbed here. */
 static int on_x_error(Display *dpy, XErrorEvent *e)
 {
     if (getenv("FAE_HUD_VERBOSE"))
@@ -40,92 +38,79 @@ static int on_x_error(Display *dpy, XErrorEvent *e)
 static void usage(void)
 {
     fprintf(stderr,
-        "fae-hud — themed window cycler panel\n"
-        "  --focus=0xID   highlight this X window (default: _NET_ACTIVE_WINDOW)\n"
-        "  --dump         print the EWMH window list, draw nothing\n"
-        "  --opaque       skip translucency (the no-compositor fallback)\n"
-        "  --cycle        the Alt+Tab gesture: open, browse, commit once\n"
-        "  --all-workspaces\n"
-        "                 include other workspaces (default: current only)\n"
-        "  --display=:N   X display (default: $DISPLAY)\n"
-        "  --help\n");
+        "fae-hud — the house switcher\n"
+        "  --cycle          open, browse, commit once (bound to Alt+Tab)\n"
+        "  --dump           print the application list, draw nothing\n"
+        "  --opaque         skip translucency (the no-compositor fallback)\n"
+        "  --all-workspaces include other workspaces (default: current only)\n"
+        "  --display=:N\n");
 }
 
 int main(int argc, char **argv)
 {
-    Window focus = None;
     const char *dpy_name = NULL;
-    int dump = 0;
-    int force_opaque = 0;
-    int cycle = 0;
-    int workspace_only = 1;   /* browsing is scoped to this workspace */
+    int dump = 0, force_opaque = 0, cycle = 0, all_ws = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--focus=", 8) == 0) {
-            focus = (Window)strtoul(argv[i] + 8, NULL, 0);
-        } else if (strncmp(argv[i], "--display=", 10) == 0) {
-            dpy_name = argv[i] + 10;
-        } else if (strcmp(argv[i], "--dump") == 0) {
-            dump = 1;
-        } else if (strcmp(argv[i], "--opaque") == 0) {
-            force_opaque = 1;
-        } else if (strcmp(argv[i], "--cycle") == 0) {
-            cycle = 1;
-        } else if (strcmp(argv[i], "--all-workspaces") == 0) {
-            workspace_only = 0;
-        } else if (strcmp(argv[i], "--help") == 0) {
-            usage();
-            return 0;
-        } else {
-            fprintf(stderr, "fae-hud: unknown argument '%s'\n", argv[i]);
-            usage();
-            return 2;
-        }
+        if (strncmp(argv[i], "--display=", 10) == 0)      dpy_name = argv[i] + 10;
+        else if (strcmp(argv[i], "--cycle") == 0)         cycle = 1;
+        else if (strcmp(argv[i], "--dump") == 0)          dump = 1;
+        else if (strcmp(argv[i], "--opaque") == 0)        force_opaque = 1;
+        else if (strcmp(argv[i], "--all-workspaces") == 0) all_ws = 1;
+        else if (strcmp(argv[i], "--help") == 0) { usage(); return 0; }
+        else { fprintf(stderr, "fae-hud: unknown argument '%s'\n", argv[i]);
+               usage(); return 2; }
     }
 
-    /* --dump: print what EWMH actually says, and draw nothing. This exists
-     * because the first honest question about a window list is not "does it
-     * look right" but "is the data there" — _NET_WM_DESKTOP in particular is
-     * optional and a pretty render of absent data is still wrong. */
     Display *dpy = XOpenDisplay(dpy_name);
-    if (!dpy) {
-        /* No display is not an error worth printing anywhere the user can
-         * see: i3's stderr is /dev/tty1, so anything here is invisible. */
-        return 1;
-    }
-
+    if (!dpy) return 1;          /* i3 sends stderr to /dev/tty1: stay quiet */
     XSetErrorHandler(on_x_error);
 
     int scr = DefaultScreen(dpy);
     Window root = RootWindow(dpy, scr);
+    Window focus = wm_active(dpy, root);
+    elist_t *apps = wm_list_apps(dpy, root, focus);
 
-    wlist_t *list = workspace_only ? wm_list_workspace(dpy, root, focus)
-                                   : wm_list_windows(dpy, root, focus);
-
-    int rc;
-    if (dump) {
-        printf("current_desktop=%lu active=0x%lx focus_arg=0x%lx windows=%d\n",
-               list->current_desktop, (unsigned long)list->active,
-               (unsigned long)list->focus_xid, list->n);
-        for (int i = 0; i < list->n; i++)
-            printf("  [%d] 0x%lx ws=%s%-2lu %-10s |%s|%s%s\n", i + 1,
-                   (unsigned long)list->v[i].xid,
-                   list->v[i].desktop_known ? "" : "?",
-                   list->v[i].desktop,
-                   list->v[i].title,
-                   list->v[i].cls,
-                   list->v[i].is_focus_target ? "  <- highlight" :
-                   (list->v[i].is_active ? "  <- active" : ""),
-                   list->v[i].on_current_workspace ? "" : "  (other ws)");
-        rc = 0;
-    } else if (cycle) {
-        rc = hold_cycle(dpy, scr, list);
-    } else {
-        rc = hud_run(dpy, scr, list, force_opaque);
+    /* Browsing is scoped to the current workspace: i3 follows focus across
+     * workspaces, so a switcher that spans them drags you around the machine
+     * and hides everything you started from. */
+    if (!all_ws) {
+        elist_t *cur = calloc(1, sizeof(elist_t));
+        unsigned long cd = wm_current_desktop(dpy, root);
+        for (int i = 0; i < apps->n; i++) {
+            if (wm_desktop_of(dpy, apps->v[i].xid, cd)) {
+                cur->v = realloc(cur->v, (size_t)(cur->n + 1) * sizeof(entry_t));
+                cur->v[cur->n++] = apps->v[i];
+                /* ownership moved: clear every owned pointer so the old list
+                 * does not free what we just took */
+                apps->v[i].cls = apps->v[i].label = NULL;
+                apps->v[i].icon = NULL;
+            }
+        }
+        wm_apps_free(apps);
+        apps = cur;
     }
 
-    wm_list_free_titles(list);
-    wm_list_free(list);
+    int rc = 0;
+    if (dump) {
+        printf("apps=%d\n", apps->n);
+        for (int i = 0; i < apps->n; i++)
+            printf("  [%d] %-14s xid=0x%lx windows=%d icon=%s\n", i + 1,
+                   apps->v[i].label, (unsigned long)apps->v[i].xid,
+                   apps->v[i].count, apps->v[i].icon ? "yes" : "NO");
+    } else if (cycle) {
+        rc = hold_cycle(dpy, scr, apps);
+    } else {
+        hud_t *h = hud_open(dpy, scr, apps, apps->n > 1 ? 1 : 0, force_opaque);
+        if (h) {
+            struct timespec nap = { 0, 900L * 1000L * 1000L };
+            nanosleep(&nap, NULL);
+            while (XPending(dpy)) { XEvent ev; XNextEvent(dpy, &ev); }
+            hud_close(h);
+        } else rc = 1;
+    }
+
+    wm_apps_free(apps);
     XCloseDisplay(dpy);
     return rc;
 }

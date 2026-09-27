@@ -1,10 +1,12 @@
 /* hold.c — the Alt+Tab gesture.
  *
- * One panel for the whole gesture. Alt+Tab opens it, Tab moves the highlight,
- * Shift+Tab reverses, Esc cancels, and releasing Alt focuses the selection.
- * Focus does not move while you browse, which is the whole point: i3 follows
- * focus across workspaces, so a switcher that focuses on every press drags you
- * around your own machine and hides everything you started from.
+ * One strip for the whole gesture. Alt+Tab opens it, Tab moves the highlight,
+ * Shift+Tab reverses, Esc cancels, and releasing Alt commits.
+ *
+ * The order matters and used to be wrong: focus moves FIRST, then the strip
+ * fades. That is what every modern switcher does, and it is why they feel
+ * instant. The previous version waited ~850ms on screen before committing,
+ * which read as lag and stacked a panel on every tap.
  *
  * ── on grabbing the keyboard ──────────────────────────────────────────────
  * While Alt is held we need Tab, and Tab belongs to your shell. The only
@@ -15,8 +17,8 @@
  *   - a self-pipe carries signals into the main loop, so ungrabbing always
  *     happens in normal context and never from a signal handler
  *   - alarm(THEME_MAX_HOLD) is a failsafe: a stuck Alt cannot hold the
- *     keyboard for longer than that no matter what
- *   - every exit path calls XUngrabKeyboard, and there is only one exit path
+ *     keyboard longer than that whatever else goes wrong
+ *   - every exit path calls XUngrabKeyboard, and there is only one
  */
 #include "hold.h"
 #include "hud.h"
@@ -28,8 +30,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <sys/select.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <X11/Xlib.h>
@@ -41,6 +43,14 @@
 #endif
 
 static int wake_pipe[2] = { -1, -1 };
+static int grab_code = 0;
+
+static int grab_failed(Display *d, XErrorEvent *e)
+{
+    (void)d;
+    grab_code = e->error_code;
+    return 0;
+}
 
 static void on_signal(int sig)
 {
@@ -59,8 +69,8 @@ static int install_pipe(void)
     return 1;
 }
 
-/* the standard, WM-agnostic way to ask for focus. Deliberately not i3-msg:
- * this program does not know i3 exists. */
+/* the standard, WM-agnostic way to ask for focus. Not i3-msg: this program
+ * does not know i3 exists. */
 static void request_focus(Display *dpy, Window xid)
 {
     XEvent e;
@@ -77,21 +87,6 @@ static void request_focus(Display *dpy, Window xid)
     XFlush(dpy);
 }
 
-static int grab_code = 0;
-static int grab_failed(Display *d, XErrorEvent *e)
-{
-    (void)d;
-    grab_code = e->error_code;
-    return 0;
-}
-
-static long now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
-}
-
 static int key_down(Display *dpy, KeyCode kc)
 {
     char keys[32];
@@ -100,13 +95,19 @@ static int key_down(Display *dpy, KeyCode kc)
     return (keys[kc / 8] >> (kc % 8)) & 1;
 }
 
-int hold_cycle(Display *dpy, int scr, wlist_t *list)
+static void commit(Display *dpy, hud_t *h, const char *how)
 {
-    if (list->n == 0) {
-        /* Nothing on this workspace. Show the panel saying so rather than
-         * exiting 1 in silence: the old behaviour was invisible because i3
-         * sends a script's stderr to /dev/tty1. */
-        hud_t *empty = hud_open(dpy, scr, list, 0, 0);
+    Window t = hud_target(h);
+    if (t != None) request_focus(dpy, t);
+    if (getenv("FAE_HUD_VERBOSE"))
+        fprintf(stderr, "fae-hud: %s -> %s\n", how, t == None ? "none" : hud_label(h));
+}
+
+int hold_cycle(Display *dpy, int scr, elist_t *apps)
+{
+    int n = apps->n;
+    if (n == 0) {
+        hud_t *empty = hud_open(dpy, scr, apps, 0, 0);
         if (empty) {
             struct timespec nap = { 0, 700L * 1000L * 1000L };
             nanosleep(&nap, NULL);
@@ -116,15 +117,11 @@ int hold_cycle(Display *dpy, int scr, wlist_t *list)
         return 0;
     }
 
-    /* Windows semantics: the first Alt+Tab already selects the *next* window,
-     * so a quick tap steps one window and a hold lets you keep going. */
-    int sel = list->n > 1 ? 1 : 0;
-    hud_t *h = hud_open(dpy, scr, list, sel, 0);
+    /* Windows/macOS semantics: the first Alt+Tab has ALREADY moved you one
+     * step, so a single tap lands on the next app without any further input. */
+    int sel = n > 1 ? 1 : 0;
+    hud_t *h = hud_open(dpy, scr, apps, sel, 0);
     if (!h) return 1;
-
-    int n = hud_rows(h);
-    int chosen = sel;
-    int cancelled = 0;
 
     KeyCode kc_tab    = XKeysymToKeycode(dpy, XK_Tab);
     KeyCode kc_esc    = XKeysymToKeycode(dpy, XK_Escape);
@@ -132,33 +129,14 @@ int hold_cycle(Display *dpy, int scr, wlist_t *list)
     KeyCode kc_alt_r  = XKeysymToKeycode(dpy, XK_Alt_R);
     KeyCode kc_lshift = XKeysymToKeycode(dpy, XK_Shift_L);
 
-    if (getenv("FAE_HUD_VERBOSE"))
-        fprintf(stderr, "fae-hud: keycodes tab=%d esc=%d alt_l=%d alt_r=%d "
-                        "shift_l=%d\n", kc_tab, kc_esc, kc_alt_l, kc_alt_r,
-                kc_lshift);
+    int cancelled = 0, tab_was = 0;
 
-    int grabbed = 0;
-
-    /* A quick tap: i3 consumed the Alt+Tab that started us, and by the time
-     * we get here the user has already let go. Nothing to browse — commit the
-     * single step and get out of the way. */
+    /* A tap: i3 consumed the Alt+Tab that started us and the user has already
+     * let go. Commit immediately — no wait — and let the strip fade as the
+     * confirmation. Waiting here was what made it feel slow. */
     if (!key_down(dpy, kc_alt_l) && !key_down(dpy, kc_alt_r)) {
-        int target = (sel < list->n) ? list->v[sel].xid : None;
-        /* Dwell before closing. Without it the panel exists for 211ms — the
-         * fade and nothing else — which is a blink. If the user presses Alt
-         * again during the dwell, stop waiting: they are starting a hold, and
-         * the gesture below takes over from here. */
-        long t0 = now_ms();
-        while (now_ms() - t0 < THEME_TAP_HOLD) {
-            if (key_down(dpy, kc_alt_l) || key_down(dpy, kc_alt_r)) break;
-            struct timespec nap = { 0, 16L * 1000L * 1000L };
-            nanosleep(&nap, NULL);
-            while (XPending(dpy)) { XEvent e2; XNextEvent(dpy, &e2); }
-        }
+        commit(dpy, h, "tap");
         hud_close(h);
-        if (target != None) request_focus(dpy, target);
-        if (getenv("FAE_HUD_VERBOSE"))
-            fprintf(stderr, "fae-hud: tap committed -> focused\n");
         return 0;
     }
 
@@ -172,31 +150,24 @@ int hold_cycle(Display *dpy, int scr, wlist_t *list)
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGHUP,  &sa, NULL);
 
-    /* Find out whether the grab actually took. A failed XGrabKeyboard raises
-     * BadAccess, which the global handler in main.c quietly absorbs — so
-     * without this check we would carry on believing we own the keyboard while
-     * Tab is in fact going to the shell and triggering completion. */
     {
-        static int code = 0;
-        code = 0;
+        grab_code = 0;
         XErrorHandler prev = XSetErrorHandler(grab_failed);
         XGrabKeyboard(dpy, DefaultRootWindow(dpy), True,
                       GrabModeAsync, GrabModeAsync, CurrentTime);
         XSync(dpy, False);
         XSetErrorHandler(prev);
-        grabbed = (code == 0);
         if (getenv("FAE_HUD_VERBOSE"))
-            fprintf(stderr, "fae-hud: XGrabKeyboard %s (error=%d)\n",
-                    grabbed ? "OK" : "REFUSED", code);
+            fprintf(stderr, "fae-hud: XGrabKeyboard %s\n",
+                    grab_code == 0 ? "OK" : "REFUSED");
     }
     alarm(THEME_MAX_HOLD);
 
     /* The event stream is not trustworthy for "is Alt still down": a spurious
      * KeyRelease for the Alt keycode arrives the moment the grab takes, and
-     * the real release is not guaranteed to follow in a form we can rely on.
-     * So: events tell us about Tab and Escape, and a 30ms poll of the actual
-     * key state tells us when the gesture is over. Polling wins, always. */
-    int done = 0, tab_was_down = 0;
+     * acting on it ended the whole gesture before the user pressed anything.
+     * So events carry Tab and Escape, and a 30ms poll of the real key state
+     * decides when the gesture is over. The poll wins, always. */
     for (;;) {
         fd_set fds;
         FD_ZERO(&fds);
@@ -216,51 +187,38 @@ int hold_cycle(Display *dpy, int scr, wlist_t *list)
             break;
         }
 
-        while (XPending(dpy) && !done && !cancelled) {
+        while (XPending(dpy) && !cancelled) {
             XEvent ev;
             XNextEvent(dpy, &ev);
             if (ev.type == KeyPress && ev.xkey.keycode == kc_esc) {
                 cancelled = 1;
-                done = 1;
+                commit(dpy, h, "cancelled");
             }
         }
-        if (done) break;
+        if (cancelled) break;
 
-        /* Tab edges, read from the key state so a press that arrives between
-         * two select() wakeups is still counted exactly once. */
         int tab_down = key_down(dpy, kc_tab);
-        if (tab_down && !tab_was_down && n > 1) {
+        if (tab_down && !tab_was && n > 1) {
             int shift = key_down(dpy, kc_lshift);
-            chosen = shift ? (chosen - 1 + n) % n : (chosen + 1) % n;
-            hud_select(h, chosen);
+            sel = shift ? (sel - 1 + n) % n : (sel + 1) % n;
+            hud_select(h, sel);
             if (getenv("FAE_HUD_VERBOSE"))
-                fprintf(stderr, "fae-hud: selection -> %d\n", chosen);
+                fprintf(stderr, "fae-hud: selection -> %d\n", sel);
         }
-        tab_was_down = tab_down;
+        tab_was = tab_down;
 
         if (!key_down(dpy, kc_alt_l) && !key_down(dpy, kc_alt_r)) {
             if (getenv("FAE_HUD_VERBOSE"))
-                fprintf(stderr, "fae-hud: alt up, ending gesture\n");
+                fprintf(stderr, "fae-hud: alt up\n");
             break;
         }
     }
 
-    if (grabbed) {
-        alarm(0);
-        XUngrabKeyboard(dpy, CurrentTime);
-        XSync(dpy, False);
-    }
+    alarm(0);
+    XUngrabKeyboard(dpy, CurrentTime);
+    XSync(dpy, False);
 
-    Window target = None;
-    if (!cancelled && chosen >= 0 && chosen < list->n)
-        target = list->v[chosen].xid;
-
+    if (!cancelled) commit(dpy, h, "release");
     hud_close(h);
-
-    if (target != None) request_focus(dpy, target);
-    if (getenv("FAE_HUD_VERBOSE"))
-        fprintf(stderr, "fae-hud: cycle %s -> %s\n",
-                cancelled ? "cancelled" : "committed",
-                target == None ? "none" : "focused");
     return 0;
 }

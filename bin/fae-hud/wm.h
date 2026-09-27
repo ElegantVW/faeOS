@@ -34,6 +34,16 @@ char         *wm_text_prop(Display *dpy, Window w, const char *name);
 char         *wm_title(Display *dpy, Window w);
 char         *wm_class(Display *dpy, Window w);
 
+/* Small accessors the switcher and the app model need. */
+Window        wm_active(Display *dpy, Window root);
+unsigned long wm_current_desktop(Display *dpy, Window root);
+Window       *wm_stacking(Display *dpy, Window root, unsigned long *n);
+
+/* 1 when the window belongs to `current`. A window with no _NET_WM_DESKTOP at
+ * all counts as belonging: some WMs do not set it, and dropping those would
+ * silently hide real clients from the switcher. */
+int           wm_desktop_of(Display *dpy, Window xid, unsigned long current);
+
 wlist_t *wm_list_windows(Display *dpy, Window root, Window focus_xid);
 
 /* Only the windows on the current workspace. Cycling is scoped this way so

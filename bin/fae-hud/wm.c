@@ -237,6 +237,31 @@ wlist_t *wm_list_workspace(Display *dpy, Window root, Window focus_xid)
     return build(dpy, root, focus_xid, 1);
 }
 
+Window wm_active(Display *dpy, Window root)
+{
+    return wm_window_prop(dpy, root, "_NET_ACTIVE_WINDOW");
+}
+
+unsigned long wm_current_desktop(Display *dpy, Window root)
+{
+    int ok = 0;
+    unsigned long v = wm_cardinal(dpy, root, "_NET_CURRENT_DESKTOP", &ok);
+    return ok ? v : 0;
+}
+
+Window *wm_stacking(Display *dpy, Window root, unsigned long *n)
+{
+    return stacking_list(dpy, root, n);
+}
+
+int wm_desktop_of(Display *dpy, Window xid, unsigned long current)
+{
+    int ok = 0;
+    unsigned long d = wm_cardinal(dpy, xid, "_NET_WM_DESKTOP", &ok);
+    if (!ok) return 1;
+    return d == current;
+}
+
 void wm_list_free_titles(wlist_t *l)
 {
     for (int i = 0; i < l->n; i++) {
