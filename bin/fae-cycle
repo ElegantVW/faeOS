@@ -66,7 +66,7 @@ def walk(n):
     if n.get('window')==want: found=n['id']; return True
     for c in n.get('nodes',[])+n.get('floating_nodes',[]):
         if walk(c): return True
-walk(t); print(found or '')" 2>/dev/null)
+walk(t); print(found or '')" 2>/dev/null) || con=""
 if [ -z "$con" ]; then
   state=$(tree | python3 -c "
 import json,sys
@@ -78,7 +78,7 @@ def walk(n):
     if n.get('window')==want: out=n.get('scratchpad_state','none'); return True
     for c in n.get('nodes',[])+n.get('floating_nodes',[]):
         if walk(c): return True
-walk(t); print(out)" 2>/dev/null)
+walk(t); print(out)" 2>/dev/null) || state=""
   case "$state" in
     fresh|hidden) DISPLAY="$D" i3-msg "[window=$((target))] scratchpad show" >/dev/null 2>&1
       con=$(tree | python3 -c "
@@ -91,7 +91,7 @@ def walk(n):
     if n.get('window')==want: found=n['id']; return True
     for c in n.get('nodes',[])+n.get('floating_nodes',[]):
         if walk(c): return True
-walk(t); print(found or '')" 2>/dev/null) ;;
+walk(t); print(found or '')" 2>/dev/null) || con="" ;;
   esac
 fi
 [ -n "$con" ] || { faelog "FAIL: cannot focus target=$target"; echo "fae-cycle: cannot focus $target" >&2; exit 1; }
@@ -100,7 +100,12 @@ DISPLAY="$D" i3-msg "[con_id=$con] focus" >/dev/null
 faelog "focused con=$con target=$target"
 
 # ── cue 1: name the window for the toast ────────────────────────────────
-name=$(DISPLAY="$D" xprop -id "$target" WM_NAME 2>/dev/null | sed 's/.*= //; s/^"//; s/"$//' | cut -c1-28)
+# Guarded: with `set -euo pipefail`, a pipeline where ANY stage fails aborts
+# the whole script with no message. xprop exits non-zero on a window that has
+# been destroyed since we listed it, which is exactly what happens when you
+# cycle quickly and a client exits. The symptom was Alt+Tab doing nothing at
+# all, silently, rc=1, with no output anywhere a human could see.
+name=$(DISPLAY="$D" xprop -id "$target" WM_NAME 2>/dev/null | sed 's/.*= //; s/^"//; s/"$//' | cut -c1-28) || name=""
 [ -n "$name" ] || name="window"
 # The toast is PLAIN ASCII on purpose. `send-key` types real key events into
 # the window, and the shell would then try to *run* them; colour escapes arrive
@@ -127,6 +132,21 @@ PULSE_LILAC="#d4b4e8"
 TOAST_LEN=46
 
 if [ "${FAE_CYCLE_QUIET:-0}" != "1" ]; then
+  # ── the cue: fae-hud, a themed panel listing every window ────────────────
+  # This is the part you can actually see. i3 gives us stderr on /dev/tty1, so
+  # anything printed there is invisible, and a kitty toast is easy to miss if
+  # you are looking at the window you just left. The panel is a short-lived
+  # process (paint, hold, fade, exit) — no resident daemon, per the house rule
+  # that came out of the i3bar incident.
+  #
+  # It is told which window to highlight rather than being asked to work it
+  # out, and it reads the rest of the list itself over EWMH. It is strictly a
+  # viewer: it never focuses, kills, moves or resizes anything.
+  FAE_HUD="${FAE_HUD:-$HOME/bin/fae-hud}"
+  if [ -x "$FAE_HUD" ]; then
+    ( "$FAE_HUD" --focus="$target" >/dev/null 2>&1 & ) || true
+  fi
+
   # Kitty appends its pid to a listen_on name — abstract sockets become
   # @faeos-kitty-2172 (measured in /proc/net/unix). Three ids have to agree
   # before a keystroke can be targeted, and they are NOT the same number:
@@ -137,7 +157,7 @@ if [ "${FAE_CYCLE_QUIET:-0}" != "1" ]; then
   # No trailing newline, so the text lands on the prompt line, unexecuted.
   toasted=0
   flashed=0
-  tpid=$(DISPLAY="$D" xprop -id "$target" _NET_WM_PID 2>/dev/null | grep -oE '[0-9]+$')
+  tpid=$(DISPLAY="$D" xprop -id "$target" _NET_WM_PID 2>/dev/null | grep -oE '[0-9]+$') || tpid=""
   if [ -n "$tpid" ]; then
     kid=$(kitty @ --to "unix:@faeos-kitty-$tpid" ls 2>/dev/null | python3 -c "
 import json,sys
@@ -153,11 +173,20 @@ if best is None:
         for t in w.get('tabs',[]):
             if t.get('is_active'):
                 for win in t.get('windows',[]): best=win['id']
-print(best or '')" 2>/dev/null)
+print(best or '')" 2>/dev/null) || kid=""
     if [ -n "$kid" ]; then
-      kitty @ --to "unix:@faeos-kitty-$tpid" send-key --match "id:$kid" \
-        lbracket space f a e c y c l e colon space ${dir} space minus greater space \
-        "${name// /space}" space rbracket >/dev/null 2>&1 && toasted=1
+      # `if` rather than `&&`: with `set -e`, a `cmd && var=1` list that FAILS
+      # aborts the whole script. Cycling to any non-kitty window (the red-view
+      # console, say) means there is no @faeos-kitty-<pid> socket at all, so
+      # `kitty @` exits non-zero — and the script died right there, silently,
+      # rc=1, after focus had already moved. That is precisely the "Alt+Tab
+      # works but nothing tells me anything" behaviour. The HUD above has
+      # already painted by this point, which is why it is spawned first.
+      if kitty @ --to "unix:@faeos-kitty-$tpid" send-key --match "id:$kid" \
+           lbracket space f a e c y c l e colon space ${dir} space minus greater space \
+           "${name// /space}" space rbracket >/dev/null 2>&1; then
+        toasted=1
+      fi
       # ── the visible cue ──────────────────────────────────────────────────
       # The stderr line below is USELESS on this machine: i3 runs `exec` with
       # stderr inherited from i3, and i3's fd 2 is /dev/tty1 (measured). So the
