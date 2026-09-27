@@ -85,6 +85,13 @@ static int grab_failed(Display *d, XErrorEvent *e)
     return 0;
 }
 
+static long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
 static int key_down(Display *dpy, KeyCode kc)
 {
     char keys[32];
@@ -137,8 +144,21 @@ int hold_cycle(Display *dpy, int scr, wlist_t *list)
      * single step and get out of the way. */
     if (!key_down(dpy, kc_alt_l) && !key_down(dpy, kc_alt_r)) {
         int target = (sel < list->n) ? list->v[sel].xid : None;
+        /* Dwell before closing. Without it the panel exists for 211ms — the
+         * fade and nothing else — which is a blink. If the user presses Alt
+         * again during the dwell, stop waiting: they are starting a hold, and
+         * the gesture below takes over from here. */
+        long t0 = now_ms();
+        while (now_ms() - t0 < THEME_TAP_HOLD) {
+            if (key_down(dpy, kc_alt_l) || key_down(dpy, kc_alt_r)) break;
+            struct timespec nap = { 0, 16L * 1000L * 1000L };
+            nanosleep(&nap, NULL);
+            while (XPending(dpy)) { XEvent e2; XNextEvent(dpy, &e2); }
+        }
         hud_close(h);
         if (target != None) request_focus(dpy, target);
+        if (getenv("FAE_HUD_VERBOSE"))
+            fprintf(stderr, "fae-hud: tap committed -> focused\n");
         return 0;
     }
 

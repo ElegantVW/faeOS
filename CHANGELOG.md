@@ -179,3 +179,26 @@ the keyboard free and typing into `cat` still works; the 8s failsafe fires;
 no leftover processes or stray X windows; ASan clean on the cycle path; both
 binaries build from scratch with zero warnings; fae-cycle 30/30 and 12/12 on
 an empty workspace.
+
+## fix-2026-09-27
+- BUGFIX (fae-hud): the panel drew itself at h->px,h->py — the window's
+  position ON SCREEN — instead of surface coordinates. cairo's origin is the
+  surface, so every fill, stroke, facet and glyph landed outside its own
+  470x235 canvas and was clipped away. The only thing that survived was
+  cairo_paint(), which fills the clip regardless of coordinates, so Alt+Tab
+  produced a void-coloured rectangle with no text at all. Introduced when
+  hud.c was rewritten into the hud_t handle: the old code drew at local
+  `px,py` variables that held *insets* (~0), and the rewrite reused those names
+  for the window position. paint_chrome/paint_row/repaint_rows and body_top are
+  now surface-relative, with a comment saying why so it is not reintroduced.
+- BUGFIX (fae-hud): the bottom corner facets sat on top of the footer's first
+  character — a diamond overdrawing the "t" of "tab next". THEME_FACET_INSET
+  had been raised to 21 to clear the corner arc, which is exactly what pushed
+  them over the text at THEME_PAD_X=20. Back to 14, which clears both.
+- fae-hud: a quick tap now dwells ~850ms before closing (THEME_TAP_HOLD).
+  Measured before: 211ms on screen, which is a blink, not a cue. If Alt comes
+  back down during the dwell the wait stops, so a hold still works.
+  Now 1061ms on a tap.
+- Verified by pixel-diffing the panel region against a no-panel frame and
+  counting lit pixels — the check that would have caught the coordinate bug.
+  Lit: 0 windows (message), 1, 2, 6 rows, ARGB32 and --opaque.

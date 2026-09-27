@@ -52,8 +52,15 @@
 #define THEME_LINE_GAP     5   /* title to meta, inside a row */
 #define THEME_ROW_GAP     12   /* row to row */
 #define THEME_RULE_GAP     9   /* around the header/footer hairlines */
-#define THEME_FACET_INSET 21   /* corner diamonds: clear of the 14px arc */
+/* Corner diamonds. 14 keeps them inside the 14px corner arc AND clear of the
+ * text, which starts at THEME_PAD_X=20. At 21 they sat on top of the first
+ * character of the footer — a diamond overdrawing the "t" of "tab next". */
+#define THEME_FACET_INSET 14
 #define THEME_FACET_R      5
+/* The bottom corner facets sit THEME_FACET_INSET from the edge, and the footer
+ * used to land right on top of them — the first character of "tab next" was
+ * being overdrawn by a diamond. */
+#define THEME_FOOTER_CLEAR 18
 #define THEME_GLOW_STEPS   5
 
 /* Narrower and taller than the first version: the rows are two lines now, so
@@ -74,6 +81,11 @@
 #define THEME_WIPE_START   200   /* selected band begins wiping in */
 #define THEME_WIPE         180
 #define THEME_HOLD        1200   /* measured from the last row landing */
+
+/* A quick tap still has to be readable. Measured before this existed: the
+ * panel was on screen for 211ms — just the fade — which is a blink, not a
+ * cue. The whole reason the panel exists is to say where you landed. */
+#define THEME_TAP_HOLD     850
 #define THEME_FADE_OUT     220
 
 /* Failsafe for the keyboard grab: a stuck Alt can never hold the keyboard for

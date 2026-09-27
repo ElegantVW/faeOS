@@ -227,7 +227,7 @@ static int compositor_present(Display *dpy)
 static void paint_row(hud_t *h, int i, double alpha, double wipe)
 {
     int sel = (i == h->sel);
-    double x0 = h->px + THEME_PAD_X;
+    double x0 = THEME_PAD_X;   /* surface-relative; see paint_chrome */
     double tx = x0 + h->text_x;
     double y = h->body_top + i * h->row_h;
     double base = y + h->line_title * 0.78;
@@ -236,16 +236,16 @@ static void paint_row(hud_t *h, int i, double alpha, double wipe)
 
     if (sel && wipe > 0.001) {
         cairo_save(cr);
-        cairo_rectangle(cr, h->px, y - 5, h->want_w * wipe,
+        cairo_rectangle(cr, 0, y - 5, h->want_w * wipe,
                         h->line_title + THEME_LINE_GAP + h->line_meta);
         cairo_clip(cr);
         set_rgba(cr, h->c_pink, 0.20 * alpha);
-        round_rect(cr, h->px + 1, y - 5, h->want_w - 2,
+        round_rect(cr, 1, y - 5, h->want_w - 2,
                    h->line_title + THEME_LINE_GAP + h->line_meta, rad);
         cairo_fill(cr);
         set_rgba(cr, h->c_pink, 0.34 * alpha);
         cairo_set_line_width(cr, 1.0);
-        round_rect(cr, h->px + 1.5, y - 4.5, h->want_w - 3,
+        round_rect(cr, 1.5, y - 4.5, h->want_w - 3,
                    h->line_title + THEME_LINE_GAP + h->line_meta - 1, rad);
         cairo_stroke(cr);
         cairo_restore(cr);
@@ -282,31 +282,42 @@ static void paint_row(hud_t *h, int i, double alpha, double wipe)
 static void paint_chrome(hud_t *h, double alpha)
 {
     cairo_t *cr = h->cr;
-    double x0 = h->px + THEME_PAD_X;
-    double right = h->px + h->want_w - THEME_PAD_X;
-    double y = h->py + THEME_PAD_Y;
+    /* cairo's origin is the SURFACE, not the screen.
+     *
+     * h->px and h->py place the window on the desktop; they are not drawing
+     * coordinates. Drawing the panel at h->px,h->py put every shape outside
+     * its own want_w x want_h canvas — a 470x235 surface with the panel
+     * painted at (725,281) — so every fill, stroke and glyph was clipped away
+     * and the only thing left on screen was cairo_paint(), which fills the
+     * clip regardless of coordinates. The result was a void-coloured
+     * rectangle with no text at all, which is exactly what it looked like.
+     *
+     * Everything below is in surface coordinates: 0,0 is the panel's top left.
+     */
+    double x0 = THEME_PAD_X;
+    double right = h->want_w - THEME_PAD_X;
+    double y = THEME_PAD_Y;
 
-    glow_stroke(cr, h->c_pink, alpha * 0.9, h->px, h->py, h->want_w,
-                h->want_h, THEME_RADIUS);
+    glow_stroke(cr, h->c_pink, alpha * 0.9, 0, 0, h->want_w, h->want_h,
+                THEME_RADIUS);
     set_rgba(cr, h->c_panel, h->have_cx ? alpha : 1.0);
-    round_rect(cr, h->px, h->py, h->want_w, h->want_h, THEME_RADIUS);
+    round_rect(cr, 0, 0, h->want_w, h->want_h, THEME_RADIUS);
     cairo_fill(cr);
     cairo_set_line_width(cr, 1.0);
     set_rgba(cr, mix(h->c_panel, h->c_pink, 0.55), alpha);
-    round_rect(cr, h->px + 0.5, h->py + 0.5, h->want_w - 1, h->want_h - 1,
-               THEME_RADIUS);
+    round_rect(cr, 0.5, 0.5, h->want_w - 1, h->want_h - 1, THEME_RADIUS);
     cairo_stroke(cr);
 
     set_rgba(cr, h->c_lilac, alpha * 0.34);
-    diamond(cr, h->px + THEME_FACET_INSET, h->py + THEME_FACET_INSET,
+    diamond(cr, THEME_FACET_INSET, THEME_FACET_INSET,
             THEME_FACET_R); cairo_fill(cr);
-    diamond(cr, h->px + h->want_w - THEME_FACET_INSET,
-            h->py + THEME_FACET_INSET, THEME_FACET_R); cairo_fill(cr);
-    diamond(cr, h->px + THEME_FACET_INSET,
-            h->py + h->want_h - THEME_FACET_INSET, THEME_FACET_R);
+    diamond(cr, h->want_w - THEME_FACET_INSET,
+            THEME_FACET_INSET, THEME_FACET_R); cairo_fill(cr);
+    diamond(cr, THEME_FACET_INSET,
+            h->want_h - THEME_FACET_INSET, THEME_FACET_R);
     cairo_fill(cr);
-    diamond(cr, h->px + h->want_w - THEME_FACET_INSET,
-            h->py + h->want_h - THEME_FACET_INSET, THEME_FACET_R);
+    diamond(cr, h->want_w - THEME_FACET_INSET,
+            h->want_h - THEME_FACET_INSET, THEME_FACET_R);
     cairo_fill(cr);
 
     if (h->shown > 0) {
@@ -335,7 +346,7 @@ static void paint_chrome(hud_t *h, double alpha)
                   h->body_top + h->line_meta * 0.8);
     }
 
-    double fy = h->py + h->want_h - THEME_PAD_Y - h->line_meta * 0.5;
+    double fy = h->want_h - THEME_FOOTER_CLEAR - h->line_meta * 0.5;
     cairo_set_line_width(cr, 1.0);
     set_rgba(cr, h->c_lilac, alpha * 0.18);
     cairo_move_to(cr, x0, fy - h->line_meta);
@@ -376,11 +387,11 @@ static void repaint_rows(hud_t *h, int lo, int hi)
     double y1 = h->body_top + (hi + 1) * h->row_h;
 
     cairo_save(cr);
-    cairo_rectangle(cr, h->px, y0, h->want_w, y1 - y0);
+    cairo_rectangle(cr, 0, y0, h->want_w, y1 - y0);
     cairo_clip(cr);
     /* repaint the panel background under the clip, then just those rows */
     set_rgba(cr, h->c_panel, 1.0);
-    round_rect(cr, h->px, h->py, h->want_w, h->want_h, THEME_RADIUS);
+    round_rect(cr, 0, 0, h->want_w, h->want_h, THEME_RADIUS);
     cairo_fill(cr);
     for (int i = lo; i <= hi; i++)
         paint_row(h, i, 1.0, i == h->sel ? 1.0 : 0.0);
@@ -464,7 +475,7 @@ hud_t *hud_open(Display *dpy, int scr, wlist_t *list, int sel, int force_opaque)
     h->row_h = h->line_title + THEME_LINE_GAP + h->line_meta + THEME_ROW_GAP;
     h->body_h = rows_for_height * h->row_h;
     h->want_h = THEME_PAD_Y * 2 + h->line_head + THEME_RULE_GAP + h->body_h
-              + THEME_RULE_GAP + h->line_meta + THEME_PAD_Y / 2;
+              + THEME_RULE_GAP + h->line_meta + THEME_FOOTER_CLEAR;
 
     h->px = (screen_w - h->want_w) / 2;
     h->py = (screen_h - h->want_h) / 3;
@@ -519,7 +530,8 @@ hud_t *hud_open(Display *dpy, int scr, wlist_t *list, int sel, int force_opaque)
     h->c_lilac  = hex_rgb(THEME_LILAC);
     h->c_far    = hex_rgb(THEME_FAR);
 
-    h->body_top = h->py + THEME_PAD_Y + h->line_head + THEME_RULE_GAP
+    /* Surface-relative. See the note at the top of paint_chrome. */
+    h->body_top = THEME_PAD_Y + h->line_head + THEME_RULE_GAP
                 + THEME_RULE_GAP;
 
     if (getenv("FAE_HUD_VERBOSE"))
