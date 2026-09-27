@@ -1,5 +1,40 @@
 # faeOS changelog
 
+## exposure-cleanup (2026-09-27)
+
+Follow-up to a GitHub exposure audit of the whole `ElegantVW` account. The
+audit and its coordination log are **local-only and not in any repository** —
+they quote the values they are about. This entry records what changed in the
+public tree; the evidence lives in the audit report and in git history.
+
+- **Tests no longer assert against this machine's home directory.**
+  `test_spellbook.py` used the operator's real home as a breadcrumb sample, and
+  `test_magpie_browse.py` loaded a real wallpaper by absolute path and asserted
+  the loader decoded it. Both published the username and local layout (audit
+  F-5), and both were tests that could not pass anywhere but here. Now
+  `/srv/faeos/bin` and a repo-tracked PNG resolved relative to the test file,
+  with the fixture asserted to exist first so a missing file fails as a missing
+  file rather than as a loader bug. **0 occurrences of the operator's home path
+  remain in any public repo's tracked files, down from 8.**
+- The re-audit criterion is "no absolute home path in any public repository",
+  so the changelog line describing the systemd fix no longer repeats the path
+  either. The evidence is preserved in this repository's history.
+- `fairy-lantern`: the fight-savestate test hardcoded a ROM path and had two
+  silent `return`s, so its assertion had never executed anywhere while still
+  being counted. Now `#[ignore]`d and driven by `FAIRY_ROM`/`FAIRY_STATE`.
+  `cargo test --bin fairy` reports **136 passed, 1 ignored** — previously 137
+  passed, where the 137th asserted nothing. The total dropping by one is the
+  first honest number that suite has produced.
+- `mourama`: `tools/isolate_icons.py` hardcoded a path into an agent session
+  directory, session id included. It now takes the directory as an argument or
+  `$MOURAMA_ICON_SHEETS`, and exits with usage when given neither — the sheets
+  are a local screenshot drop and are deliberately not in the repo, so there is
+  no portable default to fall back to.
+- **Not closed:** network infrastructure and corporate mailboxes are still
+  public in `goblin` on the `goblind` branch, reachable with no auth. Removing
+  them means rewriting history and force-pushing, which is a human decision
+  and has not been taken. It is the live finding.
+
 ## siren-retired-and-units-portable (2026-09-27)
 
 An audit of all ten repos found the kit quietly undoing a sibling engine, four
