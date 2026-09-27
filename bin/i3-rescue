@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# i3-rescue — relaunch the whole X session on tty1 after i3/X are gone.
+#
+# Why this exists: on this house the session stack is
+#   startx -> Xorg :0 -> ~/.xinitrc -> seal-login "dbus-run-session i3"
+# so `i3-msg exit` does not just quit the WM, it unwinds the whole chain and
+# leaves you on a bare tty. The way back is `startx` (bare `i3` is wrong --
+# it would try to bring up a *second* X server and fail).
+#
+# Arm it before you restart:
+#   setsid ~/bin/i3-rescue >/tmp/i3-rescue.log 2>&1 </dev/null &
+# It waits for i3 to disappear, clears the old X, and runs startx on tty1.
+# One shot only, by design: exec means no crash loop if the session is bad.
+set -u
+for _ in $(seq 1 60); do
+  pgrep -x i3 >/dev/null 2>&1 && { sleep 2; continue; }
+  sleep 3
+  pgrep -x i3 >/dev/null 2>&1 && continue
+  pkill -x Xorg 2>/dev/null
+  sleep 2
+  export HOME="${HOME:-/home/$USER}"
+  export PATH="$HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+  exec startx </dev/tty1 >/dev/tty1 2>&1
+done
+echo "i3-rescue: timed out waiting for i3 to exit" >&2
