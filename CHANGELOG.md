@@ -1,5 +1,54 @@
 # faeOS changelog
 
+## tests-unblocked (2026-09-27)
+
+Supersedes the 2026-09-26 note that said *"pytest absent on this box (unittest
+only) — recorded gap"*. That line is left where it was, in its dated entry,
+because rewriting a dated record is not the same as correcting a claim — but
+it stopped being true today.
+
+- **pytest installed** (`extra/python-pytest 9.1.1`). The suite is now
+  **203 tests, all passing**, run with `python3 -m pytest tests/`.
+- The gap was bigger than the old entry implied. It was not 44 dormant tests,
+  it was **93 that had never executed**: two whole files
+  (`test_fae_termart.py`, `test_imp.py`) could not even be imported by
+  `unittest`, and pytest's `parametrize` expands cases the stdlib runner
+  collapses. The old runner reported `Ran 110 tests`; that was never the size
+  of this suite.
+  ```
+  per file, under pytest        unittest saw
+    test_fae_termart.py   65          — (import error)
+    test_magpie_browse.py 59         57
+    test_pixie_mind.py    41         41
+    test_murmur.py        15         15
+    test_spellbook.py     10         10
+    test_scroll_pages.py   7          7
+    test_imp.py            6          — (import error)
+                          203        130 collected, 110 ran
+  ```
+- **65 of those cover `fae_termart`** — `tui_read_key`, `box`, `paint_frame` —
+  the shared layer every TUI in the house draws through. It had never been run
+  on any machine. **It passes.** That is the good outcome and it is worth
+  stating plainly, because "never executed" is exactly the condition under
+  which you expect to find something.
+- **Two tests were passing without asserting anything.**
+  `AIBarTests` is a plain `unittest.TestCase` but held two `async def test_*`
+  methods. A coroutine returned from a sync test case is never awaited, so both
+  reported green while running zero lines — one of them covers
+  `run_page_scripts` and DOM mutation, which is real code. They now live in
+  `AIBarAsyncTests(unittest.IsolatedAsyncioTestCase)`, matching what
+  `JSTests` in the same file already did correctly. **Both pass when actually
+  executed**, so the code was fine and only the tests were lying.
+
+  This is the third time this class of bug appeared in one week, after
+  fairy-lantern's ROM test: a test that cannot fail is worse than no test,
+  because it is counted. `py_compile` is not a sufficient check for a
+  refactor like this — a misplaced dedent still compiles and silently collects
+  nothing. `--collect-only` is the check that catches it.
+
+`python3 -m unittest discover -s tests` still works and still passes 110; it
+just cannot see the two pytest files. The house runner is now pytest.
+
 ## exposure-cleanup (2026-09-27)
 
 Follow-up to a GitHub exposure audit of the whole `ElegantVW` account. The

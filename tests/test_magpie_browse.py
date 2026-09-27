@@ -551,6 +551,17 @@ class AIBarTests(unittest.TestCase):
         with redirect_stdout(buf):
             rc = mod.config_dispatch(["set", "browse.js", "bogus"])
         self.assertEqual(rc, 2)
+
+
+class AIBarAsyncTests(unittest.IsolatedAsyncioTestCase):
+    """The async half of AIBarTests.
+
+    These were `async def` methods sitting in a plain `unittest.TestCase`,
+    which returns a coroutine that unittest never awaits. Both reported as
+    passing while asserting nothing at all. They belong here, the way
+    JSTests above already does it.
+    """
+
     async def test_script_touches_dom(self):
         page = dom.build_page(
             "https://ex.test/",
@@ -584,7 +595,6 @@ class AIBarTests(unittest.TestCase):
         # Dispatch through a fresh interpreter is overkill; assert listener registered.
         node = b.page.root.query_selector("#l")
         self.assertIn("click", node.script_state.get("listeners", {}))
-
 
 class TuiTests(unittest.TestCase):
     def test_internal_pages(self):
