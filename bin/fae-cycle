@@ -113,13 +113,19 @@ PULSE_LILAC="#d4b4e8"
 TOAST_LEN=46
 
 if [ "${FAE_CYCLE_QUIET:-0}" != "1" ]; then
-  for so in /tmp/opencode/kitty*.sock "$HOME/.kitty"/*.sock; do
-    [[ -S "$so" ]] || continue
-    kitty @ --to "unix:$so" transmit-text "$TOAST" >/dev/null 2>&1 && break
+  # Kitty appends its pid to a listen_on path (kitty.sock-2172), so a *.sock
+  # glob never matches. The house kitty listens on the abstract socket
+  # @faeos-kitty instead, and we ask kitty itself whether each address is live.
+  toasted=0
+  for addr in "unix:@faeos-kitty" "unix:$HOME/.kitty/kitty.sock" /tmp/opencode/kitty*.sock; do
+    case "$addr" in
+      */*) [ -S "$addr" ] || continue; addr="unix:$addr" ;;
+    esac
+    kitty @ --to "$addr" transmit-text "$TOAST" >/dev/null 2>&1 && { toasted=1; break; }
   done
   cat >&2 <<MSG
 fae-cycle: ${dir} → '${name}'
-fae-cycle:   hint: Alt+Tab again, Alt+Shift+Tab to go back
+fae-cycle:   hint: Alt+Tab again, Alt+Shift+Tab to go back${toasted:+ · toasted}
 MSG
 fi
 exit 0

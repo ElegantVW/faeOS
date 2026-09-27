@@ -11,6 +11,9 @@
 
 set $mod Mod4
 
+# i3 requires `font` even with no bar (it styles window title placeholders).
+font pango:DejaVu Sans Mono 12
+
 # window styling: popOS-style gaps, thin pink borders
 gaps inner 8
 gaps outer 4
@@ -46,11 +49,11 @@ bindsym $mod+r mode "resize"
 
 # No i3bar on purpose: its status script needed a resident process, and a dying
 # status_command printed errors on screen. fae-cycle paints its cues inside the
-# windows instead (toast when a kitty socket exists, border pulse always).
+# windows instead (toast when a kitty socket exists).
 
 # kitty with remote control on, so fae-cycle can toast the window you land in.
-exec --no-startup-id kitty --listen-on "$HOME/.kitty/kitty.sock" -o allow_remote_control=yes
-exec --no-startup-id kitty --listen-on "$HOME/.kitty/kitty.sock" -o allow_remote_control=yes
+exec --no-startup-id kitty -o allow_remote_control=yes -o listen_on="unix:@faeos-kitty"
+exec --no-startup-id kitty -o allow_remote_control=yes -o listen_on="unix:@faeos-kitty"
 
 # desktop layer: compositor + wallpaper
 # Cycle cue. fae-cycle flashes the focused border (Lilac) while you move and
@@ -68,12 +71,9 @@ bindsym $mod+button3 noprint, floating enable, drag resize
 bindsym Mod1+$mod+button1 move container
 bindsym Mod1+$mod+button3 resize set 320 px 240 px, resize set 640 px 360 px, resize set 952 px 1072 px
 
-# Super + click a background gap: new shell on the floating layer.
-bindsym $mod+button2 focus
-bindsym $mod+button1 kill floating
-
-# Super + double click on a title bar flips tiled/floating.
-bindsym $mod+button2 floating toggle, focus
+# Super + middle click: close the window under the cursor. It is a normal
+# click binding, so a drag still moves/resizes instead of closing anything.
+bindsym $mod+button2 kill
 
 exec_always --no-startup-id picom --config ~/.config/picom/picom.conf
 exec_always --no-startup-id feh --bg-fill $HOME/Pictures/wall.png
