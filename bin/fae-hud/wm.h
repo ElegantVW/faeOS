@@ -35,6 +35,16 @@ char         *wm_title(Display *dpy, Window w);
 char         *wm_class(Display *dpy, Window w);
 
 wlist_t *wm_list_windows(Display *dpy, Window root, Window focus_xid);
+
+/* Only the windows on the current workspace. Cycling is scoped this way so
+ * that browsing can never make the WM follow focus onto another workspace and
+ * hide everything you were looking at — which is what read as "the other
+ * windows got minimized".
+ *
+ * A window whose _NET_WM_DESKTOP is absent is kept: some WMs do not set it,
+ * and dropping those windows would silently hide real clients. */
+wlist_t *wm_list_workspace(Display *dpy, Window root, Window focus_xid);
+
 void     wm_list_free_titles(wlist_t *l);
 void     wm_list_free(wlist_t *l);
 

@@ -162,7 +162,10 @@ static Window *stacking_list(Display *dpy, Window root, unsigned long *out_n)
     return NULL;
 }
 
-wlist_t *wm_list_windows(Display *dpy, Window root, Window focus_xid)
+/* same_workspace_only: keep only clients whose _NET_WM_DESKTOP matches
+ * _NET_CURRENT_DESKTOP, and treat a missing _NET_WM_DESKTOP as "include". */
+static wlist_t *build(Display *dpy, Window root, Window focus_xid,
+                      int same_workspace_only)
 {
     int ok = 0;
     wlist_t *l = calloc(1, sizeof(wlist_t));
@@ -185,8 +188,15 @@ wlist_t *wm_list_windows(Display *dpy, Window root, Window focus_xid)
         w.cls = wm_class(dpy, wins[i]);
         w.desktop = wm_cardinal(dpy, wins[i], "_NET_WM_DESKTOP", &ok);
         w.desktop_known = ok ? 1 : 0;
+        /* No _NET_WM_DESKTOP at all counts as "here": better to show a window
+         * on the wrong workspace than to hide a real client completely. */
         w.on_current_workspace =
-            (ok && w.desktop == l->current_desktop) ? 1 : 0;
+            (!ok || w.desktop == l->current_desktop) ? 1 : 0;
+        if (same_workspace_only && !w.on_current_workspace) {
+            free(w.title);
+            free(w.cls);
+            continue;
+        }
         w.is_active = (wins[i] == l->active) ? 1 : 0;
         w.is_focus_target = (wins[i] == l->focus_xid) ? 1 : 0;
         push(l, &w);
@@ -204,6 +214,9 @@ wlist_t *wm_list_windows(Display *dpy, Window root, Window focus_xid)
                                             : l->v[i].is_active;
             if (hit) { at = i; break; }
         }
+        /* at == -1 means the focused window is not in this list at all — an
+         * empty workspace, or focus on another one. Leave the list alone and
+         * let the caller start at index 0. */
         if (at > 0) {
             win_t *tmp = malloc((size_t)l->n * sizeof(win_t));
             for (int i = 0; i < l->n; i++) tmp[i] = l->v[(at + i) % l->n];
@@ -212,6 +225,16 @@ wlist_t *wm_list_windows(Display *dpy, Window root, Window focus_xid)
         }
     }
     return l;
+}
+
+wlist_t *wm_list_windows(Display *dpy, Window root, Window focus_xid)
+{
+    return build(dpy, root, focus_xid, 0);
+}
+
+wlist_t *wm_list_workspace(Display *dpy, Window root, Window focus_xid)
+{
+    return build(dpy, root, focus_xid, 1);
 }
 
 void wm_list_free_titles(wlist_t *l)

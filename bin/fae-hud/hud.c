@@ -1,23 +1,16 @@
 /* hud.c — the overlay panel.
  *
  * An override-redirect window, centred, never focused, so it floats above
- * everything i3 manages without stealing the keyboard or the pointer. It
- * selects no button events, so clicks pass straight through to whatever is
- * underneath.
+ * everything the window manager manages without stealing the keyboard or the
+ * pointer. It selects no button events, so clicks pass straight through.
  *
- * Drawn with cairo and pango. The first version used Xft, which cannot round a
- * corner (it has no arc primitive — only Rect, String, Glyphs), so the panel
- * was a hard rectangle and any softness you saw was picom's shadow. Cairo
- * gives real anti-aliased round corners, genuine per-pixel alpha for the
- * translucency, and Pango for text shaping, which is why the hand-rolled
- * UTF-8 truncation in the old version is gone.
+ * Drawn with cairo and pango. Xft has no arc primitive — only Rect, String,
+ * Glyphs — so it cannot round a corner at all, and cairo also gives the
+ * per-pixel alpha that plain X11 cannot.
  *
- * It is a viewer, never a mutator: nothing here focuses, kills, moves or
- * resizes a window. fae-cycle owns state changes; this only draws them.
- *
- * Not a resident process: paint, hold, fade, exit. Spawned per Alt+Tab, it
- * lives about 1.6s. The rule came from the i3bar incident, where a status
- * script needed a daemon and a dying one printed errors across the screen.
+ * The panel does not focus, move or resize anything. It draws a list and
+ * highlights a row; committing is someone else's job (hold.c, via the EWMH
+ * _NET_ACTIVE_WINDOW message).
  */
 #include "hud.h"
 #include "theme.h"
@@ -26,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <time.h>
 
 #include <X11/Xlib.h>
@@ -35,12 +29,9 @@
 #include <cairo/cairo-xlib.h>
 #include <pango/pangocairo.h>
 
-/* This X11's headers name StaticGray but not TrueClass; the value is 4 in the
- * protocol and has been since X11R4. */
 #ifndef TrueClass
 #define TrueClass 4
 #endif
-
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -49,7 +40,6 @@
 
 typedef struct { double r, g, b; } rgb_t;
 
-/* "#rrggbb" -> normalised rgb */
 static rgb_t hex_rgb(const char *hex)
 {
     rgb_t c = { 0, 0, 0 };
@@ -95,9 +85,6 @@ static void round_rect(cairo_t *cr, double x, double y, double w, double h,
     cairo_close_path(cr);
 }
 
-/* A soft outer glow, drawn as concentric strokes of decreasing alpha. Cheaper
- * and far more predictable than a cairo shadow, and — unlike a shadow — it
- * still looks right when there is no compositor to blur it. */
 static void glow_stroke(cairo_t *cr, rgb_t col, double alpha,
                         double x, double y, double w, double h, double r)
 {
@@ -122,7 +109,7 @@ static void diamond(cairo_t *cr, double cx, double cy, double r)
 /* ── type ────────────────────────────────────────────────────────────────── */
 
 typedef struct {
-    PangoLayout *lay;
+    PangoLayout           *lay;
     PangoFontDescription *desc;
 } type_t;
 
@@ -138,8 +125,12 @@ static void type_open(type_t *t, PangoContext *ctx, int size_px)
 
 static void type_close(type_t *t)
 {
-    if (t->lay) g_object_unref(t->lay);
-    if (t->desc) g_object_unref(t->desc);
+    /* PangoLayout is a GObject; PangoFontDescription is NOT — it is a boxed
+     * type, and g_object_unref on it reads a GTypeInstance out of memory that
+     * does not have one. It survived several runs by luck before ASan caught
+     * it segfaulting inside g_type_check_instance_is_fundamentally_a. */
+    if (t->lay)  g_object_unref(t->lay);
+    if (t->desc) pango_font_description_free(t->desc);
     t->lay = NULL;
     t->desc = NULL;
 }
@@ -158,16 +149,16 @@ static void type_set(type_t *t, const char *s, int max_px)
 
 static int type_w(type_t *t)
 {
-    int w = 0, h = 0;
-    pango_layout_get_pixel_size(t->lay, &w, &h);
+    int w = 0, hh = 0;
+    pango_layout_get_pixel_size(t->lay, &w, &hh);
     return w;
 }
 
 static int type_h(type_t *t)
 {
-    int w = 0, h = 0;
-    pango_layout_get_pixel_size(t->lay, &w, &h);
-    return h;
+    int w = 0, hh = 0;
+    pango_layout_get_pixel_size(t->lay, &w, &hh);
+    return hh;
 }
 
 static void type_draw(type_t *t, cairo_t *cr, rgb_t col, double a,
@@ -178,7 +169,30 @@ static void type_draw(type_t *t, cairo_t *cr, rgb_t col, double a,
     pango_cairo_show_layout(cr, t->lay);
 }
 
-/* ── timing ──────────────────────────────────────────────────────────────── */
+/* ── the panel ───────────────────────────────────────────────────────────── */
+
+struct hud {
+    Display   *dpy;
+    int        scr;
+    Window     win;
+    Visual    *visual;
+    cairo_surface_t *surf;
+    cairo_t   *cr;
+    Colormap   cmap;
+    PangoContext *ctx;
+    type_t     title, meta, head;
+    wlist_t   *list;
+    int        shown, hidden, sel;
+    int        have_cx;
+    /* layout */
+    int        want_w, want_h, px, py;
+    int        line_title, line_meta, line_head, row_h, text_x, text_max;
+    int        body_top, body_h;
+    /* palette */
+    rgb_t c_void, c_panel, c_pink, c_psoft, c_fg, c_dim, c_lilac, c_far;
+    /* the message shown instead of rows, when there is nothing to cycle */
+    const char *message;
+};
 
 static long now_ms(void)
 {
@@ -187,7 +201,6 @@ static long now_ms(void)
     return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
-/* smoothstep, so motion eases instead of ramping linearly */
 static double ease(double t)
 {
     if (t < 0) t = 0;
@@ -195,12 +208,8 @@ static double ease(double t)
     return t * t * (3.0 - 2.0 * t);
 }
 
-/* ── compositor ──────────────────────────────────────────────────────────── */
-
 /* Plain X11 has no per-window alpha: without a compositor the transparent
- * pixels come out black. Ask before choosing a visual, and fall back to an
- * opaque panel rather than shipping something that looks like a rendering bug
- * on a bare X server. */
+ * pixels come out black. Ask before choosing a visual. */
 static int compositor_present(Display *dpy)
 {
     for (int i = 0; i < 32; i++) {
@@ -212,344 +221,379 @@ static int compositor_present(Display *dpy)
     return 0;
 }
 
-static int on_x_error(Display *dpy, XErrorEvent *e)
+/* ── painting ────────────────────────────────────────────────────────────── */
+
+/* one row: optional band, glyph, hairline, title, meta */
+static void paint_row(hud_t *h, int i, double alpha, double wipe)
 {
-    /* the panel was destroyed under us (i3 restart, logout). Nothing to
-     * recover and nowhere visible to complain: i3's stderr is /dev/tty1. */
-    (void)dpy; (void)e;
-    return 0;
+    int sel = (i == h->sel);
+    double x0 = h->px + THEME_PAD_X;
+    double tx = x0 + h->text_x;
+    double y = h->body_top + i * h->row_h;
+    double base = y + h->line_title * 0.78;
+    double rad = THEME_RADIUS * 0.6;
+    cairo_t *cr = h->cr;
+
+    if (sel && wipe > 0.001) {
+        cairo_save(cr);
+        cairo_rectangle(cr, h->px, y - 5, h->want_w * wipe,
+                        h->line_title + THEME_LINE_GAP + h->line_meta);
+        cairo_clip(cr);
+        set_rgba(cr, h->c_pink, 0.20 * alpha);
+        round_rect(cr, h->px + 1, y - 5, h->want_w - 2,
+                   h->line_title + THEME_LINE_GAP + h->line_meta, rad);
+        cairo_fill(cr);
+        set_rgba(cr, h->c_pink, 0.34 * alpha);
+        cairo_set_line_width(cr, 1.0);
+        round_rect(cr, h->px + 1.5, y - 4.5, h->want_w - 3,
+                   h->line_title + THEME_LINE_GAP + h->line_meta - 1, rad);
+        cairo_stroke(cr);
+        cairo_restore(cr);
+    }
+
+    rgb_t want_c = sel ? h->c_pink : h->c_fg;
+    rgb_t rowc = mix(h->c_panel, want_c, alpha);
+
+    type_set(&h->title, sel ? THEME_GLYPH_FOCUS : THEME_GLYPH_IDLE, 0);
+    type_draw(&h->title, cr, rowc, alpha, x0, base);
+
+    cairo_set_line_width(cr, 1.0);
+    set_rgba(cr, h->c_lilac, alpha * 0.18);
+    cairo_move_to(cr, x0 + h->text_x - THEME_GAP / 2.0, y + 2);
+    cairo_line_to(cr, x0 + h->text_x - THEME_GAP / 2.0,
+                  y + h->line_title + THEME_LINE_GAP + h->line_meta - 2);
+    cairo_stroke(cr);
+
+    type_set(&h->title, h->list->v[i].title, h->text_max);
+    type_draw(&h->title, cr, rowc, alpha, tx, base);
+
+    char b[512];
+    snprintf(b, sizeof b, "%s%lu %s %s",
+             h->list->v[i].desktop_known ? "" : "?",
+             h->list->v[i].desktop, THEME_GLYPH_DOT, h->list->v[i].cls);
+    type_set(&h->meta, b, h->text_max);
+    rgb_t metac = sel ? h->c_psoft : h->c_dim;
+    type_draw(&h->meta, cr, mix(h->c_panel, metac, alpha),
+              alpha * (sel ? 1.0 : 0.85), tx,
+              y + h->line_title + THEME_LINE_GAP + h->line_meta * 0.8);
 }
 
-/* ── the panel ───────────────────────────────────────────────────────────── */
+/* the panel background, header, footer, corner facets */
+static void paint_chrome(hud_t *h, double alpha)
+{
+    cairo_t *cr = h->cr;
+    double x0 = h->px + THEME_PAD_X;
+    double right = h->px + h->want_w - THEME_PAD_X;
+    double y = h->py + THEME_PAD_Y;
 
-int hud_run(Display *dpy, int scr, wlist_t *list, int force_opaque)
+    glow_stroke(cr, h->c_pink, alpha * 0.9, h->px, h->py, h->want_w,
+                h->want_h, THEME_RADIUS);
+    set_rgba(cr, h->c_panel, h->have_cx ? alpha : 1.0);
+    round_rect(cr, h->px, h->py, h->want_w, h->want_h, THEME_RADIUS);
+    cairo_fill(cr);
+    cairo_set_line_width(cr, 1.0);
+    set_rgba(cr, mix(h->c_panel, h->c_pink, 0.55), alpha);
+    round_rect(cr, h->px + 0.5, h->py + 0.5, h->want_w - 1, h->want_h - 1,
+               THEME_RADIUS);
+    cairo_stroke(cr);
+
+    set_rgba(cr, h->c_lilac, alpha * 0.34);
+    diamond(cr, h->px + THEME_FACET_INSET, h->py + THEME_FACET_INSET,
+            THEME_FACET_R); cairo_fill(cr);
+    diamond(cr, h->px + h->want_w - THEME_FACET_INSET,
+            h->py + THEME_FACET_INSET, THEME_FACET_R); cairo_fill(cr);
+    diamond(cr, h->px + THEME_FACET_INSET,
+            h->py + h->want_h - THEME_FACET_INSET, THEME_FACET_R);
+    cairo_fill(cr);
+    diamond(cr, h->px + h->want_w - THEME_FACET_INSET,
+            h->py + h->want_h - THEME_FACET_INSET, THEME_FACET_R);
+    cairo_fill(cr);
+
+    if (h->shown > 0) {
+        type_set(&h->head, THEME_GLYPH_FOCUS " windows", 0);
+        type_draw(&h->head, cr, h->c_lilac, alpha, x0, y + h->line_head);
+        char cnt[24];
+        snprintf(cnt, sizeof cnt, "%d", h->shown);
+        type_set(&h->meta, cnt, 0);
+        type_draw(&h->meta, cr, h->c_lilac, alpha * 0.8,
+                  right - type_w(&h->meta), y + h->line_head);
+    } else {
+        type_set(&h->head, THEME_GLYPH_FOCUS " windows", 0);
+        type_draw(&h->head, cr, h->c_lilac, alpha, x0, y + h->line_head);
+    }
+
+    y += h->line_head + THEME_RULE_GAP;
+    cairo_set_line_width(cr, 1.0);
+    set_rgba(cr, h->c_lilac, alpha * 0.22);
+    cairo_move_to(cr, x0, y + 0.5);
+    cairo_line_to(cr, right, y + 0.5);
+    cairo_stroke(cr);
+
+    if (h->shown == 0) {
+        type_set(&h->meta, h->message ? h->message : "nothing here", 0);
+        type_draw(&h->meta, cr, h->c_dim, alpha * 0.9, x0,
+                  h->body_top + h->line_meta * 0.8);
+    }
+
+    double fy = h->py + h->want_h - THEME_PAD_Y - h->line_meta * 0.5;
+    cairo_set_line_width(cr, 1.0);
+    set_rgba(cr, h->c_lilac, alpha * 0.18);
+    cairo_move_to(cr, x0, fy - h->line_meta);
+    cairo_line_to(cr, right, fy - h->line_meta);
+    cairo_stroke(cr);
+    type_set(&h->meta, "tab next " THEME_GLYPH_DOT " shift+tab back "
+                        THEME_GLYPH_DOT " esc cancel", 0);
+    type_draw(&h->meta, cr, h->c_dim, alpha * 0.85, x0, fy);
+}
+
+static void paint_all(hud_t *h, double alpha, double wipe)
+{
+    cairo_t *cr = h->cr;
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    set_rgba(cr, h->c_void, h->have_cx ? 0.0 : 1.0);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    paint_chrome(h, alpha);
+    for (int i = 0; i < h->shown; i++)
+        paint_row(h, i, alpha, i == h->sel ? wipe : 0.0);
+    cairo_surface_flush(h->surf);
+    XSync(h->dpy, False);
+}
+
+/* Repaint only the rows in [lo,hi], background included, so the selection can
+ * move without the whole panel flickering. This is the "no redraw" the
+ * Alt+Tab gesture needs: one panel, two bands. */
+static void repaint_rows(hud_t *h, int lo, int hi)
+{
+    if (h->shown <= 0) return;
+    if (lo < 0) lo = 0;
+    if (hi >= h->shown) hi = h->shown - 1;
+    if (lo > hi) return;
+
+    cairo_t *cr = h->cr;
+    double y0 = h->body_top + lo * h->row_h - 6;
+    double y1 = h->body_top + (hi + 1) * h->row_h;
+
+    cairo_save(cr);
+    cairo_rectangle(cr, h->px, y0, h->want_w, y1 - y0);
+    cairo_clip(cr);
+    /* repaint the panel background under the clip, then just those rows */
+    set_rgba(cr, h->c_panel, 1.0);
+    round_rect(cr, h->px, h->py, h->want_w, h->want_h, THEME_RADIUS);
+    cairo_fill(cr);
+    for (int i = lo; i <= hi; i++)
+        paint_row(h, i, 1.0, i == h->sel ? 1.0 : 0.0);
+    cairo_restore(cr);
+
+    cairo_surface_flush(h->surf);
+    XSync(h->dpy, False);
+}
+
+/* ── construction ────────────────────────────────────────────────────────── */
+
+hud_t *hud_open(Display *dpy, int scr, wlist_t *list, int sel, int force_opaque)
 {
     int screen_w = DisplayWidth(dpy, scr);
     int screen_h = DisplayHeight(dpy, scr);
 
-    int have_cx = 0;
-    if (force_opaque) have_cx = 0;
-    else if (compositor_present(dpy)) have_cx = 1;
-    else if (getenv("FAE_HUD_FORCE_OPAQUE")) have_cx = 0;
+    hud_t *h = calloc(1, sizeof *h);
+    h->dpy = dpy;
+    h->scr = scr;
+    h->list = list;
 
-    /* ── pick a visual: ARGB32 when a compositor can blend it ───────────── */
+    if (force_opaque)          h->have_cx = 0;
+    else if (compositor_present(dpy)) h->have_cx = 1;
+    else if (getenv("FAE_HUD_FORCE_OPAQUE")) h->have_cx = 0;
+
     XVisualInfo vinfo, *vi = NULL;
     int depth = CopyFromParent;
     Visual *visual = DefaultVisual(dpy, scr);
-    if (have_cx && XMatchVisualInfo(dpy, scr, 32, TrueClass, &vinfo)) {
+    if (h->have_cx && XMatchVisualInfo(dpy, scr, 32, TrueClass, &vinfo)) {
         vi = &vinfo;
         visual = vinfo.visual;
         depth = vinfo.depth;
     }
+    h->visual = visual;
 
-    if (getenv("FAE_HUD_VERBOSE"))
-        fprintf(stderr, "fae-hud: compositor=%s visual=%s depth=%d\n",
-                have_cx ? "yes" : "no", vi ? "ARGB32" : "default", depth);
+    h->ctx = pango_font_map_create_context(pango_cairo_font_map_get_default());
+    type_open(&h->title, h->ctx, THEME_SIZE_TITLE);
+    type_open(&h->meta,  h->ctx, THEME_SIZE_META);
+    type_open(&h->head,  h->ctx, THEME_SIZE_META);
 
-    /* ── type, and therefore measurements ───────────────────────────────── */
-    type_t title, meta, head;
-    PangoContext *ctx =
-        pango_font_map_create_context(pango_cairo_font_map_get_default());
-    type_open(&title, ctx, THEME_SIZE_TITLE);
-    type_open(&meta,  ctx, THEME_SIZE_META);
-    type_open(&head,  ctx, THEME_SIZE_META);
-
-    int shown = list->n;
-    int hidden = 0;
-    if (shown > THEME_MAX_ROWS) {
-        hidden = shown - THEME_MAX_ROWS;
-        shown = THEME_MAX_ROWS;
+    h->shown = list->n;
+    h->hidden = 0;
+    if (h->shown > THEME_MAX_ROWS) {
+        h->hidden = h->shown - THEME_MAX_ROWS;
+        h->shown = THEME_MAX_ROWS;
     }
+    if (h->shown == 0)
+        h->message = "no windows on this workspace";
+    h->sel = (sel >= 0 && sel < h->shown) ? sel : 0;
 
-    /* ── measure ────────────────────────────────────────────────────────── */
-    int glyph_w = 0, dot_w = 0, title_max = 0, meta_max = 0, head_w = 0;
-    type_set(&head, THEME_GLYPH_FOCUS " windows", 0);
-    head_w = type_w(&head);
-    type_set(&title, THEME_GLYPH_FOCUS, 0);
-    glyph_w = type_w(&title);
-    type_set(&meta, THEME_GLYPH_DOT, 0);
-    dot_w = type_w(&meta);
-
+    /* measure */
+    int glyph_w = 0, title_max = 0, meta_max = 0;
+    type_set(&h->head, THEME_GLYPH_FOCUS " windows", 0);
+    type_set(&h->title, THEME_GLYPH_FOCUS, 0);
+    glyph_w = type_w(&h->title);
     for (int i = 0; i < list->n; i++) {
-        type_set(&title, list->v[i].title, 0);
-        if (type_w(&title) > title_max) title_max = type_w(&title);
-
+        type_set(&h->title, list->v[i].title, 0);
+        if (type_w(&h->title) > title_max) title_max = type_w(&h->title);
         char b[512];
         snprintf(b, sizeof b, "%s%lu %s %s",
-                 list->v[i].desktop_known ? "" : "?",
-                 list->v[i].desktop,
+                 list->v[i].desktop_known ? "" : "?", list->v[i].desktop,
                  THEME_GLYPH_DOT, list->v[i].cls);
-        type_set(&meta, b, 0);
-        if (type_w(&meta) > meta_max) meta_max = type_w(&meta);
+        type_set(&h->meta, b, 0);
+        if (type_w(&h->meta) > meta_max) meta_max = type_w(&h->meta);
     }
 
-    int line_title = type_h(&title) > 0 ? type_h(&title) : THEME_SIZE_TITLE + 4;
-    int line_meta  = type_h(&meta)  > 0 ? type_h(&meta)  : THEME_SIZE_META + 4;
-    int line_head  = type_h(&head)  > 0 ? type_h(&head)  : THEME_SIZE_META + 4;
+    h->line_title = type_h(&h->title) > 0 ? type_h(&h->title) : THEME_SIZE_TITLE + 4;
+    h->line_meta  = type_h(&h->meta)  > 0 ? type_h(&h->meta)  : THEME_SIZE_META + 4;
+    h->line_head  = type_h(&h->head)  > 0 ? type_h(&h->head)  : THEME_SIZE_META + 4;
 
-    int text_x = THEME_GLYPH_COL * (glyph_w > 0 ? glyph_w : 8) + THEME_GAP;
-    int want_w = THEME_PAD_X * 2 + text_x
-               + (title_max > meta_max ? title_max : meta_max);
+    h->text_x = THEME_GLYPH_COL * (glyph_w > 0 ? glyph_w : 8) + THEME_GAP;
+    h->want_w = THEME_PAD_X * 2 + h->text_x
+              + (title_max > meta_max ? title_max : meta_max);
     int cap = (int)(screen_w * THEME_W_FRACTION);
     if (cap > THEME_MAX_W) cap = THEME_MAX_W;
-    if (want_w > cap) want_w = cap;
-    if (want_w < THEME_MIN_W) want_w = THEME_MIN_W;
-    int text_max = want_w - THEME_PAD_X * 2 - text_x;
+    if (h->want_w > cap) h->want_w = cap;
+    if (h->want_w < THEME_MIN_W) h->want_w = THEME_MIN_W;
+    h->text_max = h->want_w - THEME_PAD_X * 2 - h->text_x;
 
-    int row_h = line_title + THEME_LINE_GAP + line_meta + THEME_ROW_GAP;
-    int body_h = shown * row_h;
-    int want_h = THEME_PAD_Y * 2 + line_head + THEME_RULE_GAP
-               + body_h + THEME_RULE_GAP + line_meta + THEME_PAD_Y / 2;
+    int rows_for_height = h->shown > 0 ? h->shown : 1;
+    h->row_h = h->line_title + THEME_LINE_GAP + h->line_meta + THEME_ROW_GAP;
+    h->body_h = rows_for_height * h->row_h;
+    h->want_h = THEME_PAD_Y * 2 + h->line_head + THEME_RULE_GAP + h->body_h
+              + THEME_RULE_GAP + h->line_meta + THEME_PAD_Y / 2;
 
-    long total_for_log = THEME_ROW_START
-                       + (long)(shown > 0 ? shown - 1 : 0) * THEME_ROW_LAG
-                       + THEME_ROW_FADE + THEME_HOLD + THEME_FADE_OUT;
+    h->px = (screen_w - h->want_w) / 2;
+    h->py = (screen_h - h->want_h) / 3;
+    if (h->px < 0) h->px = 0;
+    if (h->py < 0) h->py = 0;
 
-    /* ── create ─────────────────────────────────────────────────────────── */
     XSetWindowAttributes attr;
     memset(&attr, 0, sizeof attr);
     attr.override_redirect = True;
     attr.background_pixel  = 0;
     attr.border_pixel      = 0;
-    attr.colormap          = (vi && vi) ? XCreateColormap(dpy, DefaultRootWindow(dpy), visual, AllocNone)
-                                       : DefaultColormap(dpy, scr);
-    attr.event_mask        = ExposureMask | StructureNotifyMask;
+    attr.colormap = vi ? XCreateColormap(dpy, DefaultRootWindow(dpy), visual,
+                                         AllocNone)
+                       : DefaultColormap(dpy, scr);
+    attr.event_mask = ExposureMask | StructureNotifyMask;
+    h->cmap = attr.colormap;
 
-    Window win = XCreateWindow(dpy, DefaultRootWindow(dpy),
-                               (screen_w - want_w) / 2,
-                               (screen_h - want_h) / 3,
-                               (unsigned)want_w, (unsigned)want_h, 0,
-                               depth, InputOutput, visual,
-                               CWOverrideRedirect | CWBackPixel | CWBorderPixel
-                                   | CWColormap | CWEventMask,
-                               &attr);
-    if (!win) {
-        type_close(&title); type_close(&meta); type_close(&head);
-        g_object_unref(ctx);
-        return 1;
+    h->win = XCreateWindow(dpy, DefaultRootWindow(dpy), h->px, h->py,
+                           (unsigned)h->want_w, (unsigned)h->want_h, 0,
+                           depth, InputOutput, visual,
+                           CWOverrideRedirect | CWBackPixel | CWBorderPixel
+                               | CWColormap | CWEventMask, &attr);
+    if (!h->win) {
+        type_close(&h->title); type_close(&h->meta); type_close(&h->head);
+        g_object_unref(h->ctx);
+        free(h);
+        return NULL;
     }
 
-    /* Claim to be a panel so nothing tries to frame, tile or focus it. */
     Atom wtype = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
-    XChangeProperty(dpy, win, XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False),
+    XChangeProperty(dpy, h->win, XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False),
                     XA_ATOM, 32, PropModeReplace, (unsigned char *)&wtype, 1);
-    XChangeProperty(dpy, win, XInternAtom(dpy, "_NET_WM_NAME", False),
+    XChangeProperty(dpy, h->win, XInternAtom(dpy, "_NET_WM_NAME", False),
                     XInternAtom(dpy, "UTF8_STRING", False), 8,
                     PropModeReplace, (unsigned char *)"fae-hud", 7);
-    /* WM_NAME too: _NET_WM_NAME alone leaves the window invisible to
-     * xdotool search and wmctrl, which is annoying when debugging. */
-    XChangeProperty(dpy, win, XA_WM_NAME, XA_STRING, 8,
-                    PropModeReplace, (unsigned char *)"fae-hud", 7);
+    XChangeProperty(dpy, h->win, XA_WM_NAME, XA_STRING, 8, PropModeReplace,
+                    (unsigned char *)"fae-hud", 7);
 
-    XErrorHandler prev = XSetErrorHandler(on_x_error);
-    XMapRaised(dpy, win);
+    XMapRaised(dpy, h->win);
     XSync(dpy, False);
 
-    cairo_surface_t *surf = cairo_xlib_surface_create(dpy, win, visual,
-                                                      want_w, want_h);
-    cairo_t *cr = cairo_create(surf);
+    h->surf = cairo_xlib_surface_create(dpy, h->win, visual, h->want_w,
+                                        h->want_h);
+    h->cr = cairo_create(h->surf);
+
+    h->c_void   = hex_rgb(THEME_VOID);
+    h->c_panel  = hex_rgb(THEME_PANEL);
+    h->c_pink   = hex_rgb(THEME_PINK);
+    h->c_psoft  = hex_rgb(THEME_PINK_SOFT);
+    h->c_fg     = hex_rgb(THEME_FG);
+    h->c_dim    = hex_rgb(THEME_FG_DIM);
+    h->c_lilac  = hex_rgb(THEME_LILAC);
+    h->c_far    = hex_rgb(THEME_FAR);
+
+    h->body_top = h->py + THEME_PAD_Y + h->line_head + THEME_RULE_GAP
+                + THEME_RULE_GAP;
 
     if (getenv("FAE_HUD_VERBOSE"))
         fprintf(stderr, "fae-hud: win=0x%lx at (%d,%d) %dx%d rows=%d shown=%d "
-                        "text_max=%d row_h=%d total=%ldms\n",
-                (unsigned long)win, (screen_w - want_w) / 2,
-                (screen_h - want_h) / 3, want_w, want_h, list->n, shown,
-                text_max, row_h, total_for_log);
+                        "sel=%d text_max=%d\n",
+                (unsigned long)h->win, h->px, h->py, h->want_w, h->want_h,
+                list->n, h->shown, h->sel, h->text_max);
 
-    /* ── palette ────────────────────────────────────────────────────────── */
-    rgb_t c_void   = hex_rgb(THEME_VOID);
-    rgb_t c_panel  = hex_rgb(THEME_PANEL);
-    rgb_t c_pink   = hex_rgb(THEME_PINK);
-    rgb_t c_psoft  = hex_rgb(THEME_PINK_SOFT);
-    rgb_t c_fg     = hex_rgb(THEME_FG);
-    rgb_t c_dim    = hex_rgb(THEME_FG_DIM);
-    rgb_t c_lilac  = hex_rgb(THEME_LILAC);
-    rgb_t c_far    = hex_rgb(THEME_FAR);
+    paint_all(h, 1.0, 1.0);
+    return h;
+}
 
-    /* ── run ────────────────────────────────────────────────────────────── */
-    long last_row = THEME_ROW_START + (long)(shown > 0 ? shown - 1 : 0) * THEME_ROW_LAG
-                                  + THEME_ROW_FADE;
-    long total = last_row + THEME_HOLD + THEME_FADE_OUT;
+int hud_rows(hud_t *h)      { return h ? h->shown : 0; }
+int hud_selection(hud_t *h) { return h ? h->sel : -1; }
+
+void hud_select(hud_t *h, int sel)
+{
+    if (!h || h->shown <= 0) return;
+    if (sel < 0) sel = 0;
+    if (sel >= h->shown) sel = h->shown - 1;
+    if (sel == h->sel) return;
+    int old = h->sel;
+    h->sel = sel;
+    int lo = old < sel ? old : sel;
+    int hi = old > sel ? old : sel;
+    repaint_rows(h, lo, hi);
+}
+
+void hud_close(hud_t *h)
+{
+    if (!h) return;
+    cairo_t *cr = h->cr;
     long t0 = now_ms();
-
     for (;;) {
         long el = now_ms() - t0;
-        if (el >= total) break;
-
-        /* the bloom, and the fade at the end, share one envelope */
-        double env;
-        if (el < THEME_BLOOM_IN)
-            env = ease((double)el / THEME_BLOOM_IN);
-        else if (el < last_row + THEME_HOLD)
-            env = 1.0;
-        else
-            env = 1.0 - ease((double)(el - last_row - THEME_HOLD) / THEME_FADE_OUT);
-
-        /* The panel body blooms as one piece, but the type assembles top to
-         * bottom with the rows. Before this, the header and footer rode the
-         * global envelope, so at 80ms you got a fully-lit footer sitting
-         * under an empty body — which reads as a bug, not as motion. */
-        double a_head = ease((double)(el - (THEME_ROW_START - 45)) / THEME_ROW_FADE);
-        double a_foot = ease((double)(el - (last_row - THEME_ROW_FADE)) / THEME_ROW_FADE);
-
-        /* an opaque panel has no alpha to fade, so it fades its colour */
-        rgb_t bg   = have_cx ? c_panel : mix(c_void, c_panel, env);
-        double bg_a = have_cx ? env : 1.0;
-
+        if (el >= THEME_FADE_OUT) break;
+        double a = 1.0 - ease((double)el / THEME_FADE_OUT);
         cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-        set_rgba(cr, c_void, have_cx ? 0.0 : 1.0);
+        set_rgba(cr, h->c_void, h->have_cx ? 0.0 : 1.0);
         cairo_paint(cr);
         cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-
-        /* panel, blooming outward from a small inset */
-        double inset = (1.0 - ease((double)el / THEME_BLOOM_IN)) * 14.0;
-        double px = inset, py = inset;
-        double pw = want_w - inset * 2, ph = want_h - inset * 2;
-        double rad = THEME_RADIUS * (0.6 + 0.4 * (1.0 - inset / 14.0));
-
-        if (!have_cx) { px = 0; py = 0; pw = want_w; ph = want_h; rad = 0; }
-
-        glow_stroke(cr, c_pink, env * 0.9, px, py, pw, ph, rad);
-
-        set_rgba(cr, bg, bg_a);
-        round_rect(cr, px, py, pw, ph, rad);
-        cairo_fill(cr);
-
-        /* the crisp edge on top of the glow */
-        cairo_set_line_width(cr, 1.0);
-        set_rgba(cr, mix(bg, c_pink, 0.55), env);
-        round_rect(cr, px + 0.5, py + 0.5, pw - 1, ph - 1, rad);
-        cairo_stroke(cr);
-
-        /* four corner facets — the cut-gem tell. Drawn rather than typed, so
-         * they cannot collide with the corner radius or fall back to tofu. */
-        set_rgba(cr, c_lilac, env * 0.34 * a_head);
-        diamond(cr, px + THEME_FACET_INSET,        py + THEME_FACET_INSET,        THEME_FACET_R); cairo_fill(cr);
-        diamond(cr, px + pw - THEME_FACET_INSET,   py + THEME_FACET_INSET,        THEME_FACET_R); cairo_fill(cr);
-        diamond(cr, px + THEME_FACET_INSET,        py + ph - THEME_FACET_INSET,  THEME_FACET_R); cairo_fill(cr);
-        diamond(cr, px + pw - THEME_FACET_INSET,   py + ph - THEME_FACET_INSET, THEME_FACET_R); cairo_fill(cr);
-
-        double x0 = px + THEME_PAD_X;
-        double right = px + pw - THEME_PAD_X;
-        double y = py + THEME_PAD_Y;
-
-        /* ── header ─────────────────────────────────────────────────────── */
-        type_set(&head, THEME_GLYPH_FOCUS " windows", 0);
-        type_draw(&head, cr, c_lilac, a_head, x0, y + line_head);
-
-        char cnt[24];
-        snprintf(cnt, sizeof cnt, "%d", list->n);
-        type_set(&meta, cnt, 0);
-        type_draw(&meta, cr, c_lilac, a_head * 0.8, right - type_w(&meta),
-                  y + line_head);
-
-        y += line_head + THEME_RULE_GAP;
-        cairo_set_line_width(cr, 1.0);
-        set_rgba(cr, c_lilac, a_head * 0.22);
-        cairo_move_to(cr, x0, y + 0.5);
-        cairo_line_to(cr, right, y + 0.5);
-        cairo_stroke(cr);
-        y += THEME_RULE_GAP;
-
-        /* ── rows, cascading in ─────────────────────────────────────────── */
-        for (int i = 0; i < shown; i++) {
-            double a_row = ease((double)(el - (THEME_ROW_START + (long)i * THEME_ROW_LAG))
-                                / THEME_ROW_FADE);
-            double rtop = y;
-            int sel = list->has_explicit_focus ? list->v[i].is_focus_target
-                                               : list->v[i].is_active;
-
-            if (sel) {
-                /* the band wipes in from the left, so you see where you landed */
-                double w = ease((double)(el - THEME_WIPE_START) / THEME_WIPE);
-                /* hug the row's two lines, not the whole row cell: at row_h
-                 * the band reached up over the title and touched the header
-                 * rule, which read as a layout mistake rather than a band. */
-                double bh = line_title + THEME_LINE_GAP + line_meta;
-                double by = rtop - 5;
-                if (w > 0.001) {
-                    cairo_save(cr);
-                    cairo_rectangle(cr, px, by, pw * w, bh);
-                    cairo_clip(cr);
-                    set_rgba(cr, c_pink, 0.20 * a_row);
-                    round_rect(cr, px + 1, by, pw - 2, bh, rad * 0.6);
-                    cairo_fill(cr);
-                    set_rgba(cr, c_pink, 0.34 * a_row);
-                    cairo_set_line_width(cr, 1.0);
-                    round_rect(cr, px + 1.5, by + 0.5, pw - 3, bh - 1,
-                               rad * 0.6);
-                    cairo_stroke(cr);
-                    cairo_restore(cr);
-                }
-            }
-
-            double tx = x0 + text_x;
-            rgb_t want_c = sel ? c_pink
-                               : (list->v[i].on_current_workspace ? c_fg : c_far);
-            rgb_t rowc = mix(bg, want_c, a_row);
-
-            type_set(&title, sel ? THEME_GLYPH_FOCUS : THEME_GLYPH_IDLE, 0);
-            type_draw(&title, cr, rowc, a_row, x0, y + line_title * 0.78);
-
-            /* the hairline that separates the glyph column from the text */
-            cairo_set_line_width(cr, 1.0);
-            set_rgba(cr, c_lilac, a_row * 0.18);
-            cairo_move_to(cr, x0 + text_x - THEME_GAP / 2.0, y + 2);
-            cairo_line_to(cr, x0 + text_x - THEME_GAP / 2.0, y + line_title + THEME_LINE_GAP + line_meta - 2);
-            cairo_stroke(cr);
-
-            type_set(&title, list->v[i].title, text_max);
-            type_draw(&title, cr, rowc, a_row, tx, y + line_title * 0.78);
-
-            char b[512];
-            snprintf(b, sizeof b, "%s%lu %s %s",
-                     list->v[i].desktop_known ? "" : "?",
-                     list->v[i].desktop,
-                     THEME_GLYPH_DOT, list->v[i].cls);
-            type_set(&meta, b, text_max);
-            rgb_t metac = sel ? c_psoft : c_dim;
-            type_draw(&meta, cr, mix(bg, metac, a_row), a_row * (sel ? 1.0 : 0.85),
-                      tx, y + line_title + THEME_LINE_GAP + line_meta * 0.8);
-
-            y += row_h;
-        }
-
-        if (hidden > 0) {
-            char b[64];
-            snprintf(b, sizeof b, "+%d more", hidden);
-            type_set(&meta, b, 0);
-            type_draw(&meta, cr, c_dim, a_foot * 0.7, x0, y + line_meta * 0.8);
-        }
-
-        /* ── footer ─────────────────────────────────────────────────────── */
-        double fy = py + ph - THEME_PAD_Y - line_meta * 0.5;
-        cairo_set_line_width(cr, 1.0);
-        set_rgba(cr, c_lilac, a_foot * 0.18);
-        cairo_move_to(cr, x0, fy - line_meta);
-        cairo_line_to(cr, right, fy - line_meta);
-        cairo_stroke(cr);
-
-        type_set(&meta, "alt+tab next " THEME_GLYPH_DOT " alt+shift+tab back", 0);
-        type_draw(&meta, cr, c_dim, a_foot * 0.85, x0, fy);
-
-        cairo_surface_flush(surf);
-        XSync(dpy, False);
-
+        paint_chrome(h, a);
+        for (int i = 0; i < h->shown; i++)
+            paint_row(h, i, a, i == h->sel ? 1.0 : 0.0);
+        cairo_surface_flush(h->surf);
+        XSync(h->dpy, False);
         struct timespec nap = { 0, 16L * 1000L * 1000L };
         nanosleep(&nap, NULL);
-        while (XPending(dpy)) {
-            XEvent ev;
-            XNextEvent(dpy, &ev);
-        }
+        while (XPending(h->dpy)) { XEvent ev; XNextEvent(h->dpy, &ev); }
     }
 
-    XSetErrorHandler(prev);
-    cairo_destroy(cr);
-    cairo_surface_destroy(surf);
-    XDestroyWindow(dpy, win);
-    XSync(dpy, False);
-    type_close(&title); type_close(&meta); type_close(&head);
-    g_object_unref(ctx);
-    (void)dot_w; (void)head_w;
+    cairo_destroy(h->cr);
+    cairo_surface_destroy(h->surf);
+    XDestroyWindow(h->dpy, h->win);
+    XSync(h->dpy, False);
+    type_close(&h->title);
+    type_close(&h->meta);
+    type_close(&h->head);
+    g_object_unref(h->ctx);
+    free(h);
+}
+
+int hud_run(Display *dpy, int scr, wlist_t *list, int force_opaque)
+{
+    hud_t *h = hud_open(dpy, scr, list, list->n > 1 ? 1 : 0, force_opaque);
+    if (!h) return 1;
+    long hold = list->n > 0 ? THEME_HOLD : 700;
+    long t0 = now_ms();
+    for (;;) {
+        if (now_ms() - t0 >= hold) break;
+        struct timespec nap = { 0, 16L * 1000L * 1000L };
+        nanosleep(&nap, NULL);
+        while (XPending(dpy)) { XEvent ev; XNextEvent(dpy, &ev); }
+    }
+    hud_close(h);
     return 0;
 }

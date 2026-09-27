@@ -18,6 +18,24 @@
 
 #include "wm.h"
 #include "hud.h"
+#include "hold.h"
+
+/* Xlib's default error handler calls exit() on any protocol error, and that
+ * is fatal for a window list. We read _NET_CLIENT_LIST, then read properties
+ * off each window in it — and a client can perfectly well exit in between.
+ * That is a race, not a bug, and it produced:
+ *   X Error of failed request: BadWindow ... X_GetProperty
+ * which killed the panel mid-paint, at the exact moment you press Alt+Tab.
+ * So every X error is absorbed here. Genuinely unexpected ones are reported
+ * to stderr, which i3 routes to /dev/tty1 and nobody reads, so FAE_HUD_VERBOSE
+ * is the only way to see them. */
+static int on_x_error(Display *dpy, XErrorEvent *e)
+{
+    if (getenv("FAE_HUD_VERBOSE"))
+        fprintf(stderr, "fae-hud: X error code=%d request=%d resource=0x%lx\n",
+                e->error_code, e->request_code, e->resourceid);
+    return 0;
+}
 
 static void usage(void)
 {
@@ -26,6 +44,9 @@ static void usage(void)
         "  --focus=0xID   highlight this X window (default: _NET_ACTIVE_WINDOW)\n"
         "  --dump         print the EWMH window list, draw nothing\n"
         "  --opaque       skip translucency (the no-compositor fallback)\n"
+        "  --cycle        the Alt+Tab gesture: open, browse, commit once\n"
+        "  --all-workspaces\n"
+        "                 include other workspaces (default: current only)\n"
         "  --display=:N   X display (default: $DISPLAY)\n"
         "  --help\n");
 }
@@ -36,6 +57,8 @@ int main(int argc, char **argv)
     const char *dpy_name = NULL;
     int dump = 0;
     int force_opaque = 0;
+    int cycle = 0;
+    int workspace_only = 1;   /* browsing is scoped to this workspace */
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--focus=", 8) == 0) {
@@ -46,6 +69,10 @@ int main(int argc, char **argv)
             dump = 1;
         } else if (strcmp(argv[i], "--opaque") == 0) {
             force_opaque = 1;
+        } else if (strcmp(argv[i], "--cycle") == 0) {
+            cycle = 1;
+        } else if (strcmp(argv[i], "--all-workspaces") == 0) {
+            workspace_only = 0;
         } else if (strcmp(argv[i], "--help") == 0) {
             usage();
             return 0;
@@ -67,10 +94,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    XSetErrorHandler(on_x_error);
+
     int scr = DefaultScreen(dpy);
     Window root = RootWindow(dpy, scr);
 
-    wlist_t *list = wm_list_windows(dpy, root, focus);
+    wlist_t *list = workspace_only ? wm_list_workspace(dpy, root, focus)
+                                   : wm_list_windows(dpy, root, focus);
 
     int rc;
     if (dump) {
@@ -88,6 +118,8 @@ int main(int argc, char **argv)
                    (list->v[i].is_active ? "  <- active" : ""),
                    list->v[i].on_current_workspace ? "" : "  (other ws)");
         rc = 0;
+    } else if (cycle) {
+        rc = hold_cycle(dpy, scr, list);
     } else {
         rc = hud_run(dpy, scr, list, force_opaque);
     }

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # fae-cycle — window cycling for the house, with visible proof.
 # Usage: fae-cycle [next|prev]   (alias: fae-tab; FAE_CYCLE_QUIET=1 = quiet)
-# Cycling is xprop + i3-msg. The cue is a themed toast typed into the kitty
-# window you arrived in (kitty remote control is per-socket, so only sockets
-# that exist can carry it), plus a pink confirmation on stderr.
+# Cycling is xprop + i3-msg, and the visual cue is fae-hud: a themed panel
+# that lists the windows. Alt+Tab now goes to `fae-hud --cycle` directly, which
+# holds one panel for the whole gesture; this script remains for scripting
+# (Mod1+c) and for `--focus` cues. It has no kitty dependency: the send-text
+# toast and set-tab-color flash are gone, and with them the only reason this
+# script could die under `set -euo pipefail`.
 # No resident process, no bar, no overlay window: nothing to keep alive.
 set -euo pipefail
 dir="${1:-next}"
@@ -44,7 +47,13 @@ def walk(n):
         if walk(c): return True
 walk(t); print(best or '')" 2>/dev/null || true)
 fi
-[ -n "$focused" ] || { echo "fae-cycle: no focused window" >&2; exit 1; }
+# An empty focused window is NORMAL, not an error: when a workspace has no
+# windows, i3 puts focus on the workspace node itself, so _NET_ACTIVE_WINDOW is
+# empty and the i3 tree has no focused window — even though _NET_CLIENT_LIST
+# still lists windows on other workspaces. Bailing here meant Alt+Tab did
+# nothing at all on an empty workspace, with the explanation printed to
+# /dev/tty1 where nobody could see it. `focused` stays empty and pick_target
+# starts at the top of the list instead.
 
 step=1; [ "$dir" = "prev" ] && step=-1
 
@@ -114,8 +123,14 @@ pick_target() {
   list=($ids)
   n=${#list[@]}
   [ "$n" -gt 0 ] || return 1
-  i=0
-  for ((k=0;k<n;k++)); do [ "${list[$k]}" = "$focused" ] && { i=$k; break; }; done
+  i=0; found=0
+  for ((k=0;k<n;k++)); do
+    [ -n "$focused" ] && [ "${list[$k]}" = "$focused" ] && { i=$k; found=1; break; }
+  done
+  # Nothing was focused: there is no "next" from nowhere, so start at the top.
+  [ "$found" = 1 ] || {
+    is_dead "${list[0]}" || { target=${list[0]}; return 0; }
+  }
   for ((try=0; try<n; try++)); do
     j=$(( (i + step + n) % n ))
     is_dead "${list[$j]}" || { target=${list[$j]}; return 0; }
@@ -181,88 +196,21 @@ PULSE_LILAC="#d4b4e8"
 TOAST_LEN=46
 
 if [ "${FAE_CYCLE_QUIET:-0}" != "1" ]; then
-  # ── the cue: fae-hud, a themed panel listing every window ────────────────
-  # This is the part you can actually see. i3 gives us stderr on /dev/tty1, so
-  # anything printed there is invisible, and a kitty toast is easy to miss if
-  # you are looking at the window you just left. The panel is a short-lived
-  # process (paint, hold, fade, exit) — no resident daemon, per the house rule
-  # that came out of the i3bar incident.
-  #
-  # It is told which window to highlight rather than being asked to work it
-  # out, and it reads the rest of the list itself over EWMH. It is strictly a
-  # viewer: it never focuses, kills, moves or resizes anything.
+  # The visible cue belongs to fae-hud now. This script cycles and logs, and
+  # deliberately has no kitty dependency at all: the send-text toast and the
+  # set-tab-color flash were only ever compensating for having no visual cue,
+  # and they were also the sole reason this script could die under
+  # `set -euo pipefail` — `kitty @` exits non-zero for any non-kitty target
+  # (the red-view console, for one) and pipefail turned that into a silent
+  # exit 1. See the CHANGELOG for the full account.
   FAE_HUD="${FAE_HUD:-$HOME/bin/fae-hud}"
   if [ -x "$FAE_HUD" ]; then
     ( "$FAE_HUD" --focus="$target" >/dev/null 2>&1 & ) || true
   fi
-
-  # Kitty appends its pid to a listen_on name — abstract sockets become
-  # @faeos-kitty-2172 (measured in /proc/net/unix). Three ids have to agree
-  # before a keystroke can be targeted, and they are NOT the same number:
-  #   socket  @faeos-kitty-<X11 pid>
-  #   X11     $target (_NET_WM_PID)
-  #   kitty   its own window id from `kitty @ ls` (1, 2, 3 …)
-  # `send-key --match id:` wants the third one. So: pid -> socket -> kitty id.
-  # No trailing newline, so the text lands on the prompt line, unexecuted.
-  toasted=0
-  flashed=0
-  tpid=$(DISPLAY="$D" xprop -id "$target" _NET_WM_PID 2>/dev/null | grep -oE '[0-9]+$') || tpid=""
-  if [ -n "$tpid" ]; then
-    kid=$(kitty @ --to "unix:@faeos-kitty-$tpid" ls 2>/dev/null | python3 -c "
-import json,sys
-try: d=json.load(sys.stdin)
-except Exception: raise SystemExit
-best=None
-for w in d:
-    for t in w.get('tabs',[]):
-        for win in t.get('windows',[]):
-            if win.get('is_focused'): best=win['id']
-if best is None:
-    for w in d:
-        for t in w.get('tabs',[]):
-            if t.get('is_active'):
-                for win in t.get('windows',[]): best=win['id']
-print(best or '')" 2>/dev/null) || kid=""
-    if [ -n "$kid" ]; then
-      # `if` rather than `&&`: with `set -e`, a `cmd && var=1` list that FAILS
-      # aborts the whole script. Cycling to any non-kitty window (the red-view
-      # console, say) means there is no @faeos-kitty-<pid> socket at all, so
-      # `kitty @` exits non-zero — and the script died right there, silently,
-      # rc=1, after focus had already moved. That is precisely the "Alt+Tab
-      # works but nothing tells me anything" behaviour. The HUD above has
-      # already painted by this point, which is why it is spawned first.
-      if kitty @ --to "unix:@faeos-kitty-$tpid" send-key --match "id:$kid" \
-           lbracket space f a e c y c l e colon space ${dir} space minus greater space \
-           "${name// /space}" space rbracket >/dev/null 2>&1; then
-        toasted=1
-      fi
-      # ── the visible cue ──────────────────────────────────────────────────
-      # The stderr line below is USELESS on this machine: i3 runs `exec` with
-      # stderr inherited from i3, and i3's fd 2 is /dev/tty1 (measured). So the
-      # pink confirmation has been printing to a virtual console nobody is
-      # watching, and the toast alone is easy to miss. `set-tab-color` is the
-      # one painting surface kitty actually owns: it tints the tab bar of the
-      # window you land in. Verified working on kitty 0.48.2 (there is no
-      # `set-tint` in this build). Reverted by a short-lived background sleep,
-      # not a resident daemon — nothing to keep alive, nothing to leak errors.
-      if [ "${FAE_CYCLE_FLASH:-1}" = "1" ]; then
-        PINK_BG="#ff2d55"; PINK_FG="#ffe3ee"
-        if kitty @ --to "unix:@faeos-kitty-$tpid" set-tab-color \
-             --match "window_id:$kid" "active_bg=$PINK_BG" "active_fg=$PINK_FG" \
-             >/dev/null 2>&1; then
-          flashed=1
-          ( sleep 0.9
-            kitty @ --to "unix:@faeos-kitty-$tpid" set-tab-color \
-              --match "window_id:$kid" active_bg=NONE active_fg=NONE \
-              >/dev/null 2>&1 || true ) &
-        fi
-      fi
-    fi
-  fi
-  faelog "ok dir=$dir target=$target con=$con name='$name' toasted=$toasted flashed=${flashed:-0}"
+  faelog "ok dir=$dir target=$target con=$con"
   cat >&2 <<MSG
-fae-cycle: ${dir} → '${name}'
-fae-cycle:   hint: Alt+Tab again, Alt+Shift+Tab to go back${toasted:+ · toasted}${flashed:+ · tab flashed}
+fae-cycle: ${dir} -> '$name'
+fae-cycle:   (no visual cue here: use Alt+Tab, which owns the panel)
 MSG
 fi
 exit 0

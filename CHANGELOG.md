@@ -116,3 +116,66 @@
   alone was not enough, because _NET_CLIENT_LIST keeps listing a window for a
   moment after its client exits, so the retry re-picked the same corpse (5
   failures in 30 under churn; now 0 in 40 each way under the same churn).
+
+## hold-2026-09-27
+Alt+Tab is now one gesture, not a keypress. `fae-hud --cycle` opens a themed
+panel, holds it while Alt is down, moves the highlight on Tab / Shift+Tab,
+cancels on Esc, and focuses the selection only on release. One panel for the
+whole gesture: Tab repaints only the two rows whose highlight moved, so there
+are no stacked panels and nothing re-animates. A quick tap still steps one
+window and exits, so the old muscle memory keeps working.
+- Browsing is scoped to the current workspace (`--all-workspaces` opts out).
+  Focus not moving while you browse is the point: i3 follows focus across
+  workspaces, so a switcher that focuses on every press drags you around the
+  machine and hides everything you started from. That, plus three windows
+  sharing one identical rect, is what "the other windows got minimized" was.
+- fae-hud now focuses on commit, via the EWMH _NET_ACTIVE_WINDOW client
+  message. Deliberately not i3-msg: it still does not know i3 exists. The old
+  "never mutates anything" rule is now "mutates exactly one thing, through the
+  documented interface".
+- Keyboard handling: XGrabKeyboard for the duration, with a self-pipe so
+  signals are handled in normal context and ungrabbing always happens, an
+  alarm() failsafe so a stuck Alt cannot hold the keyboard for more than 8s,
+  and a 30ms poll of the real key state to decide when the gesture ends.
+- fae-cycle lost its kitty dependency entirely (send-text toast, set-tab-color
+  flash). Those were the only reason it could die under `set -euo pipefail` —
+  `kitty @` exits non-zero for any non-kitty target and pipefail turned that
+  into a silent exit 1. Removing them deletes that whole failure class.
+  Mod1+Tab now goes to fae-hud; Mod1+c keeps fae-cycle for scripting.
+
+### Bugs found and fixed in this pass
+- PangoFontDescription is a BOXED type, not a GObject. g_object_unref on it
+  read a GTypeInstance out of memory that has none; it survived several runs by
+  luck and then segfaulted in g_type_check_instance_is_fundamentally_a. Now
+  pango_font_description_free. Found with ASan, not by reading the code.
+- BadWindow killed the panel. _NET_CLIENT_LIST is read, then properties are
+  read off each window in it, and a client can exit in between — which is a
+  race, not a bug, and Xlib's default handler calls exit(). The panel died
+  mid-paint at the exact moment you press Alt+Tab. All X errors are now
+  absorbed and reported under FAE_HUD_VERBOSE.
+- A KeyRelease for the Alt keycode arrives the instant the grab takes. Acting
+  on it ended the whole gesture before the user had pressed anything — the
+  panel would flash and commit. The gesture now ends when Alt is *physically*
+  up, decided by polling XQueryKeymap, not by trusting the event stream.
+- A bare `break` inside the event-drain loop only left that loop; the outer
+  loop went straight back to select() and waited out the 8s failsafe. A single
+  Alt+Tab took 8.3s to respond. Needed an explicit `done` flag. Now 756ms.
+- fae-cycle still bailed with "no focused window" on an empty workspace, which
+  is NORMAL: i3 focuses the workspace node itself when a workspace is empty,
+  so _NET_ACTIVE_WINDOW is empty while _NET_CLIENT_LIST still lists windows
+  elsewhere. The explanation printed to /dev/tty1, so it just looked broken.
+  Now it starts at the top of the list.
+- fae-cascade's first tick treated every existing window as new and went after
+  all of them. It now adopts what is already there and touches nothing.
+- fae-cascade's move-only cascade could never work: i3 floats a new window at
+  the full container rect, 1873px wide on a 1920px screen, so there is no room
+  to shift it. It now shrinks as it offsets, giving a real staircase
+  (153,153 1723x853) -> (183,183 1693x823) -> (213,213 1663x793).
+
+### Verified
+Quick tap 756ms; tap+3 Tabs lands on 4 of 5; Shift+Tab reverses with wrap;
+Esc cancels and focus does not move; SIGKILL and SIGTERM mid-grab both leave
+the keyboard free and typing into `cat` still works; the 8s failsafe fires;
+no leftover processes or stray X windows; ASan clean on the cycle path; both
+binaries build from scratch with zero warnings; fae-cycle 30/30 and 12/12 on
+an empty workspace.

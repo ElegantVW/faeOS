@@ -76,4 +76,8 @@
 #define THEME_HOLD        1200   /* measured from the last row landing */
 #define THEME_FADE_OUT     220
 
+/* Failsafe for the keyboard grab: a stuck Alt can never hold the keyboard for
+ * longer than this, whatever else goes wrong. See hold.c. */
+#define THEME_MAX_HOLD     8
+
 #endif /* FAE_HUD_THEME_H */

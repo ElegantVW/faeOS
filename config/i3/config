@@ -75,13 +75,19 @@ exec --no-startup-id $kitty
 bindsym $mod+d exec --no-startup-id rofi -show drun
 bindsym $mod+z exec --no-startup-id rofi -show run
 
-# ── window cycling: global MRU, with a visible cue ─────────────────────────
-# fae-cycle moves focus, toasts the window, flashes its tab bar pink, and logs
-# to $XDG_RUNTIME_DIR/fae-cycle.log. Note i3 runs `exec` with stderr inherited
-# from i3, whose fd 2 is /dev/tty1 — so its stderr is invisible; the log and
-# the kitty cue are the only things you can actually see.
-bindsym Mod1+Tab       exec --no-startup-id ~/bin/fae-cycle next
-bindsym Mod1+Shift+Tab exec --no-startup-id ~/bin/fae-cycle prev
+# ── window cycling ─────────────────────────────────────────────────────────
+# Alt+Tab is one gesture, not a keypress. fae-hud opens a themed panel listing
+# this workspace's windows, holds it while Alt is down, moves the highlight on
+# Tab / Shift+Tab, and focuses the selection only when you let go. Focus never
+# moves while you browse, which is the point: i3 follows focus across
+# workspaces, so a switcher that focuses on every press drags you around the
+# machine and hides everything you started from. Scoped to the current
+# workspace for the same reason.
+#
+# It is started by this binding, then grabs the keyboard itself for the
+# duration of the gesture. A quick tap still steps one window and exits.
+bindsym Mod1+Tab       exec --no-startup-id ~/bin/fae-hud --cycle
+bindsym Mod1+Shift+Tab exec --no-startup-id ~/bin/fae-hud --cycle
 bindsym Mod1+c         exec --no-startup-id ~/bin/fae-cycle next
 bindsym Mod1+Shift+c   exec --no-startup-id ~/bin/fae-cycle prev
 bindsym $mod+Tab       workspace next
@@ -194,5 +200,14 @@ bindsym $mod+Shift+r restart
 bindsym $mod+Shift+e exec "i3-nagbar -t warning -m 'You pressed the exit shortcut. Do you really want to exit i3? This will end your X session.' -B 'Yes, exit i3' 'i3-msg exit'"
 
 # ── desktop layer ──────────────────────────────────────────────────────────
+# The house's one resident process, and it earns it: a new window has to be
+# nudged at the moment it opens, and there is no keypress to hang that off.
+# It only touches a window that is exactly stacked on another. See
+# bin/fae-cascade/README.md.
+# exec_always, not exec: `exec` does not re-run on reload, and this has to
+# survive a reload. It is single-instance (flock), so the extra spawns a reload
+# causes are refused immediately rather than stacking up copies.
+exec_always --no-startup-id $HOME/bin/fae-cascade --log=$XDG_RUNTIME_DIR/fae-cascade.log
+
 exec_always --no-startup-id picom --config ~/.config/picom/picom.conf
 exec_always --no-startup-id feh --bg-fill $HOME/Pictures/wall.png
