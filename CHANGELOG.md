@@ -23,3 +23,22 @@
 - Super+drag move/resize via --whole-window (verified: xdotool drag moved a
   test window 12,12 -> 12,49 and flipped it floating).
 - fae-cycle cue: plain-ascii toast, targeted pid -> socket -> kitty-window-id.
+
+## cues-2026-09-27
+- fae-cycle: added an audit log ($XDG_RUNTIME_DIR/fae-cycle.log). i3 runs
+  `exec` with stderr inherited from i3, and i3's fd 2 is /dev/tty1 — so the
+  stderr cue has been invisible since it was written. The log is how we tell
+  "binding never fired" from "fired and you could not see it".
+- fae-cycle: new visible cue — kitty `set-tab-color` tints the tab bar of the
+  window you land in, reverted after 0.9s by a short-lived background sleep
+  (no resident process). This build has no `set-tint`.
+- i3: mouse_warping output -> none (matches the comment's stated intent).
+- Diagnosis: i3's `drag` is inert on this machine. The press reaches i3 and
+  `floating enable` runs (floating goes auto_off -> user_on), but `drag move`
+  and `drag resize` both produce exactly 0px of movement. Tried: bare drag,
+  floating-enable chain, explicit `drag button1 move`, with and without
+  --whole-window, from the border and the window body, mouse_warping output
+  and none, picom running and killed. Config is clean; cause unknown.
+- Also: XTEST synthetic KEY events do not reach i3 in this environment (even
+  a bare F9). XTEST mouse events do. So keyboard bindings cannot be verified
+  by injection and need a real keypress.

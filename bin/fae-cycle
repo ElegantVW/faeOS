@@ -9,9 +9,22 @@ set -euo pipefail
 dir="${1:-next}"
 D="${DISPLAY:-:0}"
 
+# ── audit log ─────────────────────────────────────────────────────────────
+# i3 runs `exec` with stderr inherited from i3 itself, and i3's stderr is
+# /dev/tty1 (measured: /proc/<i3-pid>/fd/2 -> /dev/tty1). So the stderr cue
+# at the bottom of this file prints to a virtual console nobody is looking
+# at — it has been invisible since the day it was written. This log is how we
+# tell "the binding never fired" apart from "it fired and you could not see
+# it", which are otherwise indistinguishable from the outside.
+LOG="${FAE_CYCLE_LOG:-${XDG_RUNTIME_DIR:-/tmp}/fae-cycle.log}"
+faelog() { printf '%s pid=%s %s\n' "$(date +%T)" "$$" "$*" >>"$LOG" 2>/dev/null || true; }
+faelog "start dir=$dir DISPLAY=$D"
+
 # ── find focused + collect windows ─────────────────────────────────────────
-ids=$(DISPLAY="$D" xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //' | tr ', ' '\n\n' | grep -E '^0x[0-9a-fA-F]+$') || exit 0
-[ -n "$ids" ] || exit 0
+ids=$(DISPLAY="$D" xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //' | tr ', ' '\n\n' | grep -E '^0x[0-9a-fA-F]+$') \
+  || { faelog "giveup: no _NET_CLIENT_LIST"; exit 0; }
+[ -n "$ids" ] || { faelog "giveup: client list empty"; exit 0; }
+faelog "windows=$(echo "$ids" | wc -w)"
 focused=""
 for w in $ids; do
   if DISPLAY="$D" xprop -id "$w" _NET_WM_STATE 2>/dev/null | grep -q "_NET_WM_STATE_FOCUSED"; then
@@ -81,9 +94,10 @@ def walk(n):
 walk(t); print(found or '')" 2>/dev/null) ;;
   esac
 fi
-[ -n "$con" ] || { echo "fae-cycle: cannot focus $target" >&2; exit 1; }
+[ -n "$con" ] || { faelog "FAIL: cannot focus target=$target"; echo "fae-cycle: cannot focus $target" >&2; exit 1; }
 CON="$con"
 DISPLAY="$D" i3-msg "[con_id=$con] focus" >/dev/null
+faelog "focused con=$con target=$target"
 
 # ── cue 1: name the window for the toast ────────────────────────────────
 name=$(DISPLAY="$D" xprop -id "$target" WM_NAME 2>/dev/null | sed 's/.*= //; s/^"//; s/"$//' | cut -c1-28)
@@ -122,6 +136,7 @@ if [ "${FAE_CYCLE_QUIET:-0}" != "1" ]; then
   # `send-key --match id:` wants the third one. So: pid -> socket -> kitty id.
   # No trailing newline, so the text lands on the prompt line, unexecuted.
   toasted=0
+  flashed=0
   tpid=$(DISPLAY="$D" xprop -id "$target" _NET_WM_PID 2>/dev/null | grep -oE '[0-9]+$')
   if [ -n "$tpid" ]; then
     kid=$(kitty @ --to "unix:@faeos-kitty-$tpid" ls 2>/dev/null | python3 -c "
@@ -143,11 +158,33 @@ print(best or '')" 2>/dev/null)
       kitty @ --to "unix:@faeos-kitty-$tpid" send-key --match "id:$kid" \
         lbracket space f a e c y c l e colon space ${dir} space minus greater space \
         "${name// /space}" space rbracket >/dev/null 2>&1 && toasted=1
+      # ── the visible cue ──────────────────────────────────────────────────
+      # The stderr line below is USELESS on this machine: i3 runs `exec` with
+      # stderr inherited from i3, and i3's fd 2 is /dev/tty1 (measured). So the
+      # pink confirmation has been printing to a virtual console nobody is
+      # watching, and the toast alone is easy to miss. `set-tab-color` is the
+      # one painting surface kitty actually owns: it tints the tab bar of the
+      # window you land in. Verified working on kitty 0.48.2 (there is no
+      # `set-tint` in this build). Reverted by a short-lived background sleep,
+      # not a resident daemon — nothing to keep alive, nothing to leak errors.
+      if [ "${FAE_CYCLE_FLASH:-1}" = "1" ]; then
+        PINK_BG="#ff2d55"; PINK_FG="#ffe3ee"
+        if kitty @ --to "unix:@faeos-kitty-$tpid" set-tab-color \
+             --match "window_id:$kid" "active_bg=$PINK_BG" "active_fg=$PINK_FG" \
+             >/dev/null 2>&1; then
+          flashed=1
+          ( sleep 0.9
+            kitty @ --to "unix:@faeos-kitty-$tpid" set-tab-color \
+              --match "window_id:$kid" active_bg=NONE active_fg=NONE \
+              >/dev/null 2>&1 || true ) &
+        fi
+      fi
     fi
   fi
+  faelog "ok dir=$dir target=$target con=$con name='$name' toasted=$toasted flashed=${flashed:-0}"
   cat >&2 <<MSG
 fae-cycle: ${dir} → '${name}'
-fae-cycle:   hint: Alt+Tab again, Alt+Shift+Tab to go back${toasted:+ · toasted}
+fae-cycle:   hint: Alt+Tab again, Alt+Shift+Tab to go back${toasted:+ · toasted}${flashed:+ · tab flashed}
 MSG
 fi
 exit 0

@@ -61,7 +61,7 @@ exec --no-startup-id kitty -o allow_remote_control=yes -o listen_on="unix:@faeos
 # Declared in the config so the color always returns home on reload.
 # ── mouse that behaves ────────────────────────────────────────────────────
 # Pointer warps into a dragged window otherwise, so kill it.
-mouse_warping output
+mouse_warping none
 focus_follows_mouse no
 
 # Super + Enter: a new terminal. Nothing was bound here before, which is why
