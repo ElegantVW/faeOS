@@ -17,3 +17,9 @@
   faeOS keeps thin launchers; `docs/engines.md` + `install.sh` updated.
 - Pixie canonical repo: `ElegantVW/pixie`. Hearth/rift marked incomplete.
 - Goblin `steal` naming; magpie TUI-browser surface.
+
+## keys-2026-09-27
+- Super+Return/Shift+Return/Ctrl+Shift+Return open kitty (nothing was bound).
+- Super+drag move/resize via --whole-window (verified: xdotool drag moved a
+  test window 12,12 -> 12,49 and flipped it floating).
+- fae-cycle cue: plain-ascii toast, targeted pid -> socket -> kitty-window-id.
