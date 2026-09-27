@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/home/evenweaker/bin/goblin idle
+ExecStart=%h/bin/goblin idle
 Restart=always
 RestartSec=5
 

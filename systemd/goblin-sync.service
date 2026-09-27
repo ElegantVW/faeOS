@@ -4,4 +4,4 @@ After=network.target pipewire.service pulseaudio.service
 
 [Service]
 Type=oneshot
-ExecStart=/home/evenweaker/bin/goblin sync --quiet
+ExecStart=%h/bin/goblin sync --quiet

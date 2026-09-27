@@ -1,5 +1,61 @@
 # faeOS changelog
 
+## siren-retired-and-units-portable (2026-09-27)
+
+An audit of all ten repos found the kit quietly undoing a sibling engine, four
+systemd units that only work on one machine, and a launcher install that
+silently no-ops. All three fixed.
+
+- **The Python siren player is gone: `bin/siren` (2477 lines, 86KB).**
+  `install.sh:66` copies `bin/` over `~/bin` unconditionally, so every
+  `./install.sh` replaced the 856-byte Rust launcher with the archived Python
+  player — reverting the 2026-09-23 cutover. `siren/build.sh:31-32` explicitly
+  refuses to overwrite that file and says why, so the kit was breaking a
+  contract a sibling repo had deliberately kept. The fallback existed on
+  purpose, as a documented rollback, which is why the fix is removal rather
+  than a guard: the trap is gone instead of worked around. Verified by
+  simulating `install.sh:66` against a stand-in launcher — md5 unchanged,
+  still the Rust launcher. The five bulwark launchers the kit also ships are
+  byte-identical to their repo, so no `install.sh` change was needed at all.
+  Went with it: `tests/test_siren.py` (25 tests, it loaded `bin/siren` through
+  a `SourceFileLoader` and had no subject left) and
+  `docs/SIREN_QUICK_START.md` (a dev guide to the retired player).
+  `docs/plans/siren.md` — a 267-line plan for that player — is now a short
+  stub pointing at `ElegantVW/siren`.
+  **Consequence, recorded not hidden: siren now has 2 unit tests in
+  `src/spectrum.rs` and no integration coverage.** The content pipeline is
+  unaffected: `tools/content/make.sh:96,101,102` and `shots.yaml:35` all
+  invoke `~/bin/siren`, the launcher.
+- **Four systemd units no longer hardcode `/home/evenweaker/`.**
+  `ether-bridge.service:8`, `goblin-idle.service:8`, `goblin-sync.service:7`
+  and `kur-server.service:6` used absolute paths while the other four already
+  used `%h`, and `install.sh:106` copies them verbatim — so
+  `README.md:133`'s `systemctl --user enable --now goblin-idle.service`
+  installed a broken unit on any other machine. All eight now use `%h`;
+  `systemd-analyze --user verify` clean on every one. `kur-server` also pinned
+  `/usr/bin/python3`; kur's own unit uses `%h/bin/kur-server`, so the kit was
+  shipping a *worse* unit than the engine it wraps.
+- Test inventory after the removal: 165 test functions, 121 run under
+  `unittest`, 44 still blocked on a missing `pytest` (was 69 — 25 of them were
+  in the deleted `test_siren.py`). The blocked remainder includes
+  `test_fae_termart.py`'s 38 tests covering `tui_read_key` and
+  `box`/`paint_frame`, the shared TUI layer every TUI depends on.
+  `pacman -Ss python-pytest` offers `extra/python-pytest 1:9.1.1-1`; the tests
+  use three pytest features total (`mark`, `raises`, `fixture`). The changelog
+  has called this an environmental gap since 2026-09-26 and it is not one.
+  Left alone this round because the chosen scope was the install path and the
+  units; recorded here so it is not lost.
+
+Verified: `bash -n install.sh` clean; `bash -n goblin/build.sh` clean; all 8
+units verify; install.sh:66 simulation leaves the launcher untouched; faeOS
+suite still runs 112 cases green; switcher cold start visits 4 of 4 windows
+distinctly; Escape still cancels without moving focus; `fae-cascade` still
+refuses a second instance and still cascading; picom up.
+
+`faeOSplan.md:139` still says siren v2 was a single-file `bin/siren` with 31
+test cases and a 78-test suite. That is a dated 2026-08-05 history entry and
+has been left alone rather than rewritten — the current numbers are above.
+
 ## switcher-cycles (2026-09-27)
 
 `fae-hud` was rebuilt around a macOS-style strip and then had to be taught to
