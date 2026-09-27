@@ -1,5 +1,56 @@
 # faeOS changelog
 
+## switcher-cycles (2026-09-27)
+
+`fae-hud` was rebuilt around a macOS-style strip and then had to be taught to
+actually cycle. Four defects, all found by measuring rather than looking.
+
+- **One entry per window, not per application.** The per-app dedupe collapsed
+  five kitty windows on one workspace into a single row, so `sel` was 0 and
+  Alt+Tab re-focused the app you were already in — taps two through eight did
+  literally nothing. Row labels are now the window's own title, with the
+  selected window's full title repeated on a line underneath because a 16-char
+  cell cannot make `OC | System audit, documentation update…` distinct, and
+  five terminals are all titled `~`. The count badge is gone; it only existed
+  because one row had to stand in for several windows.
+- **New `mru.c`: the ring.** `_NET_CLIENT_LIST_STACKING` is not recency —
+  measured by focusing the bottom-most window in the stack and re-reading the
+  property, it came back byte-for-byte identical — so the switcher keeps its
+  own ring at `$XDG_RUNTIME_DIR/fae-hud.mru`, pruned of dead ids, order
+  preserved, new windows appended. The list is then *rotated* cyclically from
+  the focused window. Move-to-front is wrong here: it rewrites `[A,B,C,D]` to
+  `[B,A,C,D]` and the next gesture lands back on A. A toggle, not a walk.
+  Verified: 6 windows, 6 distinct hops, hop 7 back to hop 1; 28 windows, 28
+  distinct hops, hop 29 back to hop 1.
+- **Escape no longer commits.** The cancel branch set `cancelled = 1` and then
+  called `commit()`, so Escape moved focus to the highlighted window while the
+  release-commit below it was correctly skipped — cancel and commit at once.
+  Verified at 20/50/120/300ms holds: all four previously moved focus, all four
+  now leave it alone.
+- **One window is a no-op.** `n <= 1` opens the strip briefly and changes
+  nothing, rather than re-focusing the window you are already in.
+- **picom was drawing a shadow around the strip.** `shadow = true`,
+  `shadow-radius = 12`, `shadow-offset-x/y = -8`, and `shadow-exclude` listed
+  only i3bar and rofi. The result read exactly like the panel being inset
+  inside its own window — measured, `c_void` filled the window edge to edge
+  while the panel sat 396x126 inside 432x164. The window was never the wrong
+  size; X and cairo both said 432x164. `rounding-exclude` did not cover this,
+  shadows are a separate rule. Now excluded by name: 0 void pixels inside the
+  window, was a full 18px band on all four sides. `config/picom/picom.conf`
+  was also stale in the kit and is now synced with the live copy.
+- **Makefile** now lists every header (`hold.h entry.h icon.h mru.h`) so
+  editing one triggers a rebuild. `CC ?= gcc` never took effect — make
+  predefines `CC = cc`, so `?=` leaves it alone; harmless, but do not be
+  surprised by `cc` in the build line.
+- `XGetGeometry` writes to *both* trailing out-parameters. Passing `NULL` for
+  the depth segfaults inside Xlib; found by ASan while adding the geometry log.
+
+Verified: clean build 0 warnings; ASan clean; 40 forward and 40 reverse taps
+under churn, 0 failures, 0.4s each (no failsafe hits); Shift+Tab is the exact
+reverse; SIGKILL and SIGTERM mid-grab leave the keyboard free (proved by
+typing into `cat` and reading the file); no keyboard grab left behind;
+single-window guard on an otherwise empty workspace; `--dump`, `--opaque`.
+
 ## housekeeping (2026-09-26)
 
 - Kur splits to `ElegantVW/kur` (client + voice daemon + redacted quest).

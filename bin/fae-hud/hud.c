@@ -163,12 +163,12 @@ struct hud {
     cairo_surface_t *surf;
     cairo_t   *cr;
     PangoContext *ctx;
-    type_t     label, meta;
+    type_t     label, meta, title;
     elist_t   *apps;
     int        sel;
     int        have_cx;
     int        want_w, want_h, px, py;
-    int        icon_px, cell_w, label_h, count_h;
+    int        icon_px, cell_w, label_h, title_h;
     int        first;        /* leftmost visible entry, for scrolling */
     const char *message;
     rgb_t c_void, c_panel, c_pink, c_psoft, c_fg, c_dim, c_lilac, c_far;
@@ -294,22 +294,6 @@ static void paint_entry(hud_t *h, int i, double a)
     type_draw(&h->label, cr, lc, a * (sel ? 1.0 : 0.75),
               cx - tw / 2, iy + box + THEME_LABEL_GAP + h->label_h * 0.8);
 
-    /* window count, when the app owns more than one */
-    if (e->count > 1) {
-        char b[16];
-        snprintf(b, sizeof b, "%d", e->count);
-        type_set(&h->meta, b, 0);
-        int bw = type_w(&h->meta), bh = type_h(&h->meta);
-        double r = (bh * 0.5 > 8) ? bh * 0.5 : 8;
-        double bx = cx + box / 2.0 - 2, by = iy + box - 2;
-        set_rgba(cr, h->c_panel, a);
-        cairo_arc(cr, bx, by, r + 2, 0, 2 * M_PI);
-        cairo_fill(cr);
-        set_rgba(cr, h->c_pink, a);
-        cairo_arc(cr, bx, by, r, 0, 2 * M_PI);
-        cairo_fill(cr);
-        type_draw(&h->meta, cr, h->c_void, a, bx - bw / 2.0, by - bh / 2.0);
-    }
 }
 
 static void paint_all(hud_t *h, double a)
@@ -343,6 +327,23 @@ static void paint_all(hud_t *h, double a)
         cairo_line_to(cr, fx - THEME_FACET_R, fy);
         cairo_close_path(cr);
         cairo_fill(cr);
+    }
+
+    /* The selected window's title, in full, on its own line. Row labels are
+     * ~16 characters; titles like "OC | System audit, documentation update…"
+     * are not, and this is the only way the title is actually readable. */
+    if (h->apps->n > 0) {
+        int sy = h->want_h - THEME_PAD_Y - h->title_h + 2;
+        cairo_set_line_width(cr, 1.0);
+        set_rgba(cr, h->c_lilac, a * 0.16);
+        cairo_move_to(cr, THEME_PAD_X, sy - THEME_RULE_GAP);
+        cairo_line_to(cr, h->want_w - THEME_PAD_X, sy - THEME_RULE_GAP);
+        cairo_stroke(cr);
+        const char *t = h->apps->v[h->sel].label;
+        type_set(&h->title, t && *t ? t : "window", h->want_w - THEME_PAD_X * 2);
+        int tw = type_w(&h->title);
+        type_draw(&h->title, cr, h->c_fg, a * 0.92,
+                  h->want_w / 2 - tw / 2, sy);
     }
 
     if (h->apps->n == 0) {
@@ -386,7 +387,9 @@ hud_t *hud_open(Display *dpy, int scr, elist_t *apps, int sel, int force_opaque)
     h->ctx = pango_font_map_create_context(pango_cairo_font_map_get_default());
     type_open(&h->label, h->ctx, THEME_SIZE_LABEL);
     type_open(&h->meta,  h->ctx, THEME_SIZE_META);
+    type_open(&h->title, h->ctx, THEME_SIZE_TITLE);
     h->label_h = type_h(&h->label) > 0 ? type_h(&h->label) : THEME_SIZE_LABEL + 4;
+    h->title_h = type_h(&h->title) > 0 ? type_h(&h->title) : THEME_SIZE_TITLE + 4;
 
     /* Fit: shrink the icons if there are many apps, and only scroll if even
      * the smallest icons would not fit. */
@@ -400,13 +403,13 @@ hud_t *hud_open(Display *dpy, int scr, elist_t *apps, int sel, int force_opaque)
     }
     h->icon_px = icon;
     h->cell_w  = cell;
-    h->count_h = h->label_h;
 
     h->want_w = THEME_PAD_X * 2 + n * cell;
     if (h->want_w > max_icons + THEME_PAD_X * 2)
         h->want_w = max_icons + THEME_PAD_X * 2;
     h->want_h = THEME_PAD_Y * 2 + (int)(icon * THEME_ICON_SEL_SCALE) + 12
-              + THEME_LABEL_GAP + h->label_h;
+              + THEME_LABEL_GAP + h->label_h
+              + THEME_RULE_GAP + h->title_h;
 
     h->px = (screen_w - h->want_w) / 2;
     h->py = (int)(screen_h * THEME_ROW_TOP_FRACTION);
@@ -455,17 +458,39 @@ hud_t *hud_open(Display *dpy, int scr, elist_t *apps, int sel, int force_opaque)
     h->c_lilac = hex_rgb(THEME_LILAC);
     h->c_far   = hex_rgb(THEME_FAR);
 
-    if (getenv("FAE_HUD_VERBOSE"))
+    if (getenv("FAE_HUD_VERBOSE")) {
+        /* Report what X and cairo actually hold, not just what we asked for.
+         * A screenshot showed the panel inset ~19px on all four sides inside
+         * its own window, which is impossible if the fill really is
+         * round_rect(0,0,want_w,want_h) on a want_w x want_h surface. Either
+         * the window was resized after creation or the surface disagrees with
+         * it, and only these three numbers can tell us which. Screenshots
+         * alone already produced three false bug reports in this project. */
+        Window   rr;
+        int      rx, ry;
+        unsigned rw = 0, rh = 0, rbw = 0, rdepth = 0;
+        /* Both trailing out-params are required; passing NULL for depth_return
+         * segfaults inside Xlib. */
+        XGetGeometry(dpy, h->win, &rr, &rx, &ry, &rw, &rh, &rbw, &rdepth);
         fprintf(stderr, "fae-hud: strip at (%d,%d) %dx%d apps=%d icon=%d "
                         "cell=%d sel=%d\n",
                 h->px, h->py, h->want_w, h->want_h, apps->n, h->icon_px,
                 h->cell_w, h->sel);
+        fprintf(stderr, "fae-hud: X says %u%u at (%d,%d); cairo surface %dx%d\n",
+                rw, rh, rx, ry,
+                cairo_xlib_surface_get_width(h->surf),
+                cairo_xlib_surface_get_height(h->surf));
+    }
 
     paint_all(h, 1.0);
     return h;
 }
 
 int  hud_count(hud_t *h)      { return h ? h->apps->n : 0; }
+Window hud_xid_at(hud_t *h, int i)
+{
+    return (h && i >= 0 && i < h->apps->n) ? h->apps->v[i].xid : None;
+}
 int  hud_selection(hud_t *h) { return h ? h->sel : -1; }
 
 void hud_select(hud_t *h, int sel)
@@ -511,6 +536,7 @@ void hud_close(hud_t *h)
     XSync(h->dpy, False);
     type_free(&h->label);
     type_free(&h->meta);
+    type_free(&h->title);
     g_object_unref(h->ctx);
     free(h);
 }

@@ -22,6 +22,7 @@
  */
 #include "hold.h"
 #include "hud.h"
+#include "mru.h"
 #include "theme.h"
 
 #include <errno.h>
@@ -98,7 +99,19 @@ static int key_down(Display *dpy, KeyCode kc)
 static void commit(Display *dpy, hud_t *h, const char *how)
 {
     Window t = hud_target(h);
-    if (t != None) request_focus(dpy, t);
+    if (t != None) {
+        request_focus(dpy, t);
+        /* Hand the ring the full window set. _NET_CLIENT_LIST_STACKING is not
+         * recency — measured, it does not change at all when focus moves — so
+         * this file is the only ordering that survives a commit. */
+        Window live[MRU_MAX];
+        int n = 0;
+        for (int i = 0; i < hud_count(h) && n < MRU_MAX; i++) {
+            Window w = hud_xid_at(h, i);
+            if (w != None) live[n++] = w;
+        }
+        mru_note(live, n);
+    }
     if (getenv("FAE_HUD_VERBOSE"))
         fprintf(stderr, "fae-hud: %s -> %s\n", how, t == None ? "none" : hud_label(h));
 }
@@ -106,7 +119,11 @@ static void commit(Display *dpy, hud_t *h, const char *how)
 int hold_cycle(Display *dpy, int scr, elist_t *apps)
 {
     int n = apps->n;
-    if (n == 0) {
+    /* One window on this workspace means there is nothing to switch to.
+     * Say so and change nothing, rather than re-focusing the window you are
+     * already on — which is what the per-app version did, and it is why taps
+     * two through eight did literally nothing. */
+    if (n <= 1) {
         hud_t *empty = hud_open(dpy, scr, apps, 0, 0);
         if (empty) {
             struct timespec nap = { 0, 700L * 1000L * 1000L };
@@ -191,8 +208,16 @@ int hold_cycle(Display *dpy, int scr, elist_t *apps)
             XEvent ev;
             XNextEvent(dpy, &ev);
             if (ev.type == KeyPress && ev.xkey.keycode == kc_esc) {
+                /* Escape abandons the gesture. It must NOT focus anything.
+                 * This used to call commit() here, so Escape moved focus to
+                 * the highlighted window and then the release-commit was
+                 * correctly skipped a few lines down — cancelling and
+                 * committing at the same time. Measured: Escape held 20ms,
+                 * 50ms and 120ms all moved focus, which is every way a person
+                 * can press it. */
                 cancelled = 1;
-                commit(dpy, h, "cancelled");
+                if (getenv("FAE_HUD_VERBOSE"))
+                    fprintf(stderr, "fae-hud: cancelled by Escape, no focus change\n");
             }
         }
         if (cancelled) break;

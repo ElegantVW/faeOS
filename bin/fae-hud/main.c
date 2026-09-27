@@ -40,7 +40,7 @@ static void usage(void)
     fprintf(stderr,
         "fae-hud — the house switcher\n"
         "  --cycle          open, browse, commit once (bound to Alt+Tab)\n"
-        "  --dump           print the application list, draw nothing\n"
+        "  --dump           print the window list, draw nothing\n"
         "  --opaque         skip translucency (the no-compositor fallback)\n"
         "  --all-workspaces include other workspaces (default: current only)\n"
         "  --display=:N\n");
@@ -69,48 +69,35 @@ int main(int argc, char **argv)
     int scr = DefaultScreen(dpy);
     Window root = RootWindow(dpy, scr);
     Window focus = wm_active(dpy, root);
-    elist_t *apps = wm_list_apps(dpy, root, focus);
+    /* One entry per window, scoped to the current workspace by default:
+     * i3 follows focus across workspaces, so a switcher that spans them
+     * drags you around the machine and hides what you started from. */
+    elist_t *apps = wm_list_entries(dpy, root, focus, !all_ws);
 
-    /* Browsing is scoped to the current workspace: i3 follows focus across
-     * workspaces, so a switcher that spans them drags you around the machine
-     * and hides everything you started from. */
-    if (!all_ws) {
-        elist_t *cur = calloc(1, sizeof(elist_t));
-        unsigned long cd = wm_current_desktop(dpy, root);
-        for (int i = 0; i < apps->n; i++) {
-            if (wm_desktop_of(dpy, apps->v[i].xid, cd)) {
-                cur->v = realloc(cur->v, (size_t)(cur->n + 1) * sizeof(entry_t));
-                cur->v[cur->n++] = apps->v[i];
-                /* ownership moved: clear every owned pointer so the old list
-                 * does not free what we just took */
-                apps->v[i].cls = apps->v[i].label = NULL;
-                apps->v[i].icon = NULL;
-            }
-        }
-        wm_apps_free(apps);
-        apps = cur;
+    if (dump) {
+        printf("apps=%d current=0x%lx\n", apps->n, (unsigned long)focus);
+        for (int i = 0; i < apps->n; i++)
+            printf("  [%d] %-28s xid=0x%lx %-10s icon=%s\n", i + 1,
+                   apps->v[i].label, (unsigned long)apps->v[i].xid,
+                   apps->v[i].cls, apps->v[i].icon ? "yes" : "NO");
     }
 
     int rc = 0;
-    if (dump) {
-        printf("apps=%d\n", apps->n);
-        for (int i = 0; i < apps->n; i++)
-            printf("  [%d] %-14s xid=0x%lx windows=%d icon=%s\n", i + 1,
-                   apps->v[i].label, (unsigned long)apps->v[i].xid,
-                   apps->v[i].count, apps->v[i].icon ? "yes" : "NO");
-    } else if (cycle) {
-        rc = hold_cycle(dpy, scr, apps);
-    } else {
-        hud_t *h = hud_open(dpy, scr, apps, apps->n > 1 ? 1 : 0, force_opaque);
-        if (h) {
-            struct timespec nap = { 0, 900L * 1000L * 1000L };
-            nanosleep(&nap, NULL);
-            while (XPending(dpy)) { XEvent ev; XNextEvent(dpy, &ev); }
-            hud_close(h);
-        } else rc = 1;
+    if (!dump) {
+        if (cycle) {
+            rc = hold_cycle(dpy, scr, apps);
+        } else {
+            hud_t *h = hud_open(dpy, scr, apps, apps->n > 1 ? 1 : 0, force_opaque);
+            if (h) {
+                struct timespec nap = { 0, 900L * 1000L * 1000L };
+                nanosleep(&nap, NULL);
+                while (XPending(dpy)) { XEvent ev; XNextEvent(dpy, &ev); }
+                hud_close(h);
+            } else rc = 1;
+        }
     }
 
-    wm_apps_free(apps);
+    wm_entries_free(apps);
     XCloseDisplay(dpy);
     return rc;
 }

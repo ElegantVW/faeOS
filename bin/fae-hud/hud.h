@@ -16,6 +16,7 @@ void    hud_select(hud_t *h, int sel);
 int     hud_count(hud_t *h);
 int     hud_selection(hud_t *h);
 Window  hud_target(hud_t *h);      /* the X window to focus, or None */
+Window  hud_xid_at(hud_t *h, int i);  /* entry i's window, or None */
 const char *hud_label(hud_t *h);
 void    hud_close(hud_t *h);
 

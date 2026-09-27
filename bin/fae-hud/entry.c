@@ -1,16 +1,28 @@
-/* entry.c — build the application list.
+/* entry.c — build the window list as a ring, rotated to start at the current
+ * window.
  *
- * Reads only EWMH, and has no idea a window manager exists beyond the root
- * window. Order is most-recently-used: _NET_CLIENT_LIST_STACKING is
- * bottom-to-top, so walking it backwards gives the topmost window first, and
- * the first window seen for a class is that app's most recent one.
+ * Reads only EWMH and our own ring file, and has no idea a window manager
+ * exists. Ordering:
+ *
+ *   1. the ring: our persisted order, pruned to windows that still exist,
+ *      then anything it has never seen in stacking order (topmost first),
+ *      which seeds it on a cold login
+ *   2. rotated so the focused window is index 0, carrying on round to the
+ *      front — a rotation, not a re-sort
+ *   3. scoped to _NET_CURRENT_DESKTOP, because i3 follows focus across
+ *      workspaces and a switcher that spans them drags you around the machine
+ *
+ * Step 2 is where the order of operations matters. Prepending the focused
+ * window and then emitting the ring minus it destroys the cyclic order and
+ * produces a two-window toggle that looks exactly like working code. See the
+ * comment at the rotation below.
  */
 #include "entry.h"
 #include "icon.h"
-#include "wm.h"
+#include "mru.h"
 #include "theme.h"
+#include "wm.h"
 
-#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,76 +35,87 @@ static void push(elist_t *l, const entry_t *e)
     l->v[l->n++] = *e;
 }
 
-/* "kitty" -> "Kitty", "org.mozilla.firefox" -> "Firefox" */
-static char *tidy(const char *cls)
+static int contains(const Window *v, int n, Window w)
 {
-    const char *base = cls;
-    const char *p;
-    for (p = cls; *p; p++)
-        if (*p == '.') base = p + 1;
-    size_t n = strlen(base);
-    char *out = malloc(n + 1);
-    for (size_t i = 0; i < n; i++) {
-        char c = base[i];
-        if (c == '-' || c == '_') c = ' ';
-        out[i] = (char)tolower((unsigned char)c);
-    }
-    out[n] = '\0';
-    if (n > 0) out[0] = (char)toupper((unsigned char)out[0]);
-    return out;
+    for (int i = 0; i < n; i++) if (v[i] == w) return 1;
+    return 0;
 }
 
-elist_t *wm_list_apps(Display *dpy, Window root, Window focus_xid)
+elist_t *wm_list_entries(Display *dpy, Window root, Window focus_xid,
+                         int same_workspace_only)
 {
     elist_t *l = calloc(1, sizeof *l);
-    unsigned long n = 0;
-    Window *wins = wm_stacking(dpy, root, &n);   /* bottom-to-top */
-    if (!wins) return l;
+    unsigned long nlive = 0;
+    Window *live = wm_stacking(dpy, root, &nlive);
+    if (!live) return l;
 
-    /* reverse: topmost first */
-    for (unsigned long k = n; k > 0; k--) {
-        Window w = wins[k - 1];
-        char *cls = wm_class(dpy, w);
-        if (!cls || !*cls) cls = strdup("app");
+    unsigned long cd = wm_current_desktop(dpy, root);
 
-        int seen = -1;
-        for (int i = 0; i < l->n; i++)
-            if (strcmp(l->v[i].cls, cls) == 0) { seen = i; break; }
+    /* The live, in-scope set. */
+    Window scope[MRU_MAX];
+    int nscope = 0;
+    for (unsigned long i = 0; i < nlive && nscope < MRU_MAX; i++)
+        if (!same_workspace_only ||
+            wm_desktop_of(dpy, live[i], cd))
+            scope[nscope++] = live[i];
 
-        if (seen >= 0) {
-            l->v[seen].count++;
-            free(cls);
-            continue;
+    /* Build the ring first, THEN rotate it. The order of those two steps is
+     * the whole bug, and getting it wrong looks like correct MRU while
+     * toggling between two windows forever.
+     *
+     * Ring [tE,tD,tC,tB,tA] with tD current. Prepending tD and then emitting
+     * the ring minus tD gives [tD,tE,tC,tB,tA] — tE jumps ahead of tC purely
+     * because it sat at the front of the ring. sel=1 then picks tE, and from
+     * tE it picks tD, and you are back where you started. Measured, exactly:
+     * tD->tE->tD->tE across 8 taps.
+     *
+     * The ring is cyclic, so rotate it: start at the current window's slot and
+     * carry on round to the front. That yields [tD,tC,tB,tA,tE] and sel=1 is
+     * tC, the genuine next one.
+     */
+    Window ring[MRU_MAX];
+    int nring = 0;
+    Window seen[MRU_MAX];
+    int nseen = 0;
+
+    /* The ring: our persisted order first, then anything it has never seen in
+     * stacking order (topmost first), which seeds it on a cold login. */
+    Window prev[MRU_MAX];
+    int nprev = mru_load(prev, MRU_MAX);
+    for (int i = 0; i < nprev && nring < MRU_MAX; i++)
+        if (contains(scope, nscope, prev[i]) && !contains(seen, nseen, prev[i])) {
+            seen[nseen++] = prev[i];
+            ring[nring++] = prev[i];
         }
+    for (unsigned long i = nlive; i > 0 && nring < MRU_MAX; i--)
+        if (contains(scope, nscope, live[i - 1]) &&
+            !contains(seen, nseen, live[i - 1])) {
+            seen[nseen++] = live[i - 1];
+            ring[nring++] = live[i - 1];
+        }
+
+    int start = 0;
+    if (focus_xid != None)
+        for (int i = 0; i < nring; i++)
+            if (ring[i] == focus_xid) { start = i; break; }
+
+    for (int k = 0; k < nring; k++) {
+        Window w = ring[(start + k) % nring];
         entry_t e;
         memset(&e, 0, sizeof e);
-        e.cls   = cls;
-        e.label = tidy(cls);
-        e.xid   = w;
-        e.count = 1;
+        e.xid  = w;
+        e.cls  = wm_class(dpy, w);
+        if (!e.cls || !*e.cls) e.cls = strdup("app");
+        e.label = wm_title(dpy, w);
         e.icon  = icon_load(dpy, w, THEME_ICON_PX);
         push(l, &e);
     }
-    free(wins);
 
-    /* Rotate so the app that has focus is first; the initial selection is
-     * then index 1, which is the next app — Windows/macOS semantics, where a
-     * single Alt+Tab has already moved you one step. */
-    if (l->n > 1) {
-        int at = -1;
-        for (int i = 0; i < l->n; i++)
-            if (l->v[i].xid == focus_xid) { at = i; break; }
-        if (at > 0) {
-            entry_t *tmp = malloc((size_t)l->n * sizeof(entry_t));
-            for (int i = 0; i < l->n; i++) tmp[i] = l->v[(at + i) % l->n];
-            free(l->v);
-            l->v = tmp;
-        }
-    }
+    free(live);
     return l;
 }
 
-void wm_apps_free(elist_t *l)
+void wm_entries_free(elist_t *l)
 {
     if (!l) return;
     for (int i = 0; i < l->n; i++) {
@@ -101,37 +124,5 @@ void wm_apps_free(elist_t *l)
         if (l->v[i].icon) cairo_surface_destroy(l->v[i].icon);
     }
     free(l->v);
-    free(l);
-}
-
-/* ── --within: the windows of one app, for Alt+backtick ───────────────────── */
-
-wlist_within_t *wm_windows_of(Display *dpy, Window root, const char *cls)
-{
-    wlist_within_t *l = calloc(1, sizeof *l);
-    unsigned long n = 0;
-    Window *wins = wm_stacking(dpy, root, &n);
-    if (!wins) return l;
-    for (unsigned long k = 0; k < n; k++) {
-        char *c = wm_class(dpy, wins[k]);
-        if (c && cls && strcmp(c, cls) == 0) {
-            l->v = realloc(l->v, (size_t)(l->n + 1) * sizeof(Window));
-            l->title = realloc(l->title, (size_t)(l->n + 1) * sizeof(char *));
-            l->v[l->n] = wins[k];
-            l->title[l->n] = wm_title(dpy, wins[k]);
-            l->n++;
-        }
-        free(c);
-    }
-    free(wins);
-    return l;
-}
-
-void wm_within_free(wlist_within_t *l)
-{
-    if (!l) return;
-    for (int i = 0; i < l->n; i++) free(l->title[i]);
-    free(l->v);
-    free(l->title);
     free(l);
 }

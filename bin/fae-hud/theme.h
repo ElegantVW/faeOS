@@ -21,7 +21,8 @@
 
 /* all-mono type, house rule. Icons are images, so nothing here bends it. */
 #define THEME_FONT       "DejaVu Sans Mono"
-#define THEME_SIZE_LABEL 12
+#define THEME_SIZE_LABEL 11
+#define THEME_SIZE_TITLE 13
 #define THEME_SIZE_META  10
 
 #define THEME_STR_(x) #x
@@ -37,11 +38,12 @@
 #define THEME_ROW_TOP_FRACTION 0.20
 #define THEME_ICON_PX       64      /* icon size, and the _NET_WM_ICON target */
 #define THEME_ICON_SEL_SCALE 1.15   /* the constant box; artwork scales inside it */
-#define THEME_CELL_W        92      /* icon box + gaps: the per-entry stride  */
+#define THEME_CELL_W        132  /* ~16 chars of row label */      /* icon box + gaps: the per-entry stride  */
 #define THEME_PAD_X         18
 #define THEME_PAD_Y         16
 #define THEME_RADIUS        18
 #define THEME_LABEL_GAP     7
+#define THEME_RULE_GAP      9
 #define THEME_GLOW_STEPS    3
 #define THEME_FACET_R       4
 #define THEME_FACET_INSET   12

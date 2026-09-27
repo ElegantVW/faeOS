@@ -16,8 +16,8 @@ LDLIBS   = $(shell pkg-config --libs $(PKGS))
 
 PREFIX  ?= $(HOME)/bin
 BIN      = fae-hud
-SRC      = main.c wm.c hud.c hold.c entry.c icon.c
-HDR      = wm.h hud.h theme.h
+SRC      = main.c wm.c hud.c hold.c entry.c icon.c mru.c
+HDR      = wm.h hud.h theme.h hold.h entry.h icon.h mru.h
 
 all: $(BIN)
 
