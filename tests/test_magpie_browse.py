@@ -457,7 +457,13 @@ class AIBarTests(unittest.TestCase):
         b.navigate("magpie:help")
         tab = b.tab
         key = ("test-img", 60)
-        b.loader.request({"kind": "image", "url": "file:///home/evenweaker/faeOS/assets/wall.png",
+        # A PNG tracked in this repo, resolved relative to the test file. It
+        # used to be an absolute path into this machine's home directory, which
+        # both leaked the username into a public repo (audit F-5) and made the
+        # test fail on every machine that did not have that exact wallpaper.
+        png = Path(__file__).resolve().parent.parent / "assets/plymouth/faeos/crystal.png"
+        self.assertTrue(png.is_file(), f"fixture missing: {png}")
+        b.loader.request({"kind": "image", "url": png.as_uri(),
                           "width": 60, "key": key, "tab": tab})
         deadline = time.monotonic() + 15.0
         while key not in tab.img_cache and time.monotonic() < deadline:

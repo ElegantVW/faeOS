@@ -26,7 +26,11 @@ silently no-ops. All three fixed.
   `src/spectrum.rs` and no integration coverage.** The content pipeline is
   unaffected: `tools/content/make.sh:96,101,102` and `shots.yaml:35` all
   invoke `~/bin/siren`, the launcher.
-- **Four systemd units no longer hardcode `/home/evenweaker/`.**
+- **Four systemd units no longer hardcode an absolute home path.** (The path
+  itself is deliberately not repeated here: this is a public repository and the
+  2026-09-27 exposure audit's re-audit criterion is that no absolute home path
+  appears in any public repo. The evidence is preserved in the audit report and
+  in this repository's git history.)
   `ether-bridge.service:8`, `goblin-idle.service:8`, `goblin-sync.service:7`
   and `kur-server.service:6` used absolute paths while the other four already
   used `%h`, and `install.sh:106` copies them verbatim — so

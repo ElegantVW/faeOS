@@ -37,10 +37,14 @@ class TestPathHelpers(unittest.TestCase):
         self.assertEqual(crumbs, [("/", Path("/"))])
 
     def test_path_crumbs_nested(self):
-        crumbs = sb.path_crumbs(Path("/home/evenweaker/bin"))
-        self.assertEqual([label for label, _ in crumbs], ["/", "home", "evenweaker", "bin"])
-        self.assertEqual(crumbs[-1][1], Path("/home/evenweaker/bin"))
-        self.assertEqual(crumbs[1][1], Path("/home"))
+        # A fixture path, same depth as before. It used to be this machine's
+        # real home directory, which leaked the username into a public repo
+        # (audit F-5) and made the test read as if it were about the operator
+        # rather than about breadcrumb splitting.
+        crumbs = sb.path_crumbs(Path("/srv/faeos/bin"))
+        self.assertEqual([label for label, _ in crumbs], ["/", "srv", "faeos", "bin"])
+        self.assertEqual(crumbs[-1][1], Path("/srv/faeos/bin"))
+        self.assertEqual(crumbs[1][1], Path("/srv"))
 
     def test_clean_pasted_path_quotes_and_newline(self):
         self.assertEqual(sb.clean_pasted_path('  "/tmp/foo"\nextra\n'), "/tmp/foo")
@@ -125,10 +129,10 @@ class TestFileManagerPathBar(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             fm = sb.FileManager(start_path=raw)
             fm._begin_path_edit()
-            fm.path_buf = "/home/evenweaker/bin"
+            fm.path_buf = "/srv/faeos/bin"
             fm.path_caret = len(fm.path_buf)
             fm._handle_path_edit_key("ctrl-w")
-            self.assertEqual(fm.path_buf, "/home/evenweaker/")
+            self.assertEqual(fm.path_buf, "/srv/faeos/")
             fm._handle_path_edit_key("esc")
             self.assertFalse(fm.path_editing)
 
