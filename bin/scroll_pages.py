@@ -99,7 +99,6 @@ PAGES: list[AppPage] = [
         ],
         cli=[
             ("summon", "PATH launcher TUI"),
-            ("summon <filter>", "PATH TUI pre-filtered"),
             ("summon -x <cmd> [args…]", "Exec first match (no TUI)"),
             ("summon --list", "Dump every PATH name"),
             ("summon --refresh", "Rescan $PATH cache (~6h TTL)"),
@@ -827,6 +826,51 @@ PAGES: list[AppPage] = [
         ],
         runes=[B()],
     ),
+    AppPage(
+        id="switcher",
+        name="Switcher",
+        domain="System",
+        tagline="Alt+Tab window switcher — one held gesture, one panel.",
+        intro=[
+            "✦ Switcher ✦ walks your windows. Hold Alt, tap Tab, let go to",
+            "land — one fae-hud panel holds the whole gesture, newest first.",
+            "fae-cascade keeps new windows from landing in one stack, and",
+            "i3-rescue stands watch so a dead i3 never strands the session.",
+        ],
+        how=[
+            "Alt+Tab — hold Alt, tap Tab to walk, release to land.",
+            "fae-cycle next|prev — same walk for scripts (Mod1+c).",
+            "Binding never fired? Check $XDG_RUNTIME_DIR/fae-cycle.log —",
+            "it tells 'never fired' apart from 'fired and unseen'.",
+        ],
+        cli=[
+            ("fae-cycle", "Walk windows forward (scripting)"),
+            ("fae-cycle prev", "Walk windows backward"),
+            ("fae-hud --cycle", "Hold the switcher panel (Alt+Tab runs this)"),
+        ],
+        runes=[R("cycle next", "fae-cycle next"), B()],
+    ),
+    AppPage(
+        id="tv",
+        name="TV",
+        domain="System",
+        tagline="CRT shader for kitty — scanlines on demand.",
+        intro=[
+            "✦ TV ✦ puts glass over kitty: a picom CRT shader with scanlines.",
+            "The choice persists — tv edits the picom config and restarts the",
+            "compositor, so the tube stays lit across sessions until you say off.",
+        ],
+        how=[
+            "`tv on` — light the tube · `tv off` — back to clean pixels.",
+            "Bare `tv` (or `tv status`) reports the current state.",
+        ],
+        cli=[
+            ("tv on", "Enable CRT shader for kitty"),
+            ("tv off", "Disable it again"),
+            ("tv status", "Report current state (same as bare tv)"),
+        ],
+        runes=[R("on", "tv on"), R("off", "tv off"), B()],
+    ),
     # Hermetic / egg pages are not in PAGES — built by curriculum() at runtime.
 ]
 
@@ -866,6 +910,8 @@ CURRICULUM: list[str] = [
     "rift",
     "mourama",
     "grove",
+    "switcher",
+    "tv",
     # then: hermetic OR kur (runtime), then PATH
 ]
 
@@ -939,6 +985,7 @@ def kur_page() -> AppPage:
         how=[
             'kur "the kettle sings" — he answers in three lines.',
             "menagerie ensure kur — wake his pen if he sleeps.",
+            "His voice arrives clean — thought-traces are stripped first.",
             "He is no longer a riddle. Use him gently.",
         ],
         cli=[
