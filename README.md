@@ -8,6 +8,8 @@ Part of [ElegantVW](docs/elegantvw.md) — the pink offline-first house (fire �
 
 Works on **Linux** (Arch + kmscon tested). **Source-only kit** — scripts, shell hooks, configs, and thin launchers. Rust engines (Bulwark, Fairy Lantern, Seal, …) are built on the machine; see [docs/engines.md](docs/engines.md).
 
+For: offline terminal life on your own box. Not for: macOS/Windows, cloud sync.
+
 Single main plan: [faeOSplan.md](faeOSplan.md). Per-app plans: [docs/plans/](docs/plans/). Design: [docs/design.md](docs/design.md). CLI voice: [docs/cli-voice.md](docs/cli-voice.md).
 
 **Terminal-first:** keyboard and CLI remain the hero path; mouse on TUIs is optional sugar. Pink crystal frames (`fae_termart`) unify the look.
@@ -65,7 +67,7 @@ cd ~/faeos && ./install.sh --build --build-engines
 | `menagerie status all` / `set <app> <model>` / `models` / `budget` | Which model each app uses, switching, add/remove models |
 | `siren` | Interactive media player TUI (arrow keys) |
 | `siren play` / `next` / `prev` / `stop` / `pause` / `now` | Music controls (recursive `~/Music`) |
-| `siren trove 10 music lofi` | Free & legal media (Internet Archive) |
+| `siren trove music lofi` | Free & legal media (Internet Archive) |
 | `siren trove get <id>` | Download one archive item to `~/Music/trove` / `~/Videos/trove` |
 | `magpie …` / `duck …` | Privacy search via DuckDuckGo (`duck` → magpie); `magpie browse` opens the TUI browser |
 | `kur` | Haiku bard (local LLM + TTS voice) |
@@ -129,7 +131,7 @@ imp 8082 · kur 8081), bound to a model of its own — switch with
 
 ## Notes
 
-- Music uses **mpv** IPC at `/tmp/siren-mpv.sock` (prompt + tick integration).
+- Music uses **mpv** IPC at `/tmp/siren-mpv.sock` (prompt + tick integration). Follow pins Siren music to Cave over speaker LAN (`:8899`); headset stays analog. Ether is networking — Siren reads `~/.config/ether/heos.json`.
 - Mail uses **goblin** (`~/.cache/goblin/mail`); instant push: `systemctl --user enable --now goblin-idle.service`.
 - Archive.org needs working **IPv4 HTTPS** on many ISPs; `ether net` diagnoses.
 - kmscon-friendly flags: `PIXIE_NO_AUTOSUGGEST=1`, `termfix`.
