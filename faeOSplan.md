@@ -1,7 +1,7 @@
 # FaeOS Plan
 
-**Last updated:** 2026-09-24
-**Status:** Suite-on-Arch standing up; long track is our own kernel + this userspace
+**Last updated:** 2026-10-10
+**Status:** Suite-on-Arch standing up; Kindling boots; long track is this suite as its guest
 **Location:** This file is the *single* main plan. Each app has its own short plan in `docs/plans/`; this file stays concise.
 
 **Engines:** Bulwark and Fairy Lantern are **external** source-only repos (`ElegantVW/bulwark`, `ElegantVW/fairy-lantern`). In-tree Rust (`seal`, `hearth`, `rift`) is also built on the machine — no prebuilt ELFs in git. Contract: [docs/engines.md](docs/engines.md).
@@ -11,7 +11,7 @@
 **faeOS — a complete OS.** The suite on this Arch box is the fast house (CLI/TUI, pink, `scroll`). The product is a **kernel we write**, with that suite as userspace.
 
 - Today: terminal apps, discoverable via `scroll`, privacy-first, offline-first (local LLM, local mail, no telemetry).
-- Next long track: own kernel (`~/fae-kernel`, proposed name **Cerne**). Until it boots, daily life stays this suite on Arch.
+- Next long track: own kernel (`~/fae-kernel`, **Kindling**). It boots (QEMU + iron). Daily life stays this suite on Arch until the suite is a guest.
 - An Arch ISO / RK3588 image is a shortcut, not the end.
 
 ## Principles (never broken)

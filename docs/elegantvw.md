@@ -20,9 +20,11 @@ Source-only: every engine builds on your machine with `./build.sh install`.
 ## Honesty statement
 
 - Working: terminal suite, firewall ward + lock, GBA boots/saves/fights,
-  mail TUI, music local + speakers, agent stack, hillfort tick, kernel phase 1.
+  mail TUI, music local + speakers, agent stack, hillfort tick,
+  Kindling house light (hall, Gleam sparks, pane TUI on iron).
 - Holes: no cold professional review yet, hearth/rift incomplete,
-  fairy-lantern is not mGBA-class, kernel has no userspace.
+  fairy-lantern is not mGBA-class, kernel has no Linux userspace
+  (`grant` shut; the suite is not yet a guest).
 - No claim of nation-state defense, antivirus, or professional sign-off
   until the adversarial cards pass with SHAs.
 
