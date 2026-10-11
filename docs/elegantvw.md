@@ -8,7 +8,7 @@ prebuilt blobs you can't rebuild.
 
 | Layer | What | Repos |
 |-------|------|-------|
-| Fire | Firmware + kernel we write (Kindling) | [fae-kernel](https://github.com/ElegantVW/fae-kernel) |
+| Fire | Firmware + kernel we write (Kindling) | [kindling](https://github.com/ElegantVW/kindling) |
 | Glass | Screen lock + guest + terminal | [bulwark](https://github.com/ElegantVW/bulwark) (`glass/`), faeOS `hearth/`, `rift/` (incomplete) |
 | House | Firewall ward, local AI agent, music, mail, emulator, hillfort game, haiku dragon | [bulwark](https://github.com/ElegantVW/bulwark) (`house/`), [pixie](https://github.com/ElegantVW/pixie), [siren](https://github.com/ElegantVW/siren), [goblin](https://github.com/ElegantVW/goblin), [fairy-lantern](https://github.com/ElegantVW/fairy-lantern), [mourama](https://github.com/ElegantVW/mourama), [kur](https://github.com/ElegantVW/kur) |
 | Suite | Pink terminal kit that ties it together | [faeOS](https://github.com/ElegantVW/faeOS) |

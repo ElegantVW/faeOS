@@ -1,6 +1,6 @@
 # Sigils — one mark per app, pixels in the 16
 
-House law (from `fae-kernel/docs/identity/IDENTITY.md`): the identity must
+House law (from `kindling/docs/identity/IDENTITY.md`): the identity must
 survive VGA text, serial ANSI, and a dumb 16-color terminal. Sources are
 CP437-safe text. PNGs are derived, never the source of truth.
 
@@ -8,7 +8,7 @@ CP437-safe text. PNGs are derived, never the source of truth.
 
 | App | Sigil | Accent |
 |-----|-------|--------|
-| Kindling | `fae-kernel/docs/identity/logo.txt` (the struck flame, keep) | Lilac 13 (`95`) |
+| Kindling | `kindling/docs/identity/logo.txt` (the struck flame, keep) | Lilac 13 (`95`) |
 | Bulwark house | `bulwark/assets/sigils/house.txt` (battlements) | Gold 14 (`93`) |
 | Seal glass | `bulwark/assets/sigils/glass.txt` (padlock) | Ice 11 (`96`) |
 | Pixie | `pixie/assets/sigils/pixie.txt` (spark) | Rose 4 (`31`) |

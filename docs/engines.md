@@ -72,11 +72,11 @@ cd ~/faeos && ./install.sh --build --build-engines
 | Seal | X11 + PAM stack | lock face cannot grab/auth |
 | Pixie stack | `*.gguf` models on disk | every app refuses; installer warns |
 | Kur | menagerie (mind :8081) + kur-server (pen :8083) | quiet pen; `./install.sh --with-menagerie` fetches the mind |
-| Siren | mpv (local), minidlna + LAN HEOS (cast) | installer warns; cast needs the LAN |
+| Siren | mpv (local); follow needs speaker LAN + `:8899`; Ether writes `~/.config/ether/heos.json` | installer warns; cast needs LAN HEOS + minidlna |
 | Goblin | TLS network; OS keyring or `0600` secrets file | summon guides; never in JSON/logs |
 | Fairy Lantern | `pw-cat` or `aplay`; user-supplied ROMs | sine fallback; no ROMs in git |
 | Mourama | LAN/Tailscale; `:4747` stays off the internet | single-player against yourself |
-| fae-kernel | nasm, qemu, edk2-ovmf, nightly Rust | build fails loud at `make` |
+| kindling | nasm, qemu, edk2-ovmf, nightly Rust | build fails loud at `make` |
 
 Standalone repo installs must fail loud with `next:` — never silently half-work.
 
