@@ -2,6 +2,8 @@
 
 # FaeOS 🌸
 
+Homepage (front door): `https://elegantvw.github.io/grove/` — this repo is the kit it serves.
+
 A pink, **offline-first** terminal ecosystem: framed status prompt, local **Pixie** agent (llama.cpp), **Siren** media player, **Kur** haiku bard, **Scry** history, **Ether** network weaves, **Magpie** privacy search — all wrapped in a cute fae-colored status box.
 
 Part of [ElegantVW](docs/elegantvw.md) — the pink offline-first house (fire → glass → house → suite).
