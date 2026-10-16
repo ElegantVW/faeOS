@@ -31,7 +31,7 @@
 | **Spellbook** | File manager (TUI) | stable | [docs/plans/spellbook.md](docs/plans/spellbook.md) |
 | **Ether** | Network manager (bt/wifi/lan, veil VPN, bridge hotspot) | stable | [docs/plans/ether.md](docs/plans/ether.md) |
 | **Siren** | Media player (single-file v2: mpv, fuzzy search, queue, playlists, config, trove) | stable | [docs/plans/siren.md](docs/plans/siren.md) |
-| **Pixie** | Local AI assistant with tools (qwen3-4b) | stable | [docs/plans/pixie.md](docs/plans/pixie.md) |
+| **Pixie** | Local AI assistant with tools (Rust engine) | stable | [docs/plans/pixie.md](docs/plans/pixie.md) |
 | **Kur** | Haiku dragon — **easter egg, hidden from scroll** | stable | [docs/plans/kur.md](docs/plans/kur.md) |
 | **Imp** | Terminal art generator (pixie-art lineage) | stable (TUI + CLI; tests) | [docs/plans/imp.md](docs/plans/imp.md) |
 | **Goblin** | Mail (aerc IMAP → local text, IDLE push) | stable | [docs/plans/goblin.md](docs/plans/goblin.md) |

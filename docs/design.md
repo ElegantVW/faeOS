@@ -43,8 +43,8 @@ Always disable mouse in `tui_cleanup`. Shift+drag stays with the terminal for te
 
 | Tier | When | Examples |
 |------|------|----------|
-| Rust | privilege, speed, long-running | Bulwark, Seal, Fairy-Lantern, Wisp, Hearth, Rift |
-| Python | house TUIs, glue | Siren, Imp, Spellbook, Scroll… |
+| Rust | privilege, speed, long-running | Bulwark, Seal, Fairy-Lantern, Wisp, Hearth, Rift, Siren, Pixie |
+| Python | house TUIs, glue | Imp, Spellbook, Scroll, menagerie… |
 
 Stay lean (suite ≪ 100 MB). No big-bang rewrite.
 

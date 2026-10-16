@@ -12,6 +12,7 @@ This page is the canonical integration contract for:
 | **Fairy Lantern** | `ElegantVW/fairy-lantern` → `~/fairy-lantern` | `fairy` / `fairy-lantern` |
 | **Hearth** | in-tree `faeos/hearth` (incomplete) | `hearth` |
 | **Rift** | in-tree `faeos/rift` (incomplete) | `rift` |
+| **Pixie** | `ElegantVW/pixie` → `~/pixie` | `pixie` |
 
 ## Paths
 
