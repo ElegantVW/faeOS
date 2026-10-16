@@ -7,7 +7,7 @@
 ## Current
 
 - Engine: ELF `~/.local/lib/faeos/spellbook`, launcher `~/bin/spellbook`. Build: `cd ~/spellbook && ./build.sh install --house`.
-- Event-driven ratatui (no 10 Hz full-screen paint, listing cached until the shelf changes).
+- Event-driven ratatui (no 10 Hz full-screen paint, listing cached until the shelf changes). Kind tints, light `▸` focus, click/double-click/wheel.
 - `spellbook [dir]` — TUI: j/k/↑↓ move, l/o/enter open, h parent, ? help, s sort, . hidden, n/d/r/e in-TUI prompts
 - `spellbook --pick --output <file> [dir]` — shared file picker
 - Location bar: breadcrumbs (click a crumb); **Ctrl+L** / **:** to type a path; **y** yank / **Y** yank shelf via `imbue`; **P** paste-go
