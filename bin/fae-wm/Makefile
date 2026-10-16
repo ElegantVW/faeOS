@@ -1,0 +1,39 @@
+# fae-wm — the house window manager.
+#
+# Floating-first, EWMH-serving, X11. The Alt+Tab switcher from fae-hud is
+# built in and reads the WM's own focus stack: exact recency, mouse clicks
+# included, no ring file, no grab races.
+#
+#   make            build ./fae-wm
+#   make install    copy to ~/bin
+#   make clean
+
+CC      ?= gcc
+CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter
+PKGS     = x11 cairo pangocairo
+CFLAGS  += $(shell pkg-config --cflags $(PKGS))
+LDLIBS   = $(shell pkg-config --libs $(PKGS))
+
+PREFIX  ?= $(HOME)/bin
+BIN      = fae-wm
+SRC      = main.c config.c ewmh.c client.c frame.c dock.c panel.c wm.c
+HDR      = config.h ewmh.h client.h frame.h dock.h panel.h wm.h theme.h dock_geom.h
+
+all: $(BIN)
+
+$(BIN): $(SRC) $(HDR)
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
+
+test: test_dock
+	./test_dock
+
+test_dock: test_dock.c dock_geom.h
+	$(CC) $(CFLAGS) -o $@ test_dock.c
+
+install: $(BIN)
+	install -Dm755 $(BIN) $(PREFIX)/$(BIN)
+
+clean:
+	rm -f $(BIN) test_dock
+
+.PHONY: all install clean test
