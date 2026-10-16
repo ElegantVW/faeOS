@@ -15,6 +15,8 @@
 #include "frame.h"
 #include "panel.h"
 #include "dock.h"
+#include "help.h"
+#include "tile.h"
 #include "theme.h"
 
 #include <errno.h>
@@ -139,12 +141,15 @@ static void do_focus_arg(const char *arg)
 static void do_nudge_arg(client_t *c, const char *arg)
 {
     int dx = 0, dy = 0;
-    if (!strcmp(arg, "left")) dx = -WM_NUDGE;
-    else if (!strcmp(arg, "right")) dx = WM_NUDGE;
-    else if (!strcmp(arg, "up")) dy = -WM_NUDGE;
-    else if (!strcmp(arg, "down")) dy = WM_NUDGE;
+    if (!strcmp(arg, "left")) dx = -1;
+    else if (!strcmp(arg, "right")) dx = 1;
+    else if (!strcmp(arg, "up")) dy = -1;
+    else if (!strcmp(arg, "down")) dy = 1;
     else return;
-    client_nudge(&W, c, dx, dy);
+    if (c && !c->floated && !c->fullscreen)
+        tile_swap_dir(&W, c, dx, dy);
+    else
+        client_nudge(&W, c, dx * WM_NUDGE, dy * WM_NUDGE);
 }
 
 static void run_bind(const bind_t *b)
@@ -167,6 +172,11 @@ static void run_bind(const bind_t *b)
         if (getenv("FAE_WM_VERBOSE")) fprintf(stderr, "fae-wm: resize mode\n");
         break;
     case ACT_PRESET:     do_preset(c, b->arg); break;
+    case ACT_HELP:       help_toggle(&W); break;
+    case ACT_SPLIT:
+        tile_set_split(b->arg && !strcmp(b->arg, "vertical"));
+        break;
+    case ACT_FLOAT:      tile_toggle_float(&W, c); break;
     case ACT_RELOAD:     /* handled by main loop: re-exec ourselves */ break;
     case ACT_QUIT:       break;
     }
@@ -176,7 +186,7 @@ static void run_bind(const bind_t *b)
 static int resize_key(KeySym ks)
 {
     client_t *c = W.focus;
-    if (!c || c->fullscreen) return 0;
+    if (!c || c->fullscreen || !c->floated) return 0;
     int dx = 0, dy = 0, dw = 0, dh = 0;
     switch (ks) {
     case XK_j: case XK_Left:  dw = -WM_RESIZE_STEP; break;
@@ -417,6 +427,15 @@ static void on_keypress(XKeyEvent *ev)
     KeySym ks = XLookupKeysym(ev, 0);
     unsigned state = ev->state;
 
+    if (help_visible()) {
+        const bind_t *hb = match_bind(state, ks);
+        if (ks == XK_Escape || (hb && hb->act == ACT_HELP)) {
+            help_hide(&W);
+            return;
+        }
+        if (ks == XK_Escape) return;
+    }
+
     /* Alt+Tab belongs to the switcher, always. */
     if (ev->keycode == XKeysymToKeycode(W.dpy, XK_Tab) &&
         (state & Mod1Mask) && !(state & (Mod4Mask | ControlMask))) {
@@ -567,6 +586,7 @@ static void on_expose(XExposeEvent *ev)
     client_t *c = frame_client(&W, ev->window);
     if (c) { frame_paint(&W, c); return; }
     if (ev->window == dock_win(&W)) dock_refresh(&W);
+    if (help_is_win(ev->window)) help_expose(&W);
 }
 
 static void on_map_request(XMapRequestEvent *ev)
@@ -782,6 +802,7 @@ int wm_run(Display *dpy, int scr, config_t *cfg)
         }
         if (FD_ISSET(wake_pipe[0], &fds)) break;
         dock_tick(&W);
+        tile_tick(&W);
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);

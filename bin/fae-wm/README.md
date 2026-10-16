@@ -23,14 +23,15 @@ Alt+Tab opens the panel (pre-stepped one), Tab walks forward (hold to
 skim), Shift+Tab walks back with either Shift, Esc cancels silently,
 releasing Alt commits. A tap steps once.
 
-Keys (defaults mirror the old i3 setup; all rebindable, see Config):
+Keys (rebindable, see Config):
 
-- `Mod4+Return` terminal · `Mod4+d/z` rofi · `Mod4+Shift+q` close
-- `Mod4+f` fullscreen · `Mod4+j/k/l/;` + arrows directional focus
-- `Mod4+Shift+j/k/l/;` nudge window · `Mod4+r` resize mode
-- `Mod4+Ctrl+arrows` geometry presets · `Mod4+1..0` workspaces
-- `Mod4+Shift+1..0` send to workspace · `Mod4+Shift+c` reload config
-- Click focuses+raises · `Mod4+drag` moves · `Mod4+right-drag` resizes
+- `Super+h` help overlay
+- `Super+Shift+q` close · `Super+m` minimize · `Super+Shift+f` maximize · `Super+f` fullscreen
+- `Super+v` / `Super+s` next split stacked / side-by-side
+- `Super+Shift+Space` float / tile
+- `Super+j/k/l/;` focus · `Super+Shift+j/k/l/;` swap (tiled) or nudge (float)
+- `Super+Return` terminal · `Super+1..0` workspaces
+- Click focuses+raises · `Super+drag` moves · `Super+right-drag` resizes (float)
 
 ## Config
 
@@ -58,10 +59,8 @@ what it loaded.
 
 ## Design rules
 
-- **Floating everywhere.** New windows cascade instead of stacking exactly;
-  `fae-cascade` retires under this WM (it only ever nudged opens).
-- **Border-only frames.** No titlebars, no frame windows to desync; the
-  border is the whole chrome.
+- **Tiling by default.** Binary split per workspace; dialogs float. Super+Shift+Space toggles.
+- **Border-only frames.** No titlebar. Focus is a 2 px pink border. Fullscreen has none.
 - **EWMH served, never depended on.** Client list, stacking, active window,
   desktops, fullscreen state, close semantics — published for bars, pagers
   and scripts. Our own focus stack is internal and exact.

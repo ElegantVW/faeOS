@@ -109,7 +109,8 @@ static action_t action_of(const char *s)
         { "move", ACT_NUDGE }, { "workspace", ACT_WORKSPACE },
         { "toworkspace", ACT_TOWORKSPACE }, { "resize-mode", ACT_RESIZE_MODE },
         { "preset", ACT_PRESET }, { "reload", ACT_RELOAD },
-        { "quit", ACT_QUIT },
+        { "quit", ACT_QUIT }, { "help", ACT_HELP },
+        { "split", ACT_SPLIT }, { "float", ACT_FLOAT },
     };
     for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
         if (!strcmp(s, tab[i].name)) return tab[i].act;
@@ -121,7 +122,7 @@ static int is_action(const char *s)
     static const char *names[] = { "exec", "close", "fullscreen", "maximize",
         "minimize", "focus",
         "move", "workspace", "toworkspace", "resize-mode", "preset",
-        "reload", "quit", NULL };
+        "reload", "quit", "help", "split", "float", NULL };
     for (int i = 0; names[i]; i++) if (!strcmp(s, names[i])) return 1;
     return 0;
 }
@@ -174,6 +175,10 @@ static void defaults(config_t *c)
         { "Mod4+Shift+8", "toworkspace", "8" },
         { "Mod4+Shift+9", "toworkspace", "9" },
         { "Mod4+Shift+0", "toworkspace", "10" },
+        { "Mod4+h", "help", "" },
+        { "Mod4+v", "split", "vertical" },
+        { "Mod4+s", "split", "horizontal" },
+        { "Mod4+Shift+space", "float", "" },
         { "Mod4+Shift+c", "reload", "" },
         { "Mod4+Shift+e", "quit", "" },
     };

@@ -16,8 +16,8 @@ LDLIBS   = $(shell pkg-config --libs $(PKGS))
 
 PREFIX  ?= $(HOME)/bin
 BIN      = fae-wm
-SRC      = main.c config.c ewmh.c client.c frame.c dock.c panel.c wm.c
-HDR      = config.h ewmh.h client.h frame.h dock.h panel.h wm.h theme.h dock_geom.h
+SRC      = main.c config.c ewmh.c client.c frame.c dock.c panel.c wm.c tile.c help.c
+HDR      = config.h ewmh.h client.h frame.h dock.h panel.h wm.h theme.h dock_geom.h tile.h tile_geom.h help.h
 
 all: $(BIN)
 
@@ -27,13 +27,13 @@ $(BIN): $(SRC) $(HDR)
 test: test_dock
 	./test_dock
 
-test_dock: test_dock.c dock_geom.h
+test_dock: test_dock.c dock_geom.h tile_geom.h
 	$(CC) $(CFLAGS) -o $@ test_dock.c
 
 install: $(BIN)
 	install -Dm755 $(BIN) $(PREFIX)/$(BIN)
 
 clean:
-	rm -f $(BIN) test_dock
+	rm -f $(BIN) test_dock test_dock
 
 .PHONY: all install clean test

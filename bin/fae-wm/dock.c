@@ -22,6 +22,7 @@
 #include "theme.h"
 #include "wm.h"
 #include "ewmh.h"
+#include "tile.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -139,6 +140,9 @@ static Pixmap dock_pix = None;
 static cairo_surface_t *dock_surf = NULL;
 static GC dock_gc = None;
 static int pix_w, pix_h;
+static Visual *dock_vis;
+static int dock_depth;
+static Colormap dock_cmap;
 static int dock_x, dock_y, dock_ww, dock_hh;
 static int dock_hover_idx = -1;
 static int dock_shown = 0;
@@ -288,11 +292,10 @@ static int dock_buffer_ok(Display *dpy, int w, int h)
     if (dock_pix != None && pix_w == w && pix_h == h && dock_surf)
         return 1;
     dock_buffer_free(dpy);
-    dock_pix = XCreatePixmap(dpy, dock_w, (unsigned)w, (unsigned)h,
-                             (unsigned)DefaultDepth(dpy, DefaultScreen(dpy)));
-    dock_surf = cairo_xlib_surface_create(dpy, dock_pix,
-                                          DefaultVisual(dpy, DefaultScreen(dpy)),
-                                          w, h);
+    int depth = dock_depth ? dock_depth : DefaultDepth(dpy, DefaultScreen(dpy));
+    Visual *vis = dock_vis ? dock_vis : DefaultVisual(dpy, DefaultScreen(dpy));
+    dock_pix = XCreatePixmap(dpy, dock_w, (unsigned)w, (unsigned)h, (unsigned)depth);
+    dock_surf = cairo_xlib_surface_create(dpy, dock_pix, vis, w, h);
     pix_w = w;
     pix_h = h;
     if (dock_gc == None)
@@ -355,15 +358,39 @@ static void dock_paint(wm_t *wm)
         memset(&attr, 0, sizeof attr);
         attr.override_redirect = True;
         attr.background_pixel = 0;
-        attr.colormap = DefaultColormap(dpy, scr);
+        attr.border_pixel = 0;
         attr.backing_store = WhenMapped;
         attr.event_mask = ExposureMask | PointerMotionMask |
                        ButtonPressMask | ButtonReleaseMask;
+        int depth = DefaultDepth(dpy, scr);
+        Visual *vis = DefaultVisual(dpy, scr);
+        unsigned vmask = CWOverrideRedirect | CWBackPixel | CWBorderPixel |
+                         CWEventMask | CWBackingStore;
+        XVisualInfo tpl;
+        memset(&tpl, 0, sizeof tpl);
+        tpl.screen = scr;
+        tpl.depth = 32;
+        tpl.class = TrueColor;
+        int nvi = 0;
+        XVisualInfo *vi = XGetVisualInfo(dpy,
+            VisualScreenMask | VisualDepthMask | VisualClassMask, &tpl, &nvi);
+        if (vi && nvi > 0) {
+            vis = vi[0].visual;
+            depth = 32;
+            dock_vis = vis;
+            dock_depth = 32;
+            dock_cmap = XCreateColormap(dpy, DefaultRootWindow(dpy), vis, AllocNone);
+            attr.colormap = dock_cmap;
+            vmask |= CWColormap;
+            XFree(vi);
+        } else {
+            attr.colormap = DefaultColormap(dpy, scr);
+            vmask |= CWColormap;
+            if (vi) XFree(vi);
+        }
         dock_w = XCreateWindow(dpy, DefaultRootWindow(dpy), px, target_y,
                                (unsigned)want_w, (unsigned)want_h, 0,
-                               CopyFromParent, InputOutput, CopyFromParent,
-                               CWOverrideRedirect | CWBackPixel | CWColormap |
-                               CWEventMask | CWBackingStore, &attr);
+                               depth, InputOutput, vis, vmask, &attr);
         Atom wtype = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
         XChangeProperty(dpy, dock_w, XInternAtom(dpy, "_NET_WM_WINDOW_TYPE",
                                                 False), XA_ATOM, 32,
@@ -407,13 +434,15 @@ static void dock_paint(wm_t *wm)
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-    /* Glass shelf — pill at the bottom of the window. */
-    round_rect(cr, 0, shelf_y, want_w, want_h - shelf_y, 18);
-    cairo_set_source_rgb(cr, bg.r, bg.g, bg.b);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.45);
-    cairo_set_line_width(cr, 1.0);
-    cairo_stroke(cr);
+    /* No filled plate — wells sit on glass. Hairline only if we lack ARGB. */
+    if (dock_depth != 32) {
+        round_rect(cr, 0, shelf_y, want_w, want_h - shelf_y, 18);
+        cairo_set_source_rgb(cr, bg.r, bg.g, bg.b);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.45);
+        cairo_set_line_width(cr, 1.0);
+        cairo_stroke(cr);
+    }
 
     long now = now_ms();
 
@@ -629,7 +658,14 @@ void dock_tick(wm_t *wm)
     int rx, ry, wx, wy;
     unsigned mask = 0;
     XQueryPointer(wm->dpy, wm->root, &rr, &cr, &rx, &ry, &wx, &wy, &mask);
-    dock_edge(wm, rx, ry);
+    if (tile_desk_fullscreen(wm)) {
+        if (dock_shown) {
+            dock_shown = 0;
+            dock_hide_at = 0;
+        }
+    } else {
+        dock_edge(wm, rx, ry);
+    }
 
     int target = dock_y;
     if (!dock_shown)

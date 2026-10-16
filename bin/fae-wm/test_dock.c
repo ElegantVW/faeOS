@@ -1,5 +1,6 @@
 /* test_dock.c — hotspot / dwell / labels. No X. */
 #include "dock_geom.h"
+#include "tile_geom.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -47,6 +48,15 @@ int main(void)
     ok(dock_hover_scale(0) > 0.99 && dock_hover_scale(0) < 1.01, "scale at rest is 1");
     ok(dock_hover_scale(1) > 1.21 && dock_hover_scale(1) < 1.23, "scale at 1 is 1.22");
     ok(dock_hover_scale(0.5) > 1.0 && dock_hover_scale(0.5) < 1.22, "scale eases in between");
+
+    int ax, ay, aw, ah, bx, by, bw, bh;
+    tile_split_rect(0, 0, 200, 100, 4, 0, 0.5, &ax, &ay, &aw, &ah, &bx, &by, &bw, &bh);
+    ok(ax == 0 && ay == 0, "h-split a origin");
+    ok(aw + 4 + bw == 200, "h-split widths plus gap");
+    ok(ah == 100 && bh == 100, "h-split full height");
+    tile_split_rect(0, 0, 100, 200, 4, 1, 0.5, &ax, &ay, &aw, &ah, &bx, &by, &bw, &bh);
+    ok(ah + 4 + bh == 200, "v-split heights plus gap");
+    ok(tile_lerp(0, 100, 0) == 0 && tile_lerp(0, 100, 1) == 100, "lerp ends");
 
     if (fails) {
         fprintf(stderr, "%d fail(s)\n", fails);
