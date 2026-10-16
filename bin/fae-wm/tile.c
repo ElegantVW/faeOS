@@ -7,6 +7,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 #define TILE_MS 180
 
@@ -19,7 +21,10 @@ struct tnode {
 };
 
 static tnode_t *roots[WM_NDESKS];
-static int next_vert;
+static int force_split = -1; /* -1 auto, 0 side, 1 stacked (one shot) */
+static int last_dx, last_dy;
+static void leaf_box(tnode_t *n, int x, int y, int w, int h, int gap,
+                     client_t *want, int *ox, int *oy, int *ow, int *oh);
 
 static tnode_t *mkleaf(client_t *c)
 {
@@ -57,7 +62,13 @@ static void replace_child(tnode_t *p, tnode_t *old, tnode_t *neu)
 
 void tile_set_split(int vert)
 {
-    next_vert = vert ? 1 : 0;
+    force_split = vert ? 1 : 0;
+}
+
+void tile_note_focus_dir(int dx, int dy)
+{
+    last_dx = dx;
+    last_dy = dy;
 }
 
 static int is_tiled(client_t *c)
@@ -165,11 +176,42 @@ void tile_insert(wm_t *wm, client_t *c)
     tnode_t *leaf = mkleaf(c);
     tnode_t *sp = calloc(1, sizeof *sp);
     if (!sp || !leaf) return;
-    sp->vert = next_vert;
-    sp->ratio = 0.5;
+
+    int cw = at->c ? at->c->w : 800;
+    int ch = at->c ? at->c->h : 600;
+    int ox = 0, oy = 0, ow = 0, oh = 0;
+    leaf_box(roots[d], wm->gap, wm->gap, wm->sw - 2 * wm->gap, wm->sh - 2 * wm->gap,
+             wm->gap, at->c, &ox, &oy, &ow, &oh);
+    if (ow > 0 && oh > 0) { cw = ow; ch = oh; }
+
+    int vert;
+    if (force_split >= 0) {
+        vert = force_split;
+        force_split = -1;
+    } else {
+        vert = tile_auto_split(cw, ch);
+    }
+    if (at->c) {
+        XSizeHints hints;
+        long supplied = 0;
+        memset(&hints, 0, sizeof hints);
+        if (XGetWMNormalHints(wm->dpy, c->xid, &hints, &supplied) &&
+            (hints.flags & PMinSize) && hints.min_width > (cw - wm->gap) / 2)
+            vert = 1;
+    }
+
+    int new_b = tile_new_is_b(last_dx, last_dy);
+    sp->vert = vert;
     sp->parent = at->parent;
-    sp->a = at;
-    sp->b = leaf;
+    if (new_b) {
+        sp->a = at;
+        sp->b = leaf;
+        sp->ratio = TILE_KEEP;
+    } else {
+        sp->a = leaf;
+        sp->b = at;
+        sp->ratio = 1.0 - TILE_KEEP;
+    }
     at->parent = sp;
     leaf->parent = sp;
     if (sp->parent) replace_child(sp->parent, at, sp);
@@ -216,21 +258,23 @@ void tile_toggle_float(wm_t *wm, client_t *c)
 }
 
 static void leaf_box(tnode_t *n, int x, int y, int w, int h, int gap,
-                     client_t *want, int *ox, int *oy)
+                     client_t *want, int *ox, int *oy, int *ow, int *oh)
 {
     if (!n) return;
     if (n->c) {
         if (n->c == want) {
             *ox = x + w / 2;
             *oy = y + h / 2;
+            if (ow) *ow = w;
+            if (oh) *oh = h;
         }
         return;
     }
     int ax, ay, aw, ah, bx, by, bw, bh;
     tile_split_rect(x, y, w, h, gap, n->vert, n->ratio,
                     &ax, &ay, &aw, &ah, &bx, &by, &bw, &bh);
-    leaf_box(n->a, ax, ay, aw, ah, gap, want, ox, oy);
-    leaf_box(n->b, bx, by, bw, bh, gap, want, ox, oy);
+    leaf_box(n->a, ax, ay, aw, ah, gap, want, ox, oy, ow, oh);
+    leaf_box(n->b, bx, by, bw, bh, gap, want, ox, oy, ow, oh);
 }
 
 void tile_swap_dir(wm_t *wm, client_t *c, int dx, int dy)
@@ -241,13 +285,13 @@ void tile_swap_dir(wm_t *wm, client_t *c, int dx, int dy)
     if (!root) return;
     int g = wm->gap;
     int fx = 0, fy = 0;
-    leaf_box(root, g, g, wm->sw - 2 * g, wm->sh - 2 * g, g, c, &fx, &fy);
+    leaf_box(root, g, g, wm->sw - 2 * g, wm->sh - 2 * g, g, c, &fx, &fy, NULL, NULL);
     client_t *best = NULL;
     long best_s = 0;
     for (client_t *o = wm->clients; o; o = o->next) {
         if (o == c || o->desk != d || !is_tiled(o)) continue;
         int ox = 0, oy = 0;
-        leaf_box(root, g, g, wm->sw - 2 * g, wm->sh - 2 * g, g, o, &ox, &oy);
+        leaf_box(root, g, g, wm->sw - 2 * g, wm->sh - 2 * g, g, o, &ox, &oy, NULL, NULL);
         int cx = ox - fx, cy = oy - fy;
         long prim = (long)cx * dx + (long)cy * dy;
         if (prim <= 0) continue;

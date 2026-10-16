@@ -2,6 +2,21 @@
 #ifndef FAE_WM_TILE_GEOM_H
 #define FAE_WM_TILE_GEOM_H
 
+#define TILE_KEEP 0.62
+
+/* 0 = side by side, 1 = stacked. Wide cells split left/right. */
+static int tile_auto_split(int w, int h)
+{
+    return (h > w) ? 1 : 0;
+}
+
+/* Last focus step: left/up → new leaf is a; else b (right/below/default). */
+static int tile_new_is_b(int dx, int dy)
+{
+    if (dx < 0 || dy < 0) return 0;
+    return 1;
+}
+
 static void tile_split_rect(int x, int y, int w, int h, int gap, int vert,
                             double ratio,
                             int *ax, int *ay, int *aw, int *ah,

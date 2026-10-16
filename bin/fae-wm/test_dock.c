@@ -57,6 +57,12 @@ int main(void)
     tile_split_rect(0, 0, 100, 200, 4, 1, 0.5, &ax, &ay, &aw, &ah, &bx, &by, &bw, &bh);
     ok(ah + 4 + bh == 200, "v-split heights plus gap");
     ok(tile_lerp(0, 100, 0) == 0 && tile_lerp(0, 100, 1) == 100, "lerp ends");
+    ok(tile_auto_split(800, 400) == 0, "wide cell splits side by side");
+    ok(tile_auto_split(400, 800) == 1, "tall cell splits stacked");
+    ok(tile_new_is_b(1, 0) == 1, "walked right → new is b");
+    ok(tile_new_is_b(-1, 0) == 0, "walked left → new is a");
+    ok(tile_new_is_b(0, -1) == 0, "walked up → new is a");
+    ok(TILE_KEEP > 0.5 && TILE_KEEP < 0.7, "focus keeps the larger share");
 
     if (fails) {
         fprintf(stderr, "%d fail(s)\n", fails);

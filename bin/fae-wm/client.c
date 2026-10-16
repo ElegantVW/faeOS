@@ -508,6 +508,7 @@ void client_nudge(wm_t *wm, client_t *c, int dx, int dy)
 
 void client_focus_dir(wm_t *wm, int dx, int dy)
 {
+    tile_note_focus_dir(dx, dy);
     client_t *from = wm->focus;
     if (!from) {
         for (client_t *c = wm->clients; c; c = c->next)

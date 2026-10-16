@@ -59,7 +59,7 @@ what it loaded.
 
 ## Design rules
 
-- **Tiling by default.** Binary split per workspace; dialogs float. Super+Shift+Space toggles.
+- **Tiling by default.** New windows split the focused cell by shape (wide → columns, tall → rows), land on the side you last walked, and leave focus ~62%. `Super+v`/`s` override the next split only. Dialogs float. Super+Shift+Space toggles.
 - **Border-only frames.** No titlebar. Focus is a 2 px pink border. Fullscreen has none.
 - **EWMH served, never depended on.** Client list, stacking, active window,
   desktops, fullscreen state, close semantics — published for bars, pagers
