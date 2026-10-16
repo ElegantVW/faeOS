@@ -13,6 +13,7 @@ This page is the canonical integration contract for:
 | **Hearth** | in-tree `faeos/hearth` (incomplete) | `hearth` |
 | **Rift** | in-tree `faeos/rift` (incomplete) | `rift` |
 | **Pixie** | `ElegantVW/pixie` → `~/pixie` | `pixie` |
+| **Spellbook** | `ElegantVW/spellbook` → `~/spellbook` | `spellbook` |
 
 ## Paths
 
@@ -24,7 +25,7 @@ This page is the canonical integration contract for:
 
 ## Discovery order (every launcher)
 
-1. Env override: `BULWARK_BIN`, `FAIRY_BIN`, `SEAL_BIN`, `HEARTH_BIN`, `RIFT_BIN`
+1. Env override: `BULWARK_BIN`, `FAIRY_BIN`, `SEAL_BIN`, `HEARTH_BIN`, `RIFT_BIN`, `PIXIE_BIN`, `SPELLBOOK_BIN`
 2. `~/.local/lib/faeos/<name>`
 3. Sibling / known release tree (e.g. `~/bulwark/target/release/bulwark`)
 4. Clear error with a one-line build hint (exit 127)

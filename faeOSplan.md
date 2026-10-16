@@ -28,7 +28,7 @@
 |-----|------|--------|------|
 | **Wizard's Tower** (faectl) | Control panel & service supervisor | stable, expand | [docs/plans/wizardtower.md](docs/plans/wizardtower.md) |
 | **Scroll** | Command scroll + PATH launcher (merged Summon; tabbed TUI) | stable | [docs/plans/scroll.md](docs/plans/scroll.md) |
-| **Spellbook** | File manager (TUI) | stable | [docs/plans/spellbook.md](docs/plans/spellbook.md) |
+| **Spellbook** | File manager (TUI, Rust engine) | stable | [docs/plans/spellbook.md](docs/plans/spellbook.md) |
 | **Ether** | Network manager (bt/wifi/lan, veil VPN, bridge hotspot) | stable | [docs/plans/ether.md](docs/plans/ether.md) |
 | **Siren** | Media player (single-file v2: mpv, fuzzy search, queue, playlists, config, trove) | stable | [docs/plans/siren.md](docs/plans/siren.md) |
 | **Pixie** | Local AI assistant with tools (Rust engine) | stable | [docs/plans/pixie.md](docs/plans/pixie.md) |

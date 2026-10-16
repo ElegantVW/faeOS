@@ -1,22 +1,26 @@
 # Spellbook — file manager
 
-**Role:** Terminal file manager with fae styling; dialogs for create/delete/rename/edit; optional xdg-open.
+**Role:** Terminal file manager with fae styling; dialogs for create/delete/rename/edit; optional xdg-open. Shared `--pick` for Tome and Fairy Lantern.
 
-**Status:** stable
+**Status:** Rust engine (v0.2). Canonical tree `~/spellbook` (`ElegantVW/spellbook`). Python `bin/spellbook` retired.
 
 ## Current
-- `spellbook [dir]` — TUI: j/k/↑↓ move, l/o open, h parent, ? help, s sort, . hidden, n/d/r/e dialogs
-- `spellbook --pick --output <file> [dir]` — **shared file picker**: choose a file, write path to `<file>`, exit (other apps call this)
-- Sort by name/date/size/type; input() dialogs use `tui_suspend`/`tui_resume`
-- Runs on shared `tui_*` layer (alt screen + hold)
-- Location bar: breadcrumbs (click a crumb to jump); **Ctrl+L** / **:** to type a path; **y** yank selected / **Y** yank shelf via `imbue`; **P** paste-go from the board; Enter/Esc in the bar
+
+- Engine: ELF `~/.local/lib/faeos/spellbook`, launcher `~/bin/spellbook`. Build: `cd ~/spellbook && ./build.sh install --house`.
+- Event-driven ratatui (no 10 Hz full-screen paint, listing cached until the shelf changes).
+- `spellbook [dir]` — TUI: j/k/↑↓ move, l/o/enter open, h parent, ? help, s sort, . hidden, n/d/r/e in-TUI prompts
+- `spellbook --pick --output <file> [dir]` — shared file picker
+- Location bar: breadcrumbs (click a crumb); **Ctrl+L** / **:** to type a path; **y** yank / **Y** yank shelf via `imbue`; **P** paste-go
+- Open files with `xdg-open` (spawn, does not block the TUI). `e` suspends into `$EDITOR`.
 
 ## Next
+
 - [ ] Config persistence (sort, hidden, cwd remember)
 - [ ] Preview pane for text files
 - [ ] Copy/move between dirs (files, not the location string)
-- [ ] File size/date columns + human formats
 - [ ] Search within dir (fzf-style)
 
 ## Notes
+
 - Do NOT merge with scroll (help) — distinct roles.
+- Do NOT absorb Imbue.
