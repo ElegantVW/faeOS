@@ -44,6 +44,10 @@ int main(void)
     dock_short_label(buf, sizeof buf, "  Pixie");
     ok(!strcmp(buf, "Pixie"), "label strips and fits");
 
+    ok(dock_hover_scale(0) > 0.99 && dock_hover_scale(0) < 1.01, "scale at rest is 1");
+    ok(dock_hover_scale(1) > 1.21 && dock_hover_scale(1) < 1.23, "scale at 1 is 1.22");
+    ok(dock_hover_scale(0.5) > 1.0 && dock_hover_scale(0.5) < 1.22, "scale eases in between");
+
     if (fails) {
         fprintf(stderr, "%d fail(s)\n", fails);
         return 1;

@@ -81,7 +81,6 @@ what it loaded.
 ## Dock
 
 Bottom-center overlay. It rises after a short dwell in the **center** of the
-bottom edge (not the whole screen). Tiles are 52px with 7pt sigils scaled
-into the art box so labels sit below, not on top of the glyph. `make test`
-checks hotspot / dwell / labels without X. Log out and back in after
-`make install`.
+bottom edge (not the whole screen). Glass pill, squircle wells, label only
+on hover, pixmap back-buffer (no 60 Hz raise). `make test` checks hotspot /
+dwell / labels without X. Log out and back in after `make install`.

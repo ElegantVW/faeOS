@@ -43,6 +43,15 @@ static int dock_dwell_ready(int in_hot, long now, long *entered, int dwell_ms)
     return now - *entered >= dwell_ms;
 }
 
+/* t in [0,1] → scale 1.0 .. 1.22, ease-out quad. */
+static double dock_hover_scale(double t)
+{
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    t = 1.0 - (1.0 - t) * (1.0 - t);
+    return 1.0 + 0.22 * t;
+}
+
 static void dock_short_label(char *dst, size_t n, const char *src)
 {
     if (!dst || n == 0) return;

@@ -40,16 +40,16 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define DOCK_PAD_X     10
+#define DOCK_PAD_X     14
 #define DOCK_PAD_Y     8
-#define DOCK_GAP       8
+#define DOCK_GAP       6
 #define DOCK_TILE_W    52
-#define DOCK_ART_H     32
-#define DOCK_LBL_GAP   4
+#define DOCK_WELL      40
+#define DOCK_HEAD      20      /* label lives here, above the pill */
+#define DOCK_MAG       10      /* room for in-cell scale */
 #define DOCK_HIDE_MS   400
 #define DOCK_HOVER_MS  120
 #define DOCK_FLASH_MS  1500
-#define DOCK_SHIM_MS   240
 #define DOCK_SLIDE_MS  240
 #define DOCK_MAX_TILES 12
 #define DOCK_TILES_MAX 64
@@ -135,6 +135,10 @@ typedef struct {
 } tile_t;
 
 static Window dock_w = None;
+static Pixmap dock_pix = None;
+static cairo_surface_t *dock_surf = NULL;
+static GC dock_gc = None;
+static int pix_w, pix_h;
 static int dock_x, dock_y, dock_ww, dock_hh;
 static int dock_hover_idx = -1;
 static int dock_shown = 0;
@@ -143,8 +147,6 @@ static int dock_cur_y = -1;
 static int dock_target_y = -1;      /* last slide destination */
 static int dock_slide_from = 0;     /* y the current slide started at */
 static long dock_slide_t0 = 0;
-static int shim_idx = -1;           /* -2 = sweep all */
-static long shim_t0 = 0;
 static long dock_band_t0 = 0;       /* dwell clock for the hotspot */
 static long hover_t0 = 0;
 
@@ -254,6 +256,50 @@ static const char *tile_label(wm_t *wm, tile_t *t, char *buf, size_t n)
 }
 
 /* Row start (window-relative): single formula for paint/click/hover. */
+static void round_rect(cairo_t *cr, double x, double y, double w, double h, double rad)
+{
+    if (rad > w / 2) rad = w / 2;
+    if (rad > h / 2) rad = h / 2;
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + w - rad, y + h - rad, rad, 0.0, M_PI / 2);
+    cairo_arc(cr, x + w - rad, y + rad, rad, M_PI / 2, M_PI);
+    cairo_arc(cr, x + rad, y + rad, rad, M_PI, 3 * M_PI / 2);
+    cairo_arc(cr, x + rad, y + h - rad, rad, 3 * M_PI / 2, 2 * M_PI);
+    cairo_close_path(cr);
+}
+
+static void dock_buffer_free(Display *dpy)
+{
+    if (dock_surf) {
+        cairo_surface_destroy(dock_surf);
+        dock_surf = NULL;
+    }
+    if (dock_pix != None) {
+        XFreePixmap(dpy, dock_pix);
+        dock_pix = None;
+    }
+    pix_w = pix_h = 0;
+}
+
+static int dock_buffer_ok(Display *dpy, int w, int h)
+{
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (dock_pix != None && pix_w == w && pix_h == h && dock_surf)
+        return 1;
+    dock_buffer_free(dpy);
+    dock_pix = XCreatePixmap(dpy, dock_w, (unsigned)w, (unsigned)h,
+                             (unsigned)DefaultDepth(dpy, DefaultScreen(dpy)));
+    dock_surf = cairo_xlib_surface_create(dpy, dock_pix,
+                                          DefaultVisual(dpy, DefaultScreen(dpy)),
+                                          w, h);
+    pix_w = w;
+    pix_h = h;
+    if (dock_gc == None)
+        dock_gc = XCreateGC(dpy, dock_w, 0, NULL);
+    return dock_pix != None && dock_surf != NULL;
+}
+
 static int dock_start(int want_w, int n)
 {
     int x = DOCK_PAD_X + (want_w - DOCK_PAD_X * 2 -
@@ -276,45 +322,12 @@ int dock_reserve(wm_t *wm)
 
 /* ── paint ───────────────────────────────────────────────────────────────── */
 
-static void shimmer_span(char *dst, size_t n, const char *line, double sweep,
-                         rgb_t base)
-{
-    size_t len = strlen(line);
-    size_t at = 0;
-    for (size_t i = 0; i < len && at + 64 < n; i++) {
-        double d = (double)(int)i - sweep;
-        if (d < 0) d = -d;
-        double glow = d < 3.0 ? 1.0 - d / 3.0 : 0.0;
-        int r = (int)(base.r * 255 + (0xe8 - base.r * 255) * glow + 0.5);
-        int g = (int)(base.g * 255 + (0x79 - base.g * 255) * glow + 0.5);
-        int b = (int)(base.b * 255 + (0xa0 - base.b * 255) * glow + 0.5);
-        if (r < 0) r = 0; if (r > 255) r = 255;
-        if (g < 0) g = 0; if (g > 255) g = 255;
-        if (b < 0) b = 0; if (b > 255) b = 255;
-        char ch = line[i];
-        if (ch == ' ') {
-            at += snprintf(dst + at, n - at, " ");
-        } else {
-            char esc[8];
-            if (ch == '&') snprintf(esc, sizeof esc, "&amp;");
-            else if (ch == '<') snprintf(esc, sizeof esc, "&lt;");
-            else if (ch == '>') snprintf(esc, sizeof esc, "&gt;");
-            else { esc[0] = ch; esc[1] = 0; }
-            at += snprintf(dst + at, n - at,
-                           "<span fgcolor=\"#%02x%02x%02x\">%s</span>",
-                           r, g, b, esc);
-        }
-    }
-    dst[at < n ? at : n - 1] = 0;
-}
-
 static void dock_paint(wm_t *wm)
 {
     tile_t tiles[DOCK_TILES_MAX];
     int n = build_tiles(wm, tiles, DOCK_TILES_MAX);
     if (dock_hover_idx >= n) dock_hover_idx = -1;
 
-    /* Cap the visible tiles; the last slot becomes an overflow indicator. */
     int shown = n, overflow = 0;
     if (n > DOCK_MAX_TILES) {
         shown = DOCK_MAX_TILES - 1;
@@ -329,10 +342,13 @@ static void dock_paint(wm_t *wm)
     int max_w = DisplayWidth(dpy, scr) - 40;
     if (want_w > max_w) want_w = max_w;
     if (want_w < 120) want_w = 120;
-    int want_h = DOCK_PAD_Y + DOCK_ART_H + DOCK_LBL_GAP + 12 + DOCK_PAD_Y;
+    int pill_h = DOCK_PAD_Y + DOCK_WELL + 10 + DOCK_PAD_Y;
+    int want_h = DOCK_HEAD + DOCK_MAG + pill_h;
     int px = (DisplayWidth(dpy, scr) - want_w) / 2;
-    int target_y = DisplayHeight(dpy, scr) - want_h - 12;
+    int target_y = DisplayHeight(dpy, scr) - want_h - 8;
     if (px < 0) px = 0;
+    int shelf_y = DOCK_HEAD;
+    int well_y = DOCK_HEAD + DOCK_MAG + DOCK_PAD_Y;
 
     if (dock_w == None) {
         XSetWindowAttributes attr;
@@ -340,13 +356,14 @@ static void dock_paint(wm_t *wm)
         attr.override_redirect = True;
         attr.background_pixel = 0;
         attr.colormap = DefaultColormap(dpy, scr);
+        attr.backing_store = WhenMapped;
         attr.event_mask = ExposureMask | PointerMotionMask |
                        ButtonPressMask | ButtonReleaseMask;
         dock_w = XCreateWindow(dpy, DefaultRootWindow(dpy), px, target_y,
                                (unsigned)want_w, (unsigned)want_h, 0,
                                CopyFromParent, InputOutput, CopyFromParent,
                                CWOverrideRedirect | CWBackPixel | CWColormap |
-                               CWEventMask, &attr);
+                               CWEventMask | CWBackingStore, &attr);
         Atom wtype = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
         XChangeProperty(dpy, dock_w, XInternAtom(dpy, "_NET_WM_WINDOW_TYPE",
                                                 False), XA_ATOM, 32,
@@ -355,7 +372,8 @@ static void dock_paint(wm_t *wm)
         dock_target_y = dock_cur_y;
         XMoveWindow(dpy, dock_w, px, dock_cur_y);
         XMapWindow(dpy, dock_w);
-    } else {
+        XRaiseWindow(dpy, dock_w);
+    } else if (want_w != dock_ww || want_h != dock_hh) {
         XMoveResizeWindow(dpy, dock_w, px, dock_cur_y, (unsigned)want_w,
                           (unsigned)want_h);
     }
@@ -364,48 +382,40 @@ static void dock_paint(wm_t *wm)
     dock_ww = want_w;
     dock_hh = want_h;
 
-    cairo_surface_t *surf =
-        cairo_xlib_surface_create(dpy, dock_w, DefaultVisual(dpy, scr),
-                                  want_w, want_h);
-    cairo_t *cr = cairo_create(surf);
+    if (!dock_buffer_ok(dpy, want_w, want_h)) return;
+    cairo_t *cr = cairo_create(dock_surf);
+
     PangoContext *ctx =
         pango_font_map_create_context(pango_cairo_font_map_get_default());
     PangoLayout *lay = pango_layout_new(ctx);
     PangoFontDescription *desc_art =
         pango_font_description_from_string(THEME_FONT ":size=7");
+    PangoFontDescription *desc_mark =
+        pango_font_description_from_string(THEME_FONT ":size=16");
     PangoFontDescription *desc_lbl =
         pango_font_description_from_string(THEME_FONT ":size=9");
-    pango_layout_set_font_description(lay, desc_art);
     pango_layout_set_single_paragraph_mode(lay, TRUE);
 
     rgb_t bg = hex_rgb(THEME_BG);
-    rgb_t silver = hex_rgb(THEME_SILVER);
-    rgb_t muted = hex_rgb(THEME_MUTED);
     rgb_t pink = hex_rgb(THEME_PINK);
+    rgb_t muted = hex_rgb(THEME_MUTED);
+    rgb_t silver = hex_rgb(THEME_SILVER);
+    rgb_t wellc = hex_rgb("#2a1218");
 
-    /* Single surface: background rounded rect, no inner boxes. */
-    double r = 12;
-    cairo_new_sub_path(cr);
-    cairo_arc(cr, want_w - r, want_h - r, r, 0.0, M_PI / 2);
-    cairo_arc(cr, want_w - r, r,         r, M_PI / 2, M_PI);
-    cairo_arc(cr, r,         r,         r, M_PI, 3 * M_PI / 2);
-    cairo_arc(cr, r,         want_h - r, r, 3 * M_PI / 2, 2 * M_PI);
-    cairo_close_path(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, 0, 0, 0, 0);
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    /* Glass shelf — pill at the bottom of the window. */
+    round_rect(cr, 0, shelf_y, want_w, want_h - shelf_y, 18);
     cairo_set_source_rgb(cr, bg.r, bg.g, bg.b);
-    cairo_fill(cr);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.45);
+    cairo_set_line_width(cr, 1.0);
+    cairo_stroke(cr);
 
     long now = now_ms();
-    double shim_pos = -1;
-    int sweeping = 0;
-    if (shim_idx == -2 || shim_idx >= 0) {
-        long el = now - shim_t0;
-        if (el >= DOCK_SHIM_MS) shim_idx = -1;
-        else { sweeping = 1; shim_pos = (double)el / DOCK_SHIM_MS * 12.0 - 2.0; }
-    }
 
     int x = dock_start(want_w, n_slots);
     for (int i = 0; i < shown; i++) {
@@ -415,148 +425,129 @@ static void dock_paint(wm_t *wm)
         int dimmed = (c && c->minimized) || !running;
         int focused = (c && wm->focus == c);
         int hov = (i == dock_hover_idx);
-        rgb_t base = focused ? pink : (dimmed ? muted : silver);
-
-        /* Light blush behind the glyph only. */
+        rgb_t ink = focused ? pink : (dimmed ? muted : silver);
+        double sc = 1.0;
         if (hov) {
-            long hel = now - hover_t0;
-            double ht = hel >= DOCK_HOVER_MS ? 1.0 : (double)hel / DOCK_HOVER_MS;
-            ht = 1.0 - (1.0 - ht) * (1.0 - ht);
-            double pr = 6;
-            double pxx = x + 2, pyy = DOCK_PAD_Y;
-            double pww = DOCK_TILE_W - 4, phh = DOCK_ART_H;
-            cairo_set_source_rgba(cr, 0xf0 / 255.0, 0xb4 / 255.0, 0xc8 / 255.0,
-                                  0.18 + 0.22 * ht);
-            cairo_new_sub_path(cr);
-            cairo_arc(cr, pxx + pww - pr, pyy + phh - pr, pr, 0.0, M_PI / 2);
-            cairo_arc(cr, pxx + pww - pr, pyy + pr, pr, M_PI / 2, M_PI);
-            cairo_arc(cr, pxx + pr, pyy + pr, pr, M_PI, 3 * M_PI / 2);
-            cairo_arc(cr, pxx + pr, pyy + phh - pr, pr, 3 * M_PI / 2, 2 * M_PI);
-            cairo_close_path(cr);
-            cairo_fill(cr);
+            double t = hover_t0 ? (double)(now - hover_t0) / (double)DOCK_HOVER_MS : 1.0;
+            sc = dock_hover_scale(t);
+        }
+        double wx = cx - DOCK_WELL / 2.0;
+        double wy = well_y;
+        double ww = DOCK_WELL;
+
+        cairo_save(cr);
+        cairo_translate(cr, cx, wy + ww);
+        cairo_scale(cr, sc, sc);
+        cairo_translate(cr, -cx, -(wy + ww));
+
+        round_rect(cr, wx, wy, ww, ww, 11);
+        cairo_set_source_rgb(cr, wellc.r, wellc.g, wellc.b);
+        cairo_fill_preserve(cr);
+        if (focused || hov) {
+            cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, hov ? 0.85 : 0.55);
+            cairo_set_line_width(cr, 1.2);
+            cairo_stroke(cr);
+        } else {
+            cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.18);
+            cairo_set_line_width(cr, 1.0);
+            cairo_stroke(cr);
         }
 
-        /* Glyph art, clipped to this tile and scaled to the art box. */
-        const sigil_t *sig = tile_sigil(wm, &tiles[i]);
-        pango_layout_set_font_description(lay, desc_art);
-        cairo_save(cr);
-        cairo_rectangle(cr, x, DOCK_PAD_Y, DOCK_TILE_W, DOCK_ART_H);
+        cairo_rectangle(cr, wx, wy, ww, ww);
         cairo_clip(cr);
-        if (sig) {
-            int shimmering = (sweeping && (shim_idx == -2 || i == shim_idx));
+        const sigil_t *sig = tile_sigil(wm, &tiles[i]);
+        cairo_set_source_rgb(cr, ink.r, ink.g, ink.b);
+        if (sig && sig->nlines > 0) {
+            pango_layout_set_font_description(lay, desc_art);
+            int start = sig->nlines > 3 ? (sig->nlines - 3) / 2 : 0;
+            int use = sig->nlines > 3 ? 3 : sig->nlines;
             int total = 0;
-            int lhs[SIG_LINES];
-            for (int li = 0; li < sig->nlines; li++) {
-                pango_layout_set_text(lay, sig->lines[li], -1);
+            int hs[4];
+            for (int li = 0; li < use; li++) {
+                pango_layout_set_text(lay, sig->lines[start + li], -1);
                 int tw = 0, th = 0;
                 pango_layout_get_pixel_size(lay, &tw, &th);
-                lhs[li] = th;
-                total += th + 1;
+                hs[li] = th;
+                total += th;
             }
-            double scale = 1.0;
-            if (total > DOCK_ART_H && total > 0)
-                scale = (double)DOCK_ART_H / (double)total;
-            cairo_translate(cr, cx, DOCK_PAD_Y);
-            cairo_scale(cr, scale, scale);
-            cairo_translate(cr, -cx, -DOCK_PAD_Y);
-            int ay = DOCK_PAD_Y;
-            for (int li = 0; li < sig->nlines; li++) {
-                char markup[1024];
-                if (shimmering)
-                    shimmer_span(markup, sizeof markup, sig->lines[li],
-                                 shim_pos, base);
-                else {
-                    char esc[512];
-                    size_t a2 = 0;
-                    for (const char *p = sig->lines[li];
-                         *p && a2 + 8 < sizeof esc; p++) {
-                        if (*p == '&') { memcpy(esc + a2, "&amp;", 5); a2 += 5; }
-                        else if (*p == '<') { memcpy(esc + a2, "&lt;", 4); a2 += 4; }
-                        else if (*p == '>') { memcpy(esc + a2, "&gt;", 4); a2 += 4; }
-                        else esc[a2++] = *p;
-                    }
-                    esc[a2] = 0;
-                    snprintf(markup, sizeof markup,
-                             "<span fgcolor=\"#%02x%02x%02x\">%s</span>",
-                             (int)(base.r * 255), (int)(base.g * 255),
-                             (int)(base.b * 255), esc);
-                }
-                pango_layout_set_markup(lay, markup, -1);
+            int ay = (int)wy + ((int)ww - total) / 2;
+            if (ay < (int)wy) ay = (int)wy;
+            for (int li = 0; li < use; li++) {
+                pango_layout_set_text(lay, sig->lines[start + li], -1);
                 int tw = 0, th = 0;
                 pango_layout_get_pixel_size(lay, &tw, &th);
                 cairo_move_to(cr, cx - tw / 2, ay);
                 pango_cairo_show_layout(cr, lay);
-                ay += lhs[li] + 1;
+                ay += hs[li];
             }
         } else {
             char ini[8];
-            const char *nm = tiles[i].is_pin ? tiles[i].pin->label :
+            const char *nm = tiles[i].is_pin && tiles[i].pin ? tiles[i].pin->label :
                              (c && c->title ? c->title : "?");
             snprintf(ini, sizeof ini, "%c", nm[0] ? nm[0] : '?');
+            pango_layout_set_font_description(lay, desc_mark);
             pango_layout_set_text(lay, ini, -1);
             int tw = 0, th = 0;
             pango_layout_get_pixel_size(lay, &tw, &th);
-            cairo_set_source_rgb(cr, base.r, base.g, base.b);
-            cairo_move_to(cr, cx - tw / 2, DOCK_PAD_Y + (DOCK_ART_H - th) / 2);
+            cairo_move_to(cr, cx - tw / 2, wy + (ww - th) / 2);
             pango_cairo_show_layout(cr, lay);
         }
         cairo_restore(cr);
 
-        /* Label under the art, short name, this tile only. */
-        char label[128];
-        tile_label(wm, &tiles[i], label, sizeof label);
-        pango_layout_set_font_description(lay, desc_lbl);
-        pango_layout_set_text(lay, label, -1);
-        pango_layout_set_ellipsize(lay, PANGO_ELLIPSIZE_END);
-        pango_layout_set_width(lay, (DOCK_TILE_W - 4) * PANGO_SCALE);
-        int tw = 0, th = 0;
-        pango_layout_get_pixel_size(lay, &tw, &th);
-        cairo_set_source_rgb(cr, base.r, base.g, base.b);
-        cairo_move_to(cr, cx - tw / 2, DOCK_PAD_Y + DOCK_ART_H + DOCK_LBL_GAP);
-        pango_cairo_show_layout(cr, lay);
-
-        /* Running dot. */
-        if (running && !c->minimized) {
+        if (running && c && !c->minimized) {
             cairo_set_source_rgb(cr, pink.r, pink.g, pink.b);
-            cairo_arc(cr, cx, want_h - 6, 1.8, 0, 2 * M_PI);
+            cairo_arc(cr, cx, want_h - 7, 1.7, 0, 2 * M_PI);
             cairo_fill(cr);
+        }
+
+        if (hov) {
+            char label[128];
+            tile_label(wm, &tiles[i], label, sizeof label);
+            pango_layout_set_font_description(lay, desc_lbl);
+            pango_layout_set_ellipsize(lay, PANGO_ELLIPSIZE_END);
+            pango_layout_set_width(lay, (DOCK_TILE_W + 24) * PANGO_SCALE);
+            pango_layout_set_text(lay, label, -1);
+            int tw = 0, th = 0;
+            pango_layout_get_pixel_size(lay, &tw, &th);
+            double lx = cx - tw / 2.0;
+            if (lx < 2) lx = 2;
+            if (lx + tw > want_w - 2) lx = want_w - 2 - tw;
+            round_rect(cr, lx - 4, 2, tw + 8, th + 4, 6);
+            cairo_set_source_rgb(cr, bg.r, bg.g, bg.b);
+            cairo_fill_preserve(cr);
+            cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.5);
+            cairo_set_line_width(cr, 1.0);
+            cairo_stroke(cr);
+            cairo_set_source_rgb(cr, pink.r, pink.g, pink.b);
+            cairo_move_to(cr, lx, 4);
+            pango_cairo_show_layout(cr, lay);
         }
         x += DOCK_TILE_W + DOCK_GAP;
     }
 
-    /* Overflow indicator. */
     if (overflow > 0) {
         int cx = x + DOCK_TILE_W / 2;
-        rgb_t muted = hex_rgb(THEME_MUTED);
         char buf[16];
         snprintf(buf, sizeof buf, "+%d", overflow);
+        pango_layout_set_font_description(lay, desc_mark);
         pango_layout_set_text(lay, buf, -1);
-        PangoFontDescription *big =
-            pango_font_description_from_string(THEME_FONT_ROW);
-        pango_layout_set_font_description(lay, big);
-        pango_font_description_free(big);
         int tw = 0, th = 0;
         pango_layout_get_pixel_size(lay, &tw, &th);
         cairo_set_source_rgb(cr, muted.r, muted.g, muted.b);
-        cairo_move_to(cr, cx - tw / 2, DOCK_PAD_Y + (DOCK_ART_H - th) / 2);
-        pango_cairo_show_layout(cr, lay);
-        pango_layout_set_font_description(lay, desc_lbl);
-
-        pango_layout_set_text(lay, "more", -1);
-        pango_layout_set_ellipsize(lay, PANGO_ELLIPSIZE_END);
-        pango_layout_set_width(lay, (DOCK_TILE_W - 4) * PANGO_SCALE);
-        pango_layout_get_pixel_size(lay, &tw, &th);
-        cairo_move_to(cr, cx - tw / 2, DOCK_PAD_Y + DOCK_ART_H + DOCK_LBL_GAP);
+        cairo_move_to(cr, cx - tw / 2, well_y + (DOCK_WELL - th) / 2);
         pango_cairo_show_layout(cr, lay);
     }
 
+    cairo_surface_flush(dock_surf);
     cairo_destroy(cr);
-    cairo_surface_destroy(surf);
     pango_font_description_free(desc_art);
+    pango_font_description_free(desc_mark);
     pango_font_description_free(desc_lbl);
+    g_object_unref(lay);
     g_object_unref(ctx);
-    XRaiseWindow(dpy, dock_w);
-    XSync(dpy, False);
+    XCopyArea(dpy, dock_pix, dock_w, dock_gc, 0, 0,
+              (unsigned)want_w, (unsigned)want_h, 0, 0);
+    XFlush(dpy);
 }
 
 /* ── show / hide ─────────────────────────────────────────────────────────── */
@@ -578,7 +569,7 @@ void dock_refresh(wm_t *wm)
             dock_cur_y = DisplayHeight(dpy, wm->scr);
             dock_target_y = dock_cur_y;
             XMoveWindow(dpy, dock_w, dock_x, dock_cur_y);
-            XSync(dpy, False);
+            XFlush(dpy);
         }
         return;
     }
@@ -589,8 +580,7 @@ void dock_flash(wm_t *wm)
 {
     dock_shown = 1;
     dock_hide_at = now_ms() + DOCK_FLASH_MS;
-    shim_idx = -2;
-    shim_t0 = now_ms();
+    XRaiseWindow(wm->dpy, dock_w);
     dock_refresh(wm);
 }
 
@@ -615,8 +605,7 @@ void dock_edge(wm_t *wm, int x_root, int y_root)
         if (!dock_shown) {
             dock_shown = 1;
             dock_hide_at = 0;
-            shim_idx = -2;
-            shim_t0 = now;
+            XRaiseWindow(wm->dpy, dock_w);
             dock_refresh(wm);
         } else {
             dock_hide_at = 0;
@@ -666,8 +655,7 @@ void dock_tick(wm_t *wm)
         dock_hide_at = 0;
         dock_shown = 0;
     }
-    if (shim_idx != -1) dock_paint(wm);
-    else if (hover_t0 && now - hover_t0 < DOCK_HOVER_MS) dock_paint(wm);
+    if (hover_t0 && now - hover_t0 < DOCK_HOVER_MS) dock_paint(wm);
 }
 
 void dock_click(wm_t *wm, int x_root, int y_root)
@@ -733,10 +721,6 @@ void dock_hover(wm_t *wm, int x_root, int y_root)
     if (hit != dock_hover_idx) {
         dock_hover_idx = hit;
         hover_t0 = now_ms();
-        if (hit >= 0) {
-            shim_idx = hit;
-            shim_t0 = now_ms();
-        }
         dock_paint(wm);
     }
 }
@@ -744,7 +728,12 @@ void dock_hover(wm_t *wm, int x_root, int y_root)
 void dock_teardown(wm_t *wm)
 {
     if (dock_w == None) return;
+    dock_buffer_free(wm->dpy);
+    if (dock_gc != None) {
+        XFreeGC(wm->dpy, dock_gc);
+        dock_gc = None;
+    }
     XDestroyWindow(wm->dpy, dock_w);
     dock_w = None;
-    XSync(wm->dpy, False);
+    XFlush(wm->dpy);
 }
