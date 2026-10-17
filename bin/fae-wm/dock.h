@@ -1,8 +1,4 @@
-/* dock.h — the macOS-type dock. Bottom-center pill, autohiding: surfaces
- * on a bottom-edge hover with a slide, hides after you leave. Tiles are
- * app sigils (ASCII art where the apps publish it, big initials otherwise)
- * with shimmer sweeps, labels beneath, pink dots for running. Click toggles
- * focus/minimize; click an idle pin to launch it. */
+/* dock.h — autohide starship box: framed glyphs + status. */
 #ifndef FAE_WM_DOCK_H
 #define FAE_WM_DOCK_H
 

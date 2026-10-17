@@ -81,7 +81,7 @@ what it loaded.
 
 ## Dock
 
-Bottom-center overlay. It rises after a short dwell in the **center** of the
-bottom edge (not the whole screen). Glass pill, squircle wells, label only
-on hover, pixmap back-buffer (no 60 Hz raise). `make test` checks hotspot /
-dwell / labels without X. Log out and back in after `make install`.
+Bottom-center **starship box**: `╭─ ✦ user ✦ · date · time · RAM · CPU · HDD · temp ─╮`
+with compact **sigils** (not names) on the inner row. Hover reverse-pinks a
+glyph and puts its name in the title. Click / dwell / slide unchanged.
+`make test` is hotspot/dwell. Log out after `make install`.

@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/statvfs.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -41,13 +42,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define DOCK_PAD_X     14
-#define DOCK_PAD_Y     8
-#define DOCK_GAP       6
-#define DOCK_TILE_W    52
-#define DOCK_WELL      40
-#define DOCK_HEAD      20      /* label lives here, above the pill */
-#define DOCK_MAG       10      /* room for in-cell scale */
+#define DOCK_PAD_X     10
+#define DOCK_CELL_W    56
+#define DOCK_CELL_H    36
+#define DOCK_GAP       8
 #define DOCK_HIDE_MS   400
 #define DOCK_HOVER_MS  120
 #define DOCK_FLASH_MS  1500
@@ -153,6 +151,9 @@ static int dock_slide_from = 0;     /* y the current slide started at */
 static long dock_slide_t0 = 0;
 static long dock_band_t0 = 0;       /* dwell clock for the hotspot */
 static long hover_t0 = 0;
+static struct { int x, w; } dock_cells[DOCK_MAX_TILES];
+static int dock_ncells;
+static int dock_row_y, dock_row_h;
 
 static int contains_ci(const char *hay, const char *needle)
 {
@@ -259,17 +260,119 @@ static const char *tile_label(wm_t *wm, tile_t *t, char *buf, size_t n)
     return buf;
 }
 
-/* Row start (window-relative): single formula for paint/click/hover. */
-static void round_rect(cairo_t *cr, double x, double y, double w, double h, double rad)
+static const char *SPARK = "▁▂▃▄▅▆▇█";
+static int spark_i(int pct)
 {
-    if (rad > w / 2) rad = w / 2;
-    if (rad > h / 2) rad = h / 2;
-    cairo_new_sub_path(cr);
-    cairo_arc(cr, x + w - rad, y + h - rad, rad, 0.0, M_PI / 2);
-    cairo_arc(cr, x + w - rad, y + rad, rad, M_PI / 2, M_PI);
-    cairo_arc(cr, x + rad, y + rad, rad, M_PI, 3 * M_PI / 2);
-    cairo_arc(cr, x + rad, y + h - rad, rad, 3 * M_PI / 2, 2 * M_PI);
-    cairo_close_path(cr);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct * 7 / 100;
+}
+
+static void spark_utf8(int pct, char *out, size_t n)
+{
+    int i = spark_i(pct);
+    const unsigned char *p = (const unsigned char *)SPARK;
+    /* each bar is 3-byte utf-8 */
+    if (n < 4) { if (n) out[0] = 0; return; }
+    memcpy(out, p + i * 3, 3);
+    out[3] = 0;
+}
+
+static int ram_pct(void)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    long total = 0, avail = 0;
+    char k[64];
+    long v;
+    char rest[64];
+    while (fscanf(f, "%63s %ld %63s\n", k, &v, rest) >= 2) {
+        if (!strcmp(k, "MemTotal:")) total = v;
+        else if (!strcmp(k, "MemAvailable:")) avail = v;
+    }
+    fclose(f);
+    if (total <= 0) return -1;
+    return (int)((100L * (total - avail)) / total);
+}
+
+static int cpu_pct(void)
+{
+    static unsigned long pidle, ptotal;
+    static int last = -1;
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f) return last;
+    unsigned long u = 0, n = 0, s = 0, id = 0;
+    if (fscanf(f, "cpu %lu %lu %lu %lu", &u, &n, &s, &id) < 4) {
+        fclose(f);
+        return last;
+    }
+    fclose(f);
+    unsigned long tot = u + n + s + id;
+    if (ptotal > 0 && tot > ptotal) {
+        unsigned long dt = tot - ptotal, di = id - pidle;
+        last = (int)((100 * (dt - di)) / dt);
+        if (last < 0) last = 0;
+        if (last > 100) last = 100;
+    }
+    pidle = id;
+    ptotal = tot;
+    return last;
+}
+
+static int disk_pct(void)
+{
+    struct statvfs v;
+    if (statvfs("/", &v) != 0) return -1;
+    unsigned long blocks = v.f_blocks;
+    unsigned long freeb = v.f_bavail;
+    if (!blocks) return -1;
+    return (int)((100UL * (blocks - freeb)) / blocks);
+}
+
+static int cpu_temp_c(void)
+{
+    FILE *f = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+    if (!f) return -1;
+    int t = 0;
+    if (fscanf(f, "%d", &t) != 1) { fclose(f); return -1; }
+    fclose(f);
+    t /= 1000;
+    if (t < 10 || t > 110) return -1;
+    return t;
+}
+
+static void music_label(char *dst, size_t n)
+{
+    dst[0] = 0;
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char path[256];
+    snprintf(path, sizeof path, "%s/.cache/siren/now.json", home);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char buf[512];
+    size_t r = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[r] = 0;
+    if (!strstr(buf, "\"state\":\"play\"")) return;
+    char *p = strstr(buf, "\"label\":\"");
+    if (!p) return;
+    p += 9;
+    char *e = strchr(p, '"');
+    if (!e) return;
+    size_t L = (size_t)(e - p);
+    if (L > 40) L = 40;
+    if (L == 0) return;
+    snprintf(dst, n, "♪ %.*s", (int)L, p);
+}
+
+static int hit_cell(int lx, int ly)
+{
+    if (ly < dock_row_y || ly >= dock_row_y + dock_row_h) return -1;
+    for (int i = 0; i < dock_ncells; i++)
+        if (lx >= dock_cells[i].x && lx < dock_cells[i].x + dock_cells[i].w)
+            return i;
+    return -1;
 }
 
 static void dock_buffer_free(Display *dpy)
@@ -303,14 +406,6 @@ static int dock_buffer_ok(Display *dpy, int w, int h)
     return dock_pix != None && dock_surf != NULL;
 }
 
-static int dock_start(int want_w, int n)
-{
-    int x = DOCK_PAD_X + (want_w - DOCK_PAD_X * 2 -
-                          (n * DOCK_TILE_W + (n > 0 ? (n - 1) * DOCK_GAP : 0))) / 2;
-    if (x < DOCK_PAD_X) x = DOCK_PAD_X;
-    return x;
-}
-
 Window dock_win(wm_t *wm)
 {
     (void)wm;
@@ -339,19 +434,53 @@ static void dock_paint(wm_t *wm)
 
     Display *dpy = wm->dpy;
     int scr = wm->scr;
+
+    char user[32];
+    snprintf(user, sizeof user, "%s", getenv("USER") ? getenv("USER") : "you");
+    char app[64] = "";
+    if (dock_hover_idx >= 0 && dock_hover_idx < shown)
+        tile_label(wm, &tiles[dock_hover_idx], app, sizeof app);
+
+    char when[64], ram[32], cpu[32], hdd[32], tmpc[16], mus[96];
+    time_t nowt = time(NULL);
+    struct tm *tm = localtime(&nowt);
+    if (tm)
+        strftime(when, sizeof when, "%a %d %b · %H:%M", tm);
+    else
+        snprintf(when, sizeof when, "?");
+    int rp = ram_pct(), cp = cpu_pct(), dp = disk_pct(), tp = cpu_temp_c();
+    char sb[8];
+    spark_utf8(rp < 0 ? 0 : rp, sb, sizeof sb);
+    if (rp >= 0) snprintf(ram, sizeof ram, "RAM %s %d%%", sb, rp);
+    else snprintf(ram, sizeof ram, "RAM ?");
+    spark_utf8(cp < 0 ? 0 : cp, sb, sizeof sb);
+    if (cp >= 0) snprintf(cpu, sizeof cpu, "CPU %s %d%%", sb, cp);
+    else snprintf(cpu, sizeof cpu, "CPU ?");
+    spark_utf8(dp < 0 ? 0 : dp, sb, sizeof sb);
+    if (dp >= 0) snprintf(hdd, sizeof hdd, "HDD %s %d%%", sb, dp);
+    else snprintf(hdd, sizeof hdd, "HDD ?");
+    if (tp >= 0) snprintf(tmpc, sizeof tmpc, "%d°C", tp);
+    else tmpc[0] = 0;
+    music_label(mus, sizeof mus);
+
+    char title[256];
+    const char *who = app[0] ? app : user;
+    snprintf(title, sizeof title, " ✦ %s ✦ · %s · %s · %s · %s%s%s ",
+             who, when, ram, cpu, hdd,
+             tmpc[0] ? " · " : "", tmpc);
+
     int n_slots = shown + (overflow > 0 ? 1 : 0);
-    int want_w = DOCK_PAD_X * 2 + n_slots * DOCK_TILE_W +
-                 (n_slots > 0 ? (n_slots - 1) * DOCK_GAP : 0);
+    int inner_w = n_slots * DOCK_CELL_W + (n_slots > 1 ? (n_slots - 1) * DOCK_GAP : 0);
+    int title_est = (int)strlen(title) + 4;
+    int want_w = inner_w + DOCK_PAD_X * 2 + 8;
+    if (want_w < title_est * 8) want_w = title_est * 8; /* rough; pango corrects */
     int max_w = DisplayWidth(dpy, scr) - 40;
     if (want_w > max_w) want_w = max_w;
-    if (want_w < 120) want_w = 120;
-    int pill_h = DOCK_PAD_Y + DOCK_WELL + 10 + DOCK_PAD_Y;
-    int want_h = DOCK_HEAD + DOCK_MAG + pill_h;
+    if (want_w < 280) want_w = 280;
+    int want_h = 8 + 16 + DOCK_CELL_H + 16 + 8;
     int px = (DisplayWidth(dpy, scr) - want_w) / 2;
     int target_y = DisplayHeight(dpy, scr) - want_h - 8;
     if (px < 0) px = 0;
-    int shelf_y = DOCK_HEAD;
-    int well_y = DOCK_HEAD + DOCK_MAG + DOCK_PAD_Y;
 
     if (dock_w == None) {
         XSetWindowAttributes attr;
@@ -411,177 +540,184 @@ static void dock_paint(wm_t *wm)
 
     if (!dock_buffer_ok(dpy, want_w, want_h)) return;
     cairo_t *cr = cairo_create(dock_surf);
-
     PangoContext *ctx =
         pango_font_map_create_context(pango_cairo_font_map_get_default());
     PangoLayout *lay = pango_layout_new(ctx);
-    PangoFontDescription *desc_art =
+    PangoFontDescription *desc =
+        pango_font_description_from_string(THEME_FONT ":size=11");
+    PangoFontDescription *desc_g =
         pango_font_description_from_string(THEME_FONT ":size=7");
-    PangoFontDescription *desc_mark =
-        pango_font_description_from_string(THEME_FONT ":size=16");
-    PangoFontDescription *desc_lbl =
-        pango_font_description_from_string(THEME_FONT ":size=9");
+    pango_layout_set_font_description(lay, desc);
     pango_layout_set_single_paragraph_mode(lay, TRUE);
 
     rgb_t bg = hex_rgb(THEME_BG);
     rgb_t pink = hex_rgb(THEME_PINK);
-    rgb_t muted = hex_rgb(THEME_MUTED);
+    rgb_t dim = hex_rgb(THEME_MUTED);
     rgb_t silver = hex_rgb(THEME_SILVER);
-    rgb_t wellc = hex_rgb("#2a1218");
 
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, 0, 0, 0, 0);
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-    /* Glass shelf: translucent plate the wells sit in. */
-    {
-        cairo_pattern_t *g = cairo_pattern_create_linear(0, shelf_y, 0, want_h);
-        if (dock_depth == 32) {
-            cairo_pattern_add_color_stop_rgba(g, 0.0, 0x2a / 255.0, 0x12 / 255.0,
-                                              0x1c / 255.0, 0.62);
-            cairo_pattern_add_color_stop_rgba(g, 1.0, bg.r, bg.g, bg.b, 0.50);
-        } else {
-            cairo_pattern_add_color_stop_rgb(g, 0.0, 0x2a / 255.0, 0x12 / 255.0, 0x1c / 255.0);
-            cairo_pattern_add_color_stop_rgb(g, 1.0, bg.r, bg.g, bg.b);
-        }
-        round_rect(cr, 4, shelf_y, want_w - 8, want_h - shelf_y - 2, 18);
-        cairo_set_source(cr, g);
-        cairo_fill_preserve(cr);
-        cairo_pattern_destroy(g);
-        cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.40);
-        cairo_set_line_width(cr, 1.0);
-        cairo_stroke(cr);
+    pango_layout_set_text(lay, "M", -1);
+    int ch_w = 8, ch_h = 14;
+    pango_layout_get_pixel_size(lay, &ch_w, &ch_h);
+
+    pango_layout_set_text(lay, title, -1);
+    int tw = 0, th = 0;
+    pango_layout_get_pixel_size(lay, &tw, &th);
+    int inner = want_w - 2 * ch_w - 4;
+    if (inner < 20) inner = 20;
+
+    /* fill inside the box */
+    double a_fill = dock_depth == 32 ? 0.82 : 1.0;
+    cairo_set_source_rgba(cr, bg.r, bg.g, bg.b, a_fill);
+    cairo_rectangle(cr, 1, 1, want_w - 2, want_h - 2);
+    cairo_fill(cr);
+
+    cairo_set_source_rgb(cr, dim.r, dim.g, dim.b);
+    pango_layout_set_text(lay, "╭─", -1);
+    int x0 = 2, y0 = 4;
+    cairo_move_to(cr, x0, y0);
+    pango_cairo_show_layout(cr, lay);
+    int px1 = 0, py1 = 0;
+    pango_layout_get_pixel_size(lay, &px1, &py1);
+    cairo_set_source_rgb(cr, pink.r, pink.g, pink.b);
+    cairo_move_to(cr, x0 + px1, y0);
+    pango_layout_set_text(lay, title, -1);
+    pango_cairo_show_layout(cr, lay);
+    int tt = 0, thh = 0;
+    pango_layout_get_pixel_size(lay, &tt, &thh);
+    cairo_set_source_rgb(cr, dim.r, dim.g, dim.b);
+    int dx = x0 + px1 + tt;
+    while (dx + ch_w < want_w - ch_w - 2) {
+        pango_layout_set_text(lay, "─", -1);
+        cairo_move_to(cr, dx, y0);
+        pango_cairo_show_layout(cr, lay);
+        int dw = 0, dh = 0;
+        pango_layout_get_pixel_size(lay, &dw, &dh);
+        if (dw < 1) dw = ch_w;
+        dx += dw;
     }
+    pango_layout_set_text(lay, "╮", -1);
+    cairo_move_to(cr, want_w - ch_w - 2, y0);
+    pango_cairo_show_layout(cr, lay);
 
+    dock_row_y = y0 + thh + 2;
+    dock_row_h = DOCK_CELL_H;
+    int gx = DOCK_PAD_X + 4;
+    dock_ncells = shown;
     long now = now_ms();
+    double ht = 1.0;
+    if (hover_t0)
+        ht = (double)(now - hover_t0) / (double)DOCK_HOVER_MS;
+    if (ht > 1) ht = 1;
+    ht = 1.0 - (1.0 - ht) * (1.0 - ht);
 
-    int x = dock_start(want_w, n_slots);
+    pango_layout_set_font_description(lay, desc_g);
     for (int i = 0; i < shown; i++) {
-        int cx = x + DOCK_TILE_W / 2;
-        client_t *c = tiles[i].client;
-        int running = (c != NULL);
-        int dimmed = (c && c->minimized) || !running;
-        int focused = (c && wm->focus == c);
+        dock_cells[i].x = gx;
+        dock_cells[i].w = DOCK_CELL_W;
         int hov = (i == dock_hover_idx);
-        rgb_t ink = focused ? pink : (dimmed ? muted : silver);
-        double sc = 1.0;
+        client_t *c = tiles[i].client;
+        int running = c && !c->minimized;
+        int focused = c && wm->focus == c;
+        rgb_t ink = focused ? pink : (running ? silver : dim);
         if (hov) {
-            double t = hover_t0 ? (double)(now - hover_t0) / (double)DOCK_HOVER_MS : 1.0;
-            sc = dock_hover_scale(t);
+            cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.22 + 0.25 * ht);
+            cairo_rectangle(cr, gx, dock_row_y, DOCK_CELL_W, DOCK_CELL_H);
+            cairo_fill(cr);
+            ink = pink;
         }
-        double wx = cx - DOCK_WELL / 2.0;
-        double wy = well_y;
-        double ww = DOCK_WELL;
-
         cairo_save(cr);
-        cairo_translate(cr, cx, wy + ww);
-        cairo_scale(cr, sc, sc);
-        cairo_translate(cr, -cx, -(wy + ww));
-
-        round_rect(cr, wx, wy, ww, ww, 11);
-        cairo_set_source_rgb(cr, wellc.r, wellc.g, wellc.b);
-        cairo_fill_preserve(cr);
-        if (focused || hov) {
-            cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, hov ? 0.85 : 0.55);
-            cairo_set_line_width(cr, 1.2);
-            cairo_stroke(cr);
-        } else {
-            cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.18);
-            cairo_set_line_width(cr, 1.0);
-            cairo_stroke(cr);
-        }
-
-        cairo_rectangle(cr, wx, wy, ww, ww);
+        cairo_rectangle(cr, gx, dock_row_y, DOCK_CELL_W, DOCK_CELL_H);
         cairo_clip(cr);
-        const sigil_t *sig = tile_sigil(wm, &tiles[i]);
         cairo_set_source_rgb(cr, ink.r, ink.g, ink.b);
+        const sigil_t *sig = tile_sigil(wm, &tiles[i]);
         if (sig && sig->nlines > 0) {
-            pango_layout_set_font_description(lay, desc_art);
             int start = sig->nlines > 3 ? (sig->nlines - 3) / 2 : 0;
             int use = sig->nlines > 3 ? 3 : sig->nlines;
-            int total = 0;
-            int hs[4];
+            int ay = dock_row_y + 2;
             for (int li = 0; li < use; li++) {
                 pango_layout_set_text(lay, sig->lines[start + li], -1);
-                int tw = 0, th = 0;
-                pango_layout_get_pixel_size(lay, &tw, &th);
-                hs[li] = th;
-                total += th;
-            }
-            int ay = (int)wy + ((int)ww - total) / 2;
-            if (ay < (int)wy) ay = (int)wy;
-            for (int li = 0; li < use; li++) {
-                pango_layout_set_text(lay, sig->lines[start + li], -1);
-                int tw = 0, th = 0;
-                pango_layout_get_pixel_size(lay, &tw, &th);
-                cairo_move_to(cr, cx - tw / 2, ay);
+                int gw = 0, gh = 0;
+                pango_layout_get_pixel_size(lay, &gw, &gh);
+                cairo_move_to(cr, gx + (DOCK_CELL_W - gw) / 2, ay);
                 pango_cairo_show_layout(cr, lay);
-                ay += hs[li];
+                ay += gh;
             }
         } else {
             char ini[8];
-            const char *nm = tiles[i].is_pin && tiles[i].pin ? tiles[i].pin->label :
-                             (c && c->title ? c->title : "?");
+            const char *nm = tiles[i].is_pin && tiles[i].pin ? tiles[i].pin->label : "?";
             snprintf(ini, sizeof ini, "%c", nm[0] ? nm[0] : '?');
-            pango_layout_set_font_description(lay, desc_mark);
+            pango_layout_set_font_description(lay, desc);
             pango_layout_set_text(lay, ini, -1);
-            int tw = 0, th = 0;
-            pango_layout_get_pixel_size(lay, &tw, &th);
-            cairo_move_to(cr, cx - tw / 2, wy + (ww - th) / 2);
+            int gw = 0, gh = 0;
+            pango_layout_get_pixel_size(lay, &gw, &gh);
+            cairo_move_to(cr, gx + (DOCK_CELL_W - gw) / 2,
+                          dock_row_y + (DOCK_CELL_H - gh) / 2);
             pango_cairo_show_layout(cr, lay);
+            pango_layout_set_font_description(lay, desc_g);
         }
         cairo_restore(cr);
-
-        if (running && c && !c->minimized) {
+        if (running) {
             cairo_set_source_rgb(cr, pink.r, pink.g, pink.b);
-            cairo_arc(cr, cx, want_h - 7, 1.7, 0, 2 * M_PI);
-            cairo_fill(cr);
-        }
-
-        if (hov) {
-            char label[128];
-            tile_label(wm, &tiles[i], label, sizeof label);
-            pango_layout_set_font_description(lay, desc_lbl);
-            pango_layout_set_ellipsize(lay, PANGO_ELLIPSIZE_END);
-            pango_layout_set_width(lay, (DOCK_TILE_W + 24) * PANGO_SCALE);
-            pango_layout_set_text(lay, label, -1);
-            int tw = 0, th = 0;
-            pango_layout_get_pixel_size(lay, &tw, &th);
-            double lx = cx - tw / 2.0;
-            if (lx < 2) lx = 2;
-            if (lx + tw > want_w - 2) lx = want_w - 2 - tw;
-            round_rect(cr, lx - 4, 2, tw + 8, th + 4, 6);
-            cairo_set_source_rgb(cr, bg.r, bg.g, bg.b);
-            cairo_fill_preserve(cr);
-            cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.5);
-            cairo_set_line_width(cr, 1.0);
-            cairo_stroke(cr);
-            cairo_set_source_rgb(cr, pink.r, pink.g, pink.b);
-            cairo_move_to(cr, lx, 4);
+            pango_layout_set_font_description(lay, desc);
+            pango_layout_set_text(lay, "*", -1);
+            cairo_move_to(cr, gx + DOCK_CELL_W - 10, dock_row_y + DOCK_CELL_H - 14);
             pango_cairo_show_layout(cr, lay);
+            pango_layout_set_font_description(lay, desc_g);
         }
-        x += DOCK_TILE_W + DOCK_GAP;
+        gx += DOCK_CELL_W + DOCK_GAP;
     }
-
     if (overflow > 0) {
-        int cx = x + DOCK_TILE_W / 2;
-        char buf[16];
-        snprintf(buf, sizeof buf, "+%d", overflow);
-        pango_layout_set_font_description(lay, desc_mark);
-        pango_layout_set_text(lay, buf, -1);
-        int tw = 0, th = 0;
-        pango_layout_get_pixel_size(lay, &tw, &th);
-        cairo_set_source_rgb(cr, muted.r, muted.g, muted.b);
-        cairo_move_to(cr, cx - tw / 2, well_y + (DOCK_WELL - th) / 2);
+        pango_layout_set_font_description(lay, desc);
+        char more[16];
+        snprintf(more, sizeof more, "+%d", overflow);
+        cairo_set_source_rgb(cr, dim.r, dim.g, dim.b);
+        pango_layout_set_text(lay, more, -1);
+        cairo_move_to(cr, gx, dock_row_y + 8);
+        pango_cairo_show_layout(cr, lay);
+    }
+    if (mus[0] && gx + 80 < want_w - 12) {
+        pango_layout_set_font_description(lay, desc);
+        cairo_set_source_rgb(cr, pink.r, pink.g, pink.b);
+        pango_layout_set_text(lay, mus, -1);
+        cairo_move_to(cr, gx + 8, dock_row_y + (DOCK_CELL_H - ch_h) / 2);
         pango_cairo_show_layout(cr, lay);
     }
 
+    pango_layout_set_font_description(lay, desc);
+    cairo_set_source_rgb(cr, dim.r, dim.g, dim.b);
+    pango_layout_set_text(lay, "│", -1);
+    cairo_move_to(cr, 2, dock_row_y);
+    pango_cairo_show_layout(cr, lay);
+    cairo_move_to(cr, want_w - ch_w - 2, dock_row_y);
+    pango_cairo_show_layout(cr, lay);
+
+    int by = dock_row_y + DOCK_CELL_H + 2;
+    pango_layout_set_text(lay, "╰", -1);
+    cairo_move_to(cr, 2, by);
+    pango_cairo_show_layout(cr, lay);
+    int bx = 2 + ch_w;
+    pango_layout_set_text(lay, "─", -1);
+    int dw = ch_w, dh = ch_h;
+    pango_layout_get_pixel_size(lay, &dw, &dh);
+    if (dw < 1) dw = ch_w;
+    while (bx + dw < want_w - ch_w - 2) {
+        cairo_move_to(cr, bx, by);
+        pango_cairo_show_layout(cr, lay);
+        bx += dw;
+    }
+    pango_layout_set_text(lay, "╯", -1);
+    cairo_move_to(cr, want_w - ch_w - 2, by);
+    pango_cairo_show_layout(cr, lay);
+
     cairo_surface_flush(dock_surf);
     cairo_destroy(cr);
-    pango_font_description_free(desc_art);
-    pango_font_description_free(desc_mark);
-    pango_font_description_free(desc_lbl);
+    pango_font_description_free(desc);
+    pango_font_description_free(desc_g);
     g_object_unref(lay);
     g_object_unref(ctx);
     XCopyArea(dpy, dock_pix, dock_w, dock_gc, 0, 0,
@@ -702,67 +838,49 @@ void dock_tick(wm_t *wm)
         dock_shown = 0;
     }
     if (hover_t0 && now - hover_t0 < DOCK_HOVER_MS) dock_paint(wm);
+    else if (dock_shown && (now / 1000) != ((now - 16) / 1000))
+        dock_paint(wm); /* clock / RAM once a second */
 }
 
 void dock_click(wm_t *wm, int x_root, int y_root)
 {
     if (dock_w == None) return;
-    if (y_root < dock_y || y_root >= dock_y + dock_hh) return;
+    int lx = x_root - dock_x;
+    int ly = y_root - dock_cur_y;
+    int i = hit_cell(lx, ly);
+    if (i < 0) return;
 
     tile_t tiles[DOCK_TILES_MAX];
     int n = build_tiles(wm, tiles, DOCK_TILES_MAX);
-    int shown = n, overflow = 0;
-    if (n > DOCK_MAX_TILES) {
-        shown = DOCK_MAX_TILES - 1;
-        overflow = n - shown;
-    }
-    int x = dock_x + dock_start(dock_ww, shown);
-    for (int i = 0; i < shown; i++) {
-        if (x_root >= x && x_root < x + DOCK_TILE_W) {
-            tile_t *t = &tiles[i];
-            if (t->is_pin && !t->client) {
-                config_t *cfg = fae_cfg();
-                pid_t pid = spawn_cmd(t->pin->cmd);
-                if (pid > 0 && cfg) {
-                    for (int k = 0; k < cfg->npins; k++)
-                        if (&cfg->pins[k] == t->pin)
-                            cfg->pins[k].pid = (int)pid;
-                }
-                wmlog("dock launch %s", t->pin->label);
-                return;
-            }
-            client_t *c = t->client;
-            if (!c) return;
-            if (c->minimized) { client_unminimize(wm, c); return; }
-            if (wm->focus == c) client_minimize(wm, c);
-            else client_focus(wm, c);
-            return;
+    int shown = n;
+    if (n > DOCK_MAX_TILES) shown = DOCK_MAX_TILES - 1;
+    if (i >= shown) return;
+    tile_t *t = &tiles[i];
+    if (t->is_pin && !t->client) {
+        config_t *cfg = fae_cfg();
+        pid_t pid = spawn_cmd(t->pin->cmd);
+        if (pid > 0 && cfg) {
+            for (int k = 0; k < cfg->npins; k++)
+                if (&cfg->pins[k] == t->pin)
+                    cfg->pins[k].pid = (int)pid;
         }
-        x += DOCK_TILE_W + DOCK_GAP;
+        wmlog("dock launch %s", t->pin->label);
+        return;
     }
-    if (overflow > 0 && x_root >= x && x_root < x + DOCK_TILE_W) {
-        dock_refresh(wm);   /* overflow tile: repaint only */
-    }
+    client_t *c = t->client;
+    if (!c) return;
+    if (c->minimized) { client_unminimize(wm, c); return; }
+    if (wm->focus == c) client_minimize(wm, c);
+    else client_focus(wm, c);
 }
 
 void dock_hover(wm_t *wm, int x_root, int y_root)
 {
     int hit = -1;
-    if (dock_w != None && y_root >= dock_y && y_root < dock_y + dock_hh) {
-        tile_t tiles[DOCK_TILES_MAX];
-        int n = build_tiles(wm, tiles, DOCK_TILES_MAX);
-        int shown = n, overflow = 0;
-        if (n > DOCK_MAX_TILES) {
-            shown = DOCK_MAX_TILES - 1;
-            overflow = n - shown;
-        }
-        int x = dock_x + dock_start(dock_ww, shown);
-        for (int i = 0; i < shown; i++) {
-            if (x_root >= x && x_root < x + DOCK_TILE_W) { hit = i; break; }
-            x += DOCK_TILE_W + DOCK_GAP;
-        }
-        if (hit < 0 && overflow > 0 && x_root >= x && x_root < x + DOCK_TILE_W)
-            hit = -2;   /* overflow slot: no per-tile hover */
+    if (dock_w != None) {
+        int lx = x_root - dock_x;
+        int ly = y_root - dock_cur_y;
+        hit = hit_cell(lx, ly);
     }
     if (hit != dock_hover_idx) {
         dock_hover_idx = hit;
