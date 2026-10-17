@@ -434,12 +434,22 @@ static void dock_paint(wm_t *wm)
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-    /* No filled plate — wells sit on glass. Hairline only if we lack ARGB. */
-    if (dock_depth != 32) {
-        round_rect(cr, 0, shelf_y, want_w, want_h - shelf_y, 18);
-        cairo_set_source_rgb(cr, bg.r, bg.g, bg.b);
+    /* Glass shelf: translucent plate the wells sit in. */
+    {
+        cairo_pattern_t *g = cairo_pattern_create_linear(0, shelf_y, 0, want_h);
+        if (dock_depth == 32) {
+            cairo_pattern_add_color_stop_rgba(g, 0.0, 0x2a / 255.0, 0x12 / 255.0,
+                                              0x1c / 255.0, 0.62);
+            cairo_pattern_add_color_stop_rgba(g, 1.0, bg.r, bg.g, bg.b, 0.50);
+        } else {
+            cairo_pattern_add_color_stop_rgb(g, 0.0, 0x2a / 255.0, 0x12 / 255.0, 0x1c / 255.0);
+            cairo_pattern_add_color_stop_rgb(g, 1.0, bg.r, bg.g, bg.b);
+        }
+        round_rect(cr, 4, shelf_y, want_w - 8, want_h - shelf_y - 2, 18);
+        cairo_set_source(cr, g);
         cairo_fill_preserve(cr);
-        cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.45);
+        cairo_pattern_destroy(g);
+        cairo_set_source_rgba(cr, pink.r, pink.g, pink.b, 0.40);
         cairo_set_line_width(cr, 1.0);
         cairo_stroke(cr);
     }

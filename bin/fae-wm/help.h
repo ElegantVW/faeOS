@@ -8,5 +8,6 @@ void help_hide(wm_t *wm);
 int  help_visible(void);
 int  help_is_win(Window w);
 void help_expose(wm_t *wm);
+void help_tick(wm_t *wm);
 
 #endif

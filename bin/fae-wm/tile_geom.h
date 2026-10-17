@@ -3,6 +3,20 @@
 #define FAE_WM_TILE_GEOM_H
 
 #define TILE_KEEP 0.62
+#define TILE_MIN_W 420
+#define TILE_MIN_H 280
+
+static int tile_too_small(int w, int h)
+{
+    return w < TILE_MIN_W || h < TILE_MIN_H;
+}
+
+static double tile_ratio_clamp(double r)
+{
+    if (r < 0.15) return 0.15;
+    if (r > 0.85) return 0.85;
+    return r;
+}
 
 /* 0 = side by side, 1 = stacked. Wide cells split left/right. */
 static int tile_auto_split(int w, int h)

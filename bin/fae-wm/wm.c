@@ -177,6 +177,8 @@ static void run_bind(const bind_t *b)
         tile_set_split(b->arg && !strcmp(b->arg, "vertical"));
         break;
     case ACT_FLOAT:      tile_toggle_float(&W, c); break;
+    case ACT_EVEN:       tile_even(&W, c); break;
+    case ACT_LAYOUT:     tile_toggle_layout(&W); break;
     case ACT_RELOAD:     /* handled by main loop: re-exec ourselves */ break;
     case ACT_QUIT:       break;
     }
@@ -186,20 +188,23 @@ static void run_bind(const bind_t *b)
 static int resize_key(KeySym ks)
 {
     client_t *c = W.focus;
-    if (!c || c->fullscreen || !c->floated) return 0;
+    if (!c || c->fullscreen) return 0;
     int dx = 0, dy = 0, dw = 0, dh = 0;
     switch (ks) {
-    case XK_j: case XK_Left:  dw = -WM_RESIZE_STEP; break;
-    case XK_k: case XK_Down:  dh = WM_RESIZE_STEP; break;
-    case XK_l: case XK_Up:    dh = -WM_RESIZE_STEP; break;
-    case XK_semicolon: case XK_Right: dw = WM_RESIZE_STEP; break;
+    case XK_j: case XK_Left:  dx = -1; dw = -WM_RESIZE_STEP; break;
+    case XK_k: case XK_Down:  dy = 1;  dh = WM_RESIZE_STEP; break;
+    case XK_l: case XK_Up:    dy = -1; dh = -WM_RESIZE_STEP; break;
+    case XK_semicolon: case XK_Right: dx = 1; dw = WM_RESIZE_STEP; break;
     default: return 0;
     }
-    (void)dx; (void)dy;
+    if (!c->floated) {
+        tile_grow(&W, c, dx, dy);
+        return 1;
+    }
     c->w += dw; c->h += dh;
     if (c->w < 80) c->w = 80;
     if (c->h < 60) c->h = 60;
-    XMoveResizeWindow(W.dpy, c->xid, c->x, c->y, (unsigned)c->w, (unsigned)c->h);
+    frame_layout(&W, c);
     return 1;
 }
 
@@ -803,6 +808,7 @@ int wm_run(Display *dpy, int scr, config_t *cfg)
         if (FD_ISSET(wake_pipe[0], &fds)) break;
         dock_tick(&W);
         tile_tick(&W);
+        help_tick(&W);
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);

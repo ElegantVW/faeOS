@@ -12,6 +12,9 @@ void tile_set_split(int vert);          /* one-shot: 0 side by side, 1 stacked *
 void tile_note_focus_dir(int dx, int dy);
 void tile_toggle_float(wm_t *wm, client_t *c);
 void tile_swap_dir(wm_t *wm, client_t *c, int dx, int dy);
+void tile_grow(wm_t *wm, client_t *c, int dx, int dy);
+void tile_even(wm_t *wm, client_t *c);
+void tile_toggle_layout(wm_t *wm);
 int  tile_desk_fullscreen(wm_t *wm);
 
 #endif

@@ -23,6 +23,7 @@ struct tnode {
 static tnode_t *roots[WM_NDESKS];
 static int force_split = -1; /* -1 auto, 0 side, 1 stacked (one shot) */
 static int last_dx, last_dy;
+static int desk_master[WM_NDESKS]; /* 1 = master+stack for this desk */
 static void leaf_box(tnode_t *n, int x, int y, int w, int h, int gap,
                      client_t *want, int *ox, int *oy, int *ow, int *oh);
 
@@ -114,6 +115,36 @@ static void lay(tnode_t *n, int x, int y, int w, int h, int gap)
     lay(n->b, bx, by, bw, bh, gap);
 }
 
+static void collect_leaves(tnode_t *n, client_t **out, int *cnt, int max)
+{
+    if (!n || *cnt >= max) return;
+    if (n->c) {
+        if (is_tiled(n->c)) out[(*cnt)++] = n->c;
+        return;
+    }
+    collect_leaves(n->a, out, cnt, max);
+    collect_leaves(n->b, out, cnt, max);
+}
+
+static tnode_t *largest_leaf(wm_t *wm, int d)
+{
+    tnode_t *best = NULL;
+    long best_a = 0;
+    int g = wm->gap;
+    for (client_t *c = wm->clients; c; c = c->next) {
+        if (c->desk != d || !is_tiled(c)) continue;
+        int ox = 0, oy = 0, ow = 0, oh = 0;
+        leaf_box(roots[d], g, g, wm->sw - 2 * g, wm->sh - 2 * g, g,
+                 c, &ox, &oy, &ow, &oh);
+        long a = (long)ow * (long)oh;
+        if (a > best_a) {
+            best_a = a;
+            best = find_leaf(roots[d], c);
+        }
+    }
+    return best;
+}
+
 void tile_retile(wm_t *wm)
 {
     int g = wm->gap;
@@ -124,7 +155,39 @@ void tile_retile(wm_t *wm)
     if (h < 64) h = 64;
     int d = wm->cur_desk;
     if (d < 0 || d >= WM_NDESKS) return;
-    lay(roots[d], x, y, w, h, g);
+    if (desk_master[d]) {
+        client_t *list[64];
+        int n = 0;
+        collect_leaves(roots[d], list, &n, 64);
+        if (n == 0) {
+            /* fall through empty */
+        } else {
+            int mi = 0;
+            if (wm->focus)
+                for (int i = 0; i < n; i++)
+                    if (list[i] == wm->focus) { mi = i; break; }
+            client_t *master = list[mi];
+            if (n == 1)
+                goal_anim(master, x, y, w, h);
+            else {
+                int mw = (int)((w - g) * TILE_KEEP);
+                int sw = w - g - mw;
+                goal_anim(master, x, y, mw, h);
+                int rest = n - 1;
+                int each = (h - g * (rest - 1)) / rest;
+                if (each < 32) each = 32;
+                int sy = y;
+                int sx = x + mw + g;
+                for (int i = 0; i < n; i++) {
+                    if (list[i] == master) continue;
+                    goal_anim(list[i], sx, sy, sw, each);
+                    sy += each + g;
+                }
+            }
+        }
+    } else {
+        lay(roots[d], x, y, w, h, g);
+    }
     for (client_t *c = wm->clients; c; c = c->next) {
         if (c->desk != d) continue;
         if (c->fullscreen || c->minimized) continue;
@@ -183,6 +246,15 @@ void tile_insert(wm_t *wm, client_t *c)
     leaf_box(roots[d], wm->gap, wm->gap, wm->sw - 2 * wm->gap, wm->sh - 2 * wm->gap,
              wm->gap, at->c, &ox, &oy, &ow, &oh);
     if (ow > 0 && oh > 0) { cw = ow; ch = oh; }
+    if (force_split < 0 && tile_too_small(cw, ch)) {
+        tnode_t *big = largest_leaf(wm, d);
+        if (big && big->c) {
+            at = big;
+            leaf_box(roots[d], wm->gap, wm->gap, wm->sw - 2 * wm->gap,
+                     wm->sh - 2 * wm->gap, wm->gap, at->c, &ox, &oy, &ow, &oh);
+            if (ow > 0 && oh > 0) { cw = ow; ch = oh; }
+        }
+    }
 
     int vert;
     if (force_split >= 0) {
@@ -315,4 +387,46 @@ int tile_desk_fullscreen(wm_t *wm)
         if (c->desk == wm->cur_desk && c->fullscreen && !c->minimized)
             return 1;
     return 0;
+}
+
+static int is_under_a(tnode_t *p, tnode_t *n)
+{
+    while (n && n->parent != p) n = n->parent;
+    return n && p->a == n;
+}
+
+void tile_grow(wm_t *wm, client_t *c, int dx, int dy)
+{
+    if (!c || !is_tiled(c)) return;
+    tnode_t *leaf = find_leaf(roots[c->desk], c);
+    if (!leaf || !leaf->parent) return;
+    tnode_t *p = leaf->parent;
+    int under_a = is_under_a(p, leaf);
+    double d = 0.05;
+    if (!p->vert) {
+        if (under_a) p->ratio += d * dx;
+        else p->ratio -= d * dx;
+    } else {
+        if (under_a) p->ratio += d * (-dy);
+        else p->ratio -= d * (-dy);
+    }
+    p->ratio = tile_ratio_clamp(p->ratio);
+    tile_retile(wm);
+}
+
+void tile_even(wm_t *wm, client_t *c)
+{
+    if (!c) return;
+    tnode_t *leaf = find_leaf(roots[c->desk], c);
+    if (!leaf || !leaf->parent) return;
+    leaf->parent->ratio = 0.5;
+    tile_retile(wm);
+}
+
+void tile_toggle_layout(wm_t *wm)
+{
+    int d = wm->cur_desk;
+    if (d < 0 || d >= WM_NDESKS) return;
+    desk_master[d] = !desk_master[d];
+    tile_retile(wm);
 }

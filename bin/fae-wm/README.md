@@ -28,6 +28,8 @@ Keys (rebindable, see Config):
 - `Super+h` help overlay
 - `Super+Shift+q` close · `Super+m` minimize · `Super+Shift+f` maximize · `Super+f` fullscreen
 - `Super+v` / `Super+s` next split stacked / side-by-side
+- `Super+e` even split · `Super+t` dwindle / master-stack
+- `Super+r` then hjkl grow the split (tile) or resize (float)
 - `Super+Shift+Space` float / tile
 - `Super+j/k/l/;` focus · `Super+Shift+j/k/l/;` swap (tiled) or nudge (float)
 - `Super+Return` terminal · `Super+1..0` workspaces

@@ -63,6 +63,11 @@ int main(void)
     ok(tile_new_is_b(-1, 0) == 0, "walked left → new is a");
     ok(tile_new_is_b(0, -1) == 0, "walked up → new is a");
     ok(TILE_KEEP > 0.5 && TILE_KEEP < 0.7, "focus keeps the larger share");
+    ok(tile_too_small(200, 800) == 1, "narrow cell is too small to slice");
+    ok(tile_too_small(800, 200) == 1, "short cell is too small to slice");
+    ok(tile_too_small(800, 600) == 0, "roomy cell may split");
+    ok(tile_ratio_clamp(0.01) >= 0.15 && tile_ratio_clamp(0.99) <= 0.85,
+       "ratio stays in bounds");
 
     if (fails) {
         fprintf(stderr, "%d fail(s)\n", fails);
