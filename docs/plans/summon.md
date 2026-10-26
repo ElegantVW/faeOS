@@ -16,3 +16,10 @@ Not here — use `scroll` and switch tabs (Siren · Pixie · Ether · …), or `
 ## Notes
 - Implementation lives in `bin/scroll`; `bin/summon` is a thin exec wrapper.
 - Mouse / filter / cache behaviour shared with the PATH tab of scroll.
+- `bin/scroll` prefers `~/.local/lib/faeos/scroll-rs`,
+  `/usr/local/lib/faeos/scroll-rs`, then `~/scroll/target/release/scroll-rs`;
+  the Python implementation remains the fallback.
+- Rust writes its picker to the controlling TTY when stdout is captured by
+  the `pixie.zsh` `print -z` widget, leaving stdout for the selected command.
+- Roll back one invocation with `SCROLL_BIN="$HOME/scroll/scroll" summon`
+  or `SCROLL_BIN="$HOME/scroll/scroll" scroll --path`.

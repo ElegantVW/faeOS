@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scroll — thin launcher (the book lives in ElegantVW/scroll)
-# Discovery: SCROLL_BIN → ~/.local/lib/faeos/scroll → sibling tree
+# Discovery: SCROLL_BIN → installed Rust → checkout Rust → Python fallback
 set -euo pipefail
 
 USER_HOME="${HOME}"
@@ -11,6 +11,10 @@ fi
 
 CANDIDATES=(
   "${SCROLL_BIN:-}"
+  "$USER_HOME/.local/lib/faeos/scroll-rs"
+  /usr/local/lib/faeos/scroll-rs
+  "$USER_HOME/scroll/target/release/scroll-rs"
+  "${SCROLL_ROOT:-}/target/release/scroll-rs"
   "$USER_HOME/.local/lib/faeos/scroll"
   /usr/local/lib/faeos/scroll
   "$USER_HOME/scroll/scroll"
