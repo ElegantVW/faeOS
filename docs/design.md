@@ -34,19 +34,28 @@ faeOS should make the **terminal** the superpower: keyboard-first, fast, scripta
 
 Always disable mouse in `tui_cleanup`. Shift+drag stays with the terminal for text selection.
 
-**Apps with clickable lists (wave 2):** Siren · Scroll (fae + PATH tabs; Summon = PATH) · Spellbook  
+**Apps with clickable lists (wave 2):** Siren · Scroll (lesson and PATH pages; Summon = PATH) · Spellbook
 (click select · double-click activate · wheel). Keyboard remains complete.
 
-**Scroll / Summon:** encyclopedia of every app (except Kur) with intro · how+keys · CLI · runes that **run** the app; PATH tab / `summon` for system launcher. Cries/sprites per creature: future Scroll-only flavor.
+**Scroll / Summon:** Grove's first-time guide to its apps, with intro · how+keys · CLI · runes that **run** the app; the last PATH page / `summon` opens the system launcher. The Rust app is canonical; faeOS retains a thin launcher and Python rollback.
 
 ## Languages
 
 | Tier | When | Examples |
 |------|------|----------|
 | Rust | privilege, speed, long-running | Bulwark, Seal, Fairy-Lantern, Wisp, Hearth, Rift, Siren, Pixie, Spellbook |
-| Python | house TUIs, glue | Imp, Scroll, menagerie… |
+| Python | house TUIs, glue | Imp, Scroll rollback, menagerie… |
 
 Stay lean (suite ≪ 100 MB). No big-bang rewrite.
+
+## Keyboard contract
+
+Grove's shared action names and default combinations live in
+[keyboard-shortcuts.md](keyboard-shortcuts.md), with versioned source data in
+`config/keyboard-shortcuts.json`. Shared `cycle_next` and `cycle_previous`
+bindings are Tab and Shift+Tab; app context determines which ordered views,
+pages, or modes cycle. Keep shell line-editor widgets and system Alt+Tab
+switching separate from in-app navigation.
 
 ## Related
 
