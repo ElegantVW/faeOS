@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# codex — thin launcher (never a prebuilt ELF in git)
+# Discovery: CODEX_BIN → ~/.local/lib/faeos/codex → sibling tree
+set -euo pipefail
+
+USER_HOME="${HOME}"
+if [[ -n "${SUDO_USER:-}" ]]; then
+  USER_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+  USER_HOME="${USER_HOME:-$HOME}"
+fi
+
+CANDIDATES=(
+  "${CODEX_BIN:-}"
+  "$USER_HOME/.local/lib/faeos/codex"
+  /usr/local/lib/faeos/codex
+  "$USER_HOME/codex/target/release/codex"
+  "${CODEX_ROOT:-}/target/release/codex"
+)
+here="$(cd "$(dirname "$0")" && pwd)"
+if [[ -x "$here/../target/release/codex" ]]; then
+  CANDIDATES+=("$here/../target/release/codex")
+fi
+
+for c in "${CANDIDATES[@]}"; do
+  [[ -n "$c" && -x "$c" ]] || continue
+  exec "$c" "$@"
+done
+
+echo "codex: engine not built yet." >&2
+echo "  next:  cd ~/codex && ./build.sh install --house" >&2
+exit 127

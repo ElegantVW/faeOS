@@ -59,7 +59,10 @@ void client_focus(wm_t *wm, client_t *c);    /* focus + raise + borders + EWMH *
 void client_hover(wm_t *wm, client_t *c);    /* focus only: no raise, no reorder */
 void client_show_desk(wm_t *wm, int desk);  /* switch workspace */
 void client_to_desk(wm_t *wm, client_t *c, int desk);
+void client_set_full(wm_t *wm, client_t *c, int on);
 void client_toggle_full(wm_t *wm, client_t *c);
+void client_sync_state(wm_t *wm, client_t *c);   /* _NET_WM_STATE property */
+int  client_should_takeover(wm_t *wm, client_t *c, int w, int h);
 void client_toggle_max(wm_t *wm, client_t *c);   /* gaps-aware maximize */
 void client_minimize(wm_t *wm, client_t *c);
 void client_unminimize(wm_t *wm, client_t *c);   /* map + focus */

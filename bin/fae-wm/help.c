@@ -15,7 +15,7 @@
 #endif
 
 #define HELP_W  460
-#define HELP_H  420
+#define HELP_H  470
 #define HELP_MS 180
 
 static const char *GROVE[] = {
@@ -27,6 +27,8 @@ static const char *GROVE[] = {
 };
 
 static const char *HELP =
+    "✦ Jana ✦          spins the rooms\n"
+    "Super+d           launch\n"
     "Super+Shift+q     close\n"
     "Super+m           minimize\n"
     "Super+Shift+f     maximize\n"
@@ -40,6 +42,7 @@ static const char *HELP =
     "Super+Shift+jkl;  swap (tiled) or nudge\n"
     "Super+1..0        workspace\n"
     "Super+Return      terminal\n"
+    "Super+= / -       dock size\n"
     "\n"
     "Super+h or Esc    close this";
 

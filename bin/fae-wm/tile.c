@@ -219,7 +219,7 @@ void tile_tick(wm_t *wm)
 
 void tile_insert(wm_t *wm, client_t *c)
 {
-    if (!c || c->floated || c->above) return;
+    if (!c || c->floated || c->above || c->fullscreen) return;
     int d = c->desk;
     if (d < 0 || d >= WM_NDESKS) return;
     if (!roots[d]) {

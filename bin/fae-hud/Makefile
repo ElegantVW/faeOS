@@ -1,8 +1,11 @@
-# fae-hud — themed window cycler panel.
+# fae-hud — themed window switcher panel.
+#
+# Minimal remake: EWMH window list, house pink-chrome panel, Alt+Tab gesture.
+# No icons, no window-manager coupling, no daemon.
 #
 # Libraries: Xlib for the window and its properties, cairo for the drawing
-# (round corners and per-pixel alpha both need it — Xft has no arc primitive),
-# pangocairo for shaped, ellipsised text.
+# (round corners and per-pixel alpha both need it), pangocairo for shaped,
+# ellipsised text.
 #
 #   make            build ./fae-hud
 #   make install    copy to ~/bin
@@ -16,8 +19,8 @@ LDLIBS   = $(shell pkg-config --libs $(PKGS))
 
 PREFIX  ?= $(HOME)/bin
 BIN      = fae-hud
-SRC      = main.c wm.c hud.c hold.c entry.c icon.c mru.c
-HDR      = wm.h hud.h theme.h hold.h entry.h icon.h mru.h
+SRC      = main.c list.c panel.c gesture.c
+HDR      = list.h panel.h gesture.h theme.h
 
 all: $(BIN)
 

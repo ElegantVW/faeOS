@@ -12,9 +12,9 @@ typedef struct {
     Atom wm_desktop, wm_state, wm_state_fullscreen;
     Atom wm_state_maxv, wm_state_maxh;
     Atom wm_window_type, wm_window_type_dock, wm_window_type_desktop;
-    Atom wm_window_type_dialog, wm_window_type_utility;
+    Atom wm_window_type_dialog, wm_window_type_utility, wm_window_type_splash;
     Atom close_window;
-    Atom wm_name, utf8_string;
+    Atom wm_name, wm_class, utf8_string;
     Atom wm_protocols, wm_delete_window;
 } atoms_t;
 

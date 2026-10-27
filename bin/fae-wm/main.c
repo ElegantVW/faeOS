@@ -1,4 +1,4 @@
-/* main.c — fae-wm, the house window manager. Floating-first, EWMH, with
+/* main.c — Jana, the house window manager. Tiling by default, EWMH, with
  * the Alt+Tab switcher built in (Mod1+Tab). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +12,7 @@
 static void usage(void)
 {
     fprintf(stderr,
-        "fae-wm — the house window manager\n"
+        "fae-wm — Jana, the house window manager\n"
         "  fae-wm             run (fails if another WM owns the display)\n"
         "  fae-wm --check    validate the config file and exit\n"
         "  fae-wm --help     this\n"

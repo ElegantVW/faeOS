@@ -29,9 +29,8 @@ player. Rather than add a guard around a trap, the trap was removed.
 Going with it:
 
 - `tests/test_siren.py` (25 tests). It loaded `bin/siren` through a
-  `SourceFileLoader`, so it had no subject once the player was gone. **This
-  leaves Siren with 2 unit tests in `src/spectrum.rs` and no integration
-  coverage** — that gap is real and is recorded in `CHANGELOG.md`.
+  `SourceFileLoader`, so it had no subject once the player was gone.
+  Engine tests live in the siren repo (`cargo test`, 88+ and growing).
 - `docs/SIREN_QUICK_START.md`, a development guide to the Python player.
 
 ## The surface the kit depends on
@@ -41,7 +40,7 @@ Going with it:
     siren                          interactive TUI
     siren play|next|prev|stop|pause|now
     siren queue|playlist|radio|cast
-    siren trove 10 music lofi     free media, Internet Archive
+    siren trove music lofi     free media, Internet Archive
     siren trove get <id>          download into ~/Music/trove, ~/Videos/trove
 
 Music uses **mpv** IPC at `/tmp/siren-mpv.sock` for prompt and tick

@@ -1,5 +1,12 @@
 # faeOS changelog
 
+## Grove shortcut contract (2026-10-26)
+
+- Added a central action catalog for shared in-app cycling: Tab advances and
+  Shift+Tab reverses, with app-local navigation context.
+- Added a generator and drift check for Codex, Pixie, Siren, Scroll, and Wisp.
+- Kept system Alt+Tab and shell line-editor widgets in their own input contexts.
+
 ## tests-unblocked (2026-09-27)
 
 Supersedes the 2026-09-26 note that said *"pytest absent on this box (unittest

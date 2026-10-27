@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# wisp — thin launcher (never a prebuilt ELF in git)
+set -euo pipefail
+
+USER_HOME="${HOME}"
+if [[ -n "${SUDO_USER:-}" ]]; then
+  USER_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+  USER_HOME="${USER_HOME:-$HOME}"
+fi
+
+CANDIDATES=(
+  "${WISP_BIN:-}"
+  "$USER_HOME/.local/lib/faeos/wisp"
+  /usr/local/lib/faeos/wisp
+  "$USER_HOME/wisp/target/release/wisp"
+  "${WISP_ROOT:-}/target/release/wisp"
+)
+here="$(cd "$(dirname "$0")" && pwd)"
+if [[ -x "$here/../target/release/wisp" ]]; then
+  CANDIDATES+=("$here/../target/release/wisp")
+fi
+
+for c in "${CANDIDATES[@]}"; do
+  [[ -n "$c" && -x "$c" ]] || continue
+  exec "$c" "$@"
+done
+
+echo "wisp: engine not built yet." >&2
+echo "  build:  cd ~/wisp && ./build.sh install --house" >&2
+exit 127

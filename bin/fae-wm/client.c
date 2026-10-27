@@ -10,6 +10,7 @@
 #include "dock.h"
 #include "theme.h"
 #include "wm.h"
+#include "takeover.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -146,7 +147,7 @@ static void apply_initial_state(wm_t *wm, client_t *c)
     int actual_format;
     unsigned long nitems, bytes_after;
     unsigned char *data = NULL;
-    if (XGetWindowProperty(wm->dpy, c->xid, wm->atoms.wm_state, 0, 8, False,
+    if (XGetWindowProperty(wm->dpy, c->xid, wm->atoms.wm_state, 0, 16, False,
                            XA_ATOM, &actual_type, &actual_format, &nitems,
                            &bytes_after, &data) != Success)
         return;
@@ -192,7 +193,13 @@ void client_manage(wm_t *wm, Window xid)
     c->above = win_type_is(wm->dpy, &wm->atoms, xid, wm->atoms.wm_window_type_dock) ||
                win_type_is(wm->dpy, &wm->atoms, xid, wm->atoms.wm_window_type_desktop);
     c->floated = win_type_is(wm->dpy, &wm->atoms, xid, wm->atoms.wm_window_type_dialog) ||
-                 win_type_is(wm->dpy, &wm->atoms, xid, wm->atoms.wm_window_type_utility);
+                 win_type_is(wm->dpy, &wm->atoms, xid, wm->atoms.wm_window_type_utility) ||
+                 win_type_is(wm->dpy, &wm->atoms, xid, wm->atoms.wm_window_type_splash);
+    {
+        Window trans = None;
+        if (XGetTransientForHint(wm->dpy, xid, &trans) && trans)
+            c->floated = 1;
+    }
 
     if (c->x == 0 && c->y == 0) {
         int k = wm->cascade_n++ % 12;
@@ -217,8 +224,18 @@ void client_manage(wm_t *wm, Window xid)
         return;
     }
     stack_add(wm, xid);
-    if (!c->floated && !c->fullscreen && !c->above)
+    if (!c->fullscreen && !c->above &&
+        client_should_takeover(wm, c, c->w, c->h))
+        client_set_full(wm, c, 1);
+    else if (!c->floated && !c->fullscreen && !c->above)
         tile_insert(wm, c);
+    {
+        char *cls = ewmh_class(wm->dpy, xid);
+        wmlog("manage %dx%d class=%s %s%s", c->w, c->h, cls ? cls : "?",
+              c->title ? c->title : "",
+              c->fullscreen ? " fullscreen" : c->floated ? " float" : " tile");
+        free(cls);
+    }
     client_focus(wm, c);
     dock_refresh(wm);
     ewmh_sync(wm);
@@ -369,31 +386,93 @@ void client_to_desk(wm_t *wm, client_t *c, int desk)
     tile_retile(wm);
 }
 
-void client_toggle_full(wm_t *wm, client_t *c)
+int client_should_takeover(wm_t *wm, client_t *c, int w, int h)
+{
+    XClassHint ch;
+    int game = 0, host = 0, desk_full, take;
+    if (!wm || !c || c->above) return 0;
+    memset(&ch, 0, sizeof ch);
+    if (XGetClassHint(wm->dpy, c->xid, &ch)) {
+        game = class_is_game(ch.res_name) || class_is_game(ch.res_class);
+        host = class_is_takeover(ch.res_name) || class_is_takeover(ch.res_class);
+        if (ch.res_name) XFree(ch.res_name);
+        if (ch.res_class) XFree(ch.res_class);
+    }
+    desk_full = tile_desk_fullscreen(wm);
+    /* Steam Big Picture is 1280×800 (host + large), not monitor-sized, and
+     * the desk is empty of fullscreen when it maps beside kitty. */
+    take = size_is_takeover(wm->sw, wm->sh, w, h) || game ||
+           (host && size_is_large(wm->sw, wm->sh, w, h)) ||
+           (desk_full && size_is_large(wm->sw, wm->sh, w, h));
+    if (c->floated && !size_is_takeover(wm->sw, wm->sh, w, h) && !game &&
+        !(host && size_is_large(wm->sw, wm->sh, w, h)))
+        return 0;
+    return take;
+}
+
+void client_set_full(wm_t *wm, client_t *c, int on)
 {
     if (!c) return;
-    if (c->maximized) {
-        c->maximized = 0;
-        c->x = c->sx; c->y = c->sy; c->w = c->sw; c->h = c->sh;
-    }
-    if (!c->fullscreen) {
+    if (on && c->fullscreen) return;
+    if (!on && !c->fullscreen) return;
+    if (on) {
+        if (c->maximized) {
+            c->maximized = 0;
+            c->x = c->sx; c->y = c->sy; c->w = c->sw; c->h = c->sh;
+        }
         c->sx = c->x; c->sy = c->y; c->sw = c->w; c->sh = c->h;
+        tile_remove(wm, c);
         c->fullscreen = 1;
         c->x = 0; c->y = 0; c->w = wm->sw; c->h = wm->sh;
-        Atom state[1] = { wm->atoms.wm_state_fullscreen };
-        XChangeProperty(wm->dpy, c->xid, wm->atoms.wm_state, XA_ATOM, 32,
-                        PropModeReplace, (unsigned char *)state, 1);
+        {
+            Atom state[1] = { wm->atoms.wm_state_fullscreen };
+            XChangeProperty(wm->dpy, c->xid, wm->atoms.wm_state, XA_ATOM, 32,
+                            PropModeReplace, (unsigned char *)state, 1);
+        }
     } else {
         c->fullscreen = 0;
         XDeleteProperty(wm->dpy, c->xid, wm->atoms.wm_state);
         c->x = c->sx; c->y = c->sy; c->w = c->sw; c->h = c->sh;
         constrain(wm, &c->x, &c->y, c->w, c->h);
+        if (!c->floated && !c->above)
+            tile_insert(wm, c);
     }
     frame_layout(wm, c);
     if (c->fullscreen)
         XSetWindowBorderWidth(wm->dpy, c->frame ? c->frame : c->xid, 0);
     stack_raise(wm, c);
     tile_retile(wm);
+    dock_refresh(wm);
+    ewmh_sync(wm);
+}
+
+void client_toggle_full(wm_t *wm, client_t *c)
+{
+    if (!c) return;
+    client_set_full(wm, c, !c->fullscreen);
+}
+
+void client_sync_state(wm_t *wm, client_t *c)
+{
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems, bytes_after;
+    unsigned char *data = NULL;
+    int full = 0;
+    if (!c) return;
+    if (XGetWindowProperty(wm->dpy, c->xid, wm->atoms.wm_state, 0, 16, False,
+                           XA_ATOM, &actual_type, &actual_format, &nitems,
+                           &bytes_after, &data) != Success)
+        return;
+    if (data && actual_format == 32) {
+        unsigned long i;
+        for (i = 0; i < nitems; i++)
+            if (((Atom *)data)[i] == wm->atoms.wm_state_fullscreen)
+                full = 1;
+    }
+    if (data) XFree(data);
+    if (full != c->fullscreen)
+        client_set_full(wm, c, full);
 }
 
 void client_toggle_max(wm_t *wm, client_t *c)

@@ -9,8 +9,10 @@ A single weave that answers to several names (multi-call):
   status ether    one-shot report: bt · wifi · lan at a glance
 
   ether net                    connectivity (IPv4/IPv6, archive.org probe)
+  ether link [target]          show / select the internet path (lan · usb tether)
   ether veil [on|off|status]   raise/lower the VPN veil  (alias: ether vpn)
   ether bridge                 phone-hotspot fallback (runs at boot via systemd)
+  ether ap [on|off|status]     house Wi-Fi AP (iw + hostapd; NetworkManager-free)
   ether about                  help
 
 Install as symlinks so each name reads as English:
@@ -22,6 +24,7 @@ Free media lives under Siren now:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import pty
@@ -31,6 +34,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -87,6 +91,39 @@ _load_nether_env()
 NETHER_SSID = os.environ.get("ETHER_NETHER_SSID", "").strip()
 NETHER_PSK = os.environ.get("ETHER_NETHER_PSK", "").strip()
 NETHER_CON = os.environ.get("ETHER_NETHER_CON", "").strip() or NETHER_SSID
+
+
+# House AP weave — the NetworkManager-free path. Credentials live in
+#   ~/.config/ether/ap.env   (chmod 600; ETHER_AP_IFACE / ETHER_AP_SSID / ETHER_AP_PSK)
+# falling back to ~/.config/wisp/ap.env (WISP_AP_*) so the existing wisp
+# file keeps working. The PSK is NEVER printed — status may only say
+# "psk set". `ether ap` drives iw + hostapd directly; nmcli stays out of it.
+def _load_ap_env() -> dict:
+    """iface/ssid/psk for the house AP. ether's own file wins per key."""
+    cfg = {"iface": "", "ssid": "", "psk": ""}
+    field = {"IFACE": "iface", "SSID": "ssid", "PSK": "psk"}
+    for path, prefix in (
+        (Path.home() / ".config" / "ether" / "ap.env", "ETHER_AP_"),
+        (Path.home() / ".config" / "wisp" / "ap.env", "WISP_AP_"),
+    ):
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            if not k.startswith(prefix):
+                continue
+            f = field.get(k[len(prefix):])
+            if f and not cfg[f]:
+                cfg[f] = v.strip().strip("'").strip('"')
+    return cfg
 
 
 def eprint(*a, **k) -> None:
@@ -298,6 +335,685 @@ def cmd_bridge(args: argparse.Namespace) -> int:
         return 1
     if not args.quiet:
         eprint("tether bound.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ether ap — the house Wi-Fi access point (NetworkManager-free)
+# ---------------------------------------------------------------------------
+# NM-free on purpose: bridge/veil keep their nmcli phone-client path, but the
+# AP is driven straight on the radio with iw + hostapd (+ dnsmasq for DHCP
+# when present). No NetworkManager state is read or written here.
+
+_AP_NET = "192.168.42.1/24"
+
+
+def _ap_runtime() -> Path:
+    """Private runtime dir for hostapd/dnsmasq conf + pids (0700)."""
+    p = Path(f"/run/user/{os.getuid()}/ether")
+    p.mkdir(parents=True, exist_ok=True)
+    os.chmod(p, 0o700)
+    return p
+
+
+def _ap_conf(iface: str, daemon: str) -> Path:
+    return _ap_runtime() / f"{daemon}.{iface}.conf"
+
+
+def _ap_pidfile(iface: str, daemon: str) -> Path:
+    return _ap_runtime() / f"{daemon}.{iface}.pid"
+
+
+def _iw_dev_type(dev: str) -> str:
+    """managed | monitor | ap | … — from `iw dev <dev> info`."""
+    iw = shutil.which("iw")
+    if not iw:
+        return "?"
+    try:
+        r = subprocess.run([iw, "dev", dev, "info"], text=True,
+                           capture_output=True, timeout=10, check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return "?"
+    m = re.search(r"^\s*type\s+(\S+)", r.stdout or "", re.M)
+    return m.group(1) if m else "?"
+
+
+def _iw_channel(dev: str) -> tuple[str, int]:
+    """(hw_mode, channel) from `iw dev <dev> info` — ('g', 10)."""
+    iw = shutil.which("iw")
+    if not iw:
+        return ("g", 6)
+    try:
+        r = subprocess.run([iw, "dev", dev, "info"], text=True,
+                           capture_output=True, timeout=10, check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return ("g", 6)
+    m = re.search(r"channel\s+(\d+)\s+\((\d+)\s+MHz\)", r.stdout or "")
+    if not m:
+        return ("g", 6)
+    chan, mhz = int(m.group(1)), int(m.group(2))
+    return ("a" if mhz >= 3000 else "g", chan)
+
+
+def _proc_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _daemon_alive(iface: str, daemon: str) -> bool:
+    """True when our pidfile names a live `daemon` process on this iface."""
+    try:
+        pid = int(_ap_pidfile(iface, daemon).read_text(
+            encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    if not _proc_alive(pid):
+        return False
+    try:
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(
+            b"\0", b" ").decode(errors="replace")
+    except OSError:
+        return False
+    return daemon in cmd and iface in cmd
+
+
+def _stop_daemon(iface: str, daemon: str) -> None:
+    """Terminate one daemon we started (pidfile, never a blind pkill)."""
+    try:
+        pid = int(_ap_pidfile(iface, daemon).read_text(
+            encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    if _proc_alive(pid):
+        try:
+            os.kill(pid, 15)
+            for _ in range(20):
+                if not _proc_alive(pid):
+                    break
+                time.sleep(0.1)
+            if _proc_alive(pid):
+                os.kill(pid, 9)
+        except OSError:
+            pass
+    try:
+        _ap_pidfile(iface, daemon).unlink()
+    except OSError:
+        pass
+
+
+def cmd_ap(args: argparse.Namespace) -> int:
+    """Raise / lower / report the house AP — iw + hostapd, no nmcli."""
+    cfg = _load_ap_env()
+    iface = cfg["iface"] or "wlp41s0"
+    action = (args.action or "status").lower()
+
+    if action == "status":
+        ssid = cfg["ssid"] or "—"
+        psk = "psk set" if len(cfg["psk"]) >= 8 else "psk missing"
+        print(f"iface {iface}  type {_iw_dev_type(iface)}  ssid {ssid}"
+              f"  {psk}  hostapd {'up' if _daemon_alive(iface, 'hostapd') else 'down'}")
+        if not cfg["ssid"]:
+            eprint("no AP credentials — write ~/.config/ether/ap.env (0600):")
+            eprint("  ETHER_AP_IFACE=wlp41s0  ETHER_AP_SSID=…  ETHER_AP_PSK=… (8+ chars)")
+            return 1
+        return 0
+
+    if action == "off":
+        _stop_daemon(iface, "dnsmasq")
+        _stop_daemon(iface, "hostapd")
+        for f in (_ap_conf(iface, "hostapd"), _ap_conf(iface, "dnsmasq")):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        # Restore a sane state: leave __ap, come back managed (never monitor).
+        subprocess.run(["ip", "link", "set", iface, "down"],
+                       capture_output=True, timeout=15, check=False)
+        subprocess.run(["iw", "dev", iface, "set", "type", "managed"],
+                       capture_output=True, timeout=15, check=False)
+        subprocess.run(["ip", "link", "set", iface, "up"],
+                       capture_output=True, timeout=15, check=False)
+        print(f"ap down — {iface} managed")
+        return 0
+
+    # action == "on"
+    hostapd = shutil.which("hostapd")
+    if not hostapd:
+        eprint("hostapd is not installed — the house AP cannot rise.")
+        eprint("  install:  pacman -S hostapd")
+        return 1
+    if not shutil.which("iw") or not shutil.which("ip"):
+        eprint("the house AP path needs iw and ip (iproute2).")
+        return 1
+    if not cfg["ssid"] or len(cfg["psk"]) < 8:
+        eprint("no AP credentials — write ~/.config/ether/ap.env (0600):")
+        eprint("  ETHER_AP_IFACE=wlp41s0  ETHER_AP_SSID=…  ETHER_AP_PSK=… (8+ chars)")
+        return 1
+    if _daemon_alive(iface, "hostapd"):
+        print(f"ap already up — ssid {cfg['ssid']} on {iface}")
+        return 0
+
+    # Leave monitor if the radio sits there (aircrack leftover), then __ap.
+    cur = _iw_dev_type(iface)
+    if cur == "monitor":
+        subprocess.run(["ip", "link", "set", iface, "down"],
+                       capture_output=True, timeout=15, check=False)
+        subprocess.run(["iw", "dev", iface, "set", "type", "__ap"],
+                       capture_output=True, timeout=15, check=False)
+    if _iw_dev_type(iface) not in ("ap", "__ap"):
+        r = subprocess.run(["iw", "dev", iface, "set", "type", "__ap"],
+                           capture_output=True, timeout=15, check=False)
+        if r.returncode != 0:
+            eprint(f"cannot set {iface} to AP mode: {(r.stderr or '').strip()}")
+            return 1
+
+    hw_mode, chan = _iw_channel(iface)
+    conf = _ap_conf(iface, "hostapd")
+    conf.write_text(
+        f"interface={iface}\n"
+        f"driver=nl80211\n"
+        f"ssid={cfg['ssid']}\n"
+        f"hw_mode={hw_mode}\n"
+        f"channel={chan}\n"
+        f"wpa=2\n"
+        f"wpa_passphrase={cfg['psk']}\n"
+        f"wpa_key_mgmt=WPA-PSK\n"
+        f"rsn_pairwise=CCMP\n",
+        encoding="utf-8",
+    )
+    os.chmod(conf, 0o600)
+
+    subprocess.run(["ip", "addr", "flush", "dev", iface],
+                   capture_output=True, timeout=15, check=False)
+    subprocess.run(["ip", "addr", "add", _AP_NET, "dev", iface],
+                   capture_output=True, timeout=15, check=False)
+    subprocess.run(["ip", "link", "set", iface, "up"],
+                   capture_output=True, timeout=15, check=False)
+
+    proc = subprocess.Popen(
+        [hostapd, "-P", str(_ap_pidfile(iface, "hostapd")), str(conf)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    _ap_pidfile(iface, "hostapd").write_text(str(proc.pid), encoding="utf-8")
+
+    up = False
+    err = ""
+    for _ in range(30):  # ~3s for hostapd to come up or fail
+        time.sleep(0.1)
+        if proc.poll() is not None:
+            err = (proc.stderr.read() or b"").decode(errors="replace").strip()
+            break
+        if _daemon_alive(iface, "hostapd") and _iw_dev_type(iface) == "ap":
+            up = True
+            break
+    if not up:
+        _stop_daemon(iface, "hostapd")
+        try:
+            conf.unlink()
+        except OSError:
+            pass
+        eprint(f"hostapd failed on {iface}: {err or 'no AP mode after 3s'}")
+        return 1
+
+    # Tiny DHCP for clients on the AP (speakers need addresses). Optional.
+    dnsmasq = shutil.which("dnsmasq")
+    if dnsmasq:
+        dconf = _ap_conf(iface, "dnsmasq")
+        dconf.write_text(
+            f"interface={iface}\n"
+            f"dhcp-range={_AP_NET.rsplit('.', 1)[0]}.50,{_AP_NET.rsplit('.', 1)[0]}.150,12h\n"
+            f"dhcp-option=3,{_AP_NET.split('/')[0]}\n",
+            encoding="utf-8",
+        )
+        os.chmod(dconf, 0o600)
+        dproc = subprocess.Popen(
+            [dnsmasq, "--no-daemon", "--pid-file"
+             f"={_ap_pidfile(iface, 'dnsmasq')}", "-C", str(dconf)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        _ap_pidfile(iface, "dnsmasq").write_text(str(dproc.pid), encoding="utf-8")
+        dhcp = " + dhcp"
+    else:
+        eprint("no dnsmasq — clients need static addresses on "
+               f"{_AP_NET.rsplit('.', 1)[0]}.0/24 (optional: pacman -S dnsmasq)")
+        dhcp = ""
+
+    print(f"ap up — ssid {cfg['ssid']} on {iface} ({_AP_NET}){dhcp}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ether link — network path discovery & selection
+# ---------------------------------------------------------------------------
+# Distinguishes wired LAN (PCI/onboard ethernet) from USB tether / USB
+# network adapters, wifi and vpn/other paths. Signals used: sysfs uevent
+# (DEVTYPE), sysfs device symlink (a USB bus in the path = USB NIC),
+# sysfs speed/carrier/operstate, `ip` routing state and — when present —
+# systemd-networkd per-interface state (networkctl status). No root needed
+# to discover; selection steers routes/metrics via `ip route` and triggers
+# DHCP via `networkctl reconfigure` — never touches tailscale.
+
+_LINK_CFG = os.path.expanduser("~/.config/ether/link.json")
+_LINK_METRIC_PREF = 50   # preferred path
+_LINK_METRIC_BACK = 100  # demoted path
+
+
+def _ip(*args: str, timeout: float = 8) -> str:
+    """Run ip(8) and return stdout; "" when unavailable."""
+    ip = shutil.which("ip")
+    if not ip:
+        return ""
+    try:
+        r = subprocess.run([ip, *args], text=True, capture_output=True,
+                           timeout=timeout, check=False)
+        return r.stdout or ""
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def _networkctl_status(dev: str, timeout: float = 8) -> dict:
+    """Parse `networkctl status <dev>` — networkd's view of one interface.
+
+    Returns {state, addresses, gateway, dns, network_file}; {} when
+    networkctl is unavailable or the query fails. Never needs root.
+    """
+    nc = shutil.which("networkctl")
+    if not nc:
+        return {}
+    try:
+        r = subprocess.run([nc, "status", dev], text=True,
+                           capture_output=True, timeout=timeout,
+                           check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return {}
+    if r.returncode != 0 and not (r.stdout or "").strip():
+        return {}
+    info: dict = {"state": "", "addresses": [], "gateway": "",
+                  "dns": [], "network_file": ""}
+    for ln in (r.stdout or "").splitlines():
+        key, _, val = ln.strip().partition(":")
+        key = key.strip().lower()
+        val = val.strip()
+        if key == "state":
+            info["state"] = val
+        elif key == "address" and val:
+            info["addresses"].append(val.split()[0])
+        elif key == "gateway" and val:
+            info["gateway"] = val.split()[0]
+        elif key == "dns" and val:
+            info["dns"].append(val.split()[0])
+        elif key == "network file" and val:
+            info["network_file"] = val
+    return info
+
+
+def _sysfs(dev: str, name: str) -> str:
+    try:
+        return (Path("/sys/class/net") / dev / name).read_text(
+            encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _default_routes() -> list[dict]:
+    """Every default route, lowest metric first."""
+    routes: list[dict] = []
+    for ln in _ip("route", "show", "default").splitlines():
+        rt: dict = {"via": "", "dev": "", "metric": 0, "raw": ln.strip()}
+        parts = ln.split()
+        for i, p in enumerate(parts):
+            nxt = parts[i + 1] if i + 1 < len(parts) else ""
+            if p == "via":
+                rt["via"] = nxt
+            elif p == "dev":
+                rt["dev"] = nxt
+            elif p == "metric":
+                try:
+                    rt["metric"] = int(nxt)
+                except ValueError:
+                    pass
+        if rt["dev"]:
+            routes.append(rt)
+    routes.sort(key=lambda r: r["metric"])
+    return routes
+
+
+def _iface_ips() -> dict[str, list[str]]:
+    """dev → [ipv4…] parsed from `ip -4 addr show` (works on any iproute2)."""
+    out: dict[str, list[str]] = {}
+    dev = ""
+    for ln in _ip("-4", "addr", "show").splitlines():
+        if ln and not ln[0].isspace():
+            m = re.match(r"\d+:\s+([^:\s]+):", ln)
+            dev = m.group(1) if m else ""
+        elif "inet " in ln and dev:
+            m = re.search(r"inet\s+(\S+)", ln)
+            if m:
+                out.setdefault(dev, []).append(m.group(1))
+    return out
+
+
+def _iface_kind(dev: str, devlink: str, uevent: str, wireless: bool) -> str:
+    """lan | usb | wifi | vpn | other | loopback."""
+    if dev == "lo":
+        return "loopback"
+    if "/usb" in devlink:
+        return "usb"           # USB tether or USB NIC (device hangs off a usb bus)
+    if wireless or "DEVTYPE=wlan" in uevent:
+        return "wifi"
+    if devlink.startswith("/sys/devices/virtual"):
+        return "vpn" if "vpn" in dev.lower() else "other"
+    return "lan"             # plain PCI / onboard ethernet
+
+
+def _path_label(kind: str, dev: str) -> str:
+    if kind == "lan":
+        return "wired LAN"
+    if kind == "usb":
+        return "USB tether"
+    if kind == "wifi":
+        return "wifi"
+    if kind == "vpn":
+        return "VPN"
+    if "tailscale" in dev.lower():
+        return "tailscale"
+    return "other path"
+
+
+def _load_selection() -> dict:
+    try:
+        with open(_LINK_CFG) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_selection(sel: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(_LINK_CFG), exist_ok=True)
+        with open(_LINK_CFG, "w") as f:
+            json.dump(sel, f)
+    except OSError:
+        pass
+
+
+def discover_paths() -> dict:
+    """Every network path + the effective default route.
+
+    Works with systemd-networkd (networkctl) or plain iproute2;
+    no root required.
+    """
+    out: dict = {
+        "default": None,
+        "paths": [],
+        "networkmanager": bool(shutil.which("nmcli")),
+        "networkd": bool(shutil.which("networkctl")),
+        "selection": _load_selection(),
+    }
+    routes = _default_routes()
+    if routes:
+        out["default"] = routes[0]
+
+    dev_route: dict[str, dict] = {}
+    for rt in routes:
+        dev_route.setdefault(rt["dev"], rt)
+
+    ipmap = _iface_ips()
+
+    try:
+        devs = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        devs = []
+
+    for dev in devs:
+        base = Path("/sys/class/net") / dev
+        uevent = ""
+        devlink = ""
+        wireless = False
+        try:
+            uevent = (base / "uevent").read_text(encoding="utf-8",
+                                                 errors="replace")
+            devlink = os.path.realpath(base / "device")
+            wireless = (base / "wireless").is_dir()
+        except OSError:
+            continue
+        kind = _iface_kind(dev, devlink, uevent, wireless)
+        if kind == "loopback":
+            continue
+        try:
+            driver = os.path.basename(os.readlink(base / "device" / "driver"))
+        except OSError:
+            driver = ""
+        try:
+            spd = int(_sysfs(dev, "speed"))
+            speed = spd if spd > 0 else None
+        except ValueError:
+            speed = None
+        carrier = _sysfs(dev, "carrier") == "1"
+        operup = _sysfs(dev, "operstate") == "up"
+        nc = _networkctl_status(dev) if out["networkd"] else {}
+        out["paths"].append({
+            "dev": dev,
+            "kind": kind,
+            "label": _path_label(kind, dev),
+            "driver": driver,
+            "speed": speed,
+            "operstate": _sysfs(dev, "operstate"),
+            "carrier": carrier,
+            "ips": ipmap.get(dev, []),
+            "gateway": (dev_route.get(dev, {}).get("via", "")
+                        or nc.get("gateway", "")),
+            "metric": dev_route.get(dev, {}).get("metric"),
+            "connection": (os.path.basename(nc["network_file"])
+                           if nc.get("network_file") else nc.get("state", "")),
+            "nm_type": "networkd" if nc else "",
+            "nm_state": nc.get("state", ""),
+            "networkd": nc,
+            "current": bool(routes and routes[0]["dev"] == dev),
+            "usable": (carrier or operup) and bool(ipmap.get(dev)),
+        })
+    return out
+
+
+def _run_cmd(cmd: list[str], *, timeout: float = 90) -> tuple[bool, str]:
+    """Run cmd; escalate to `sudo -n` only when the plain run is denied."""
+    def once(argv: list[str]) -> tuple[bool, str]:
+        try:
+            r = subprocess.run(argv, text=True, capture_output=True,
+                               timeout=timeout, check=False)
+            tail = (r.stderr or r.stdout or "").strip().splitlines()
+            return r.returncode == 0, (tail[-1] if tail else "")
+        except subprocess.TimeoutExpired:
+            return False, "timed out"
+        except OSError as e:
+            return False, str(e)
+
+    ok, out = once(cmd)
+    if ok:
+        return True, out
+    if not any(k in out.lower() for k in
+               ("permission", "permitted", "denied", "authorized",
+                "allowed", "commit")):
+        return False, out
+    sok, sout = once(["sudo", "-n", *cmd])
+    if sok:
+        return True, "(via sudo) " + sout
+    return False, "needs sudo — run as root: sudo " + " ".join(cmd)
+
+
+def _select_path(cand: dict, disc: dict) -> tuple[bool, str, list[list[str]]]:
+    """Plan how to make `cand` the preferred internet path
+    (systemd-networkd / iproute2 — never NetworkManager).
+
+    Returns (ok, error, commands). Metric steering only: the current
+    managed path is demoted, the target promoted — tailscale / vpn /
+    other paths are never touched.
+    """
+    cmds: list[list[str]] = []
+    cur = disc.get("default") or {}
+    cur_cand = next((p for p in disc.get("paths", [])
+                     if p.get("dev") == cur.get("dev")), None)
+
+    def managed(p: dict) -> bool:
+        """Paths we may steer — never tailscale / vpn."""
+        return (p.get("kind") in ("lan", "usb", "wifi")
+                and "tailscale" not in p.get("dev", "").lower())
+
+    # demote the current path (only paths we manage — never tailscale)
+    if (cur_cand and cur_cand["dev"] != cand["dev"]
+            and managed(cur_cand)
+            and cur_cand.get("gateway")
+            and cur_cand["gateway"] != cand.get("gateway")):
+        cmds.append(["ip", "route", "replace", "default",
+                     "via", cur_cand["gateway"],
+                     "dev", cur_cand["dev"],
+                     "metric", str(_LINK_METRIC_BACK)])
+
+    # promote the target
+    if cand.get("gateway"):
+        cmds.append(["ip", "route", "replace", "default",
+                     "via", cand["gateway"], "dev", cand["dev"],
+                     "metric", str(_LINK_METRIC_PREF)])
+    elif cand.get("kind") == "lan":
+        # No gateway yet — trigger DHCP so a lease (and its default
+        # route) appears. The interface's .network file carries a
+        # [DHCPv4] RouteMetric, so networkd installs the route at
+        # the preferred metric automatically.
+        cmds.append(["networkctl", "reconfigure", cand["dev"]])
+    else:
+        return False, (f"no gateway on {cand['label']} ({cand['dev']}) "
+                       "— is it connected?"), cmds
+    return True, "", cmds
+
+
+def cmd_link(args: argparse.Namespace) -> int:
+    """ether link — show / select the preferred network path."""
+    quiet = bool(getattr(args, "quiet", False))
+    disc = discover_paths()
+    paths = disc.get("paths", [])
+    cur = disc.get("default") or {}
+    cur_cand = next((p for p in paths if p.get("dev") == cur.get("dev")), None)
+
+    if getattr(args, "json", False):
+        print(json.dumps(disc, indent=2))
+        return 0
+
+    target = (getattr(args, "target", None) or "").strip().lower()
+    if not target:
+        if quiet:
+            return 0
+        banner("Ether ✦", "link — network paths")
+        lines: list[str] = []
+        if cur_cand:
+            first_ip = cur_cand["ips"][0] if cur_cand["ips"] else "—"
+            via = f"  via {cur['via']}" if cur.get("via") else ""
+            lines.append(art.paint(
+                f"  ▶ current: {cur_cand['label']}  ·  {cur['dev']}  ·  "
+                f"{first_ip}{via}  ·  metric {cur.get('metric', 0)}", P.OK))
+        elif cur.get("dev"):
+            lines.append(art.paint(f"  ▶ current: {cur['dev']} (unmanaged path)",
+                                   P.WARN))
+        else:
+            lines.append(art.paint("  ▶ current: no default route — offline?",
+                                   P.WARN))
+        sel = disc.get("selection") or {}
+        if sel.get("preferred"):
+            lines.append(art.paint(f"  · selected: {sel['preferred']}", P.MUTED))
+        lines.append("")
+        lines.append(art.paint("  candidates:", "1;" + P.PINK))
+        if not paths:
+            lines.append(art.paint("    no network paths found", P.MUTED))
+        order = {"lan": 0, "usb": 1, "wifi": 2, "vpn": 3}
+        for p in sorted(paths, key=lambda p: (order.get(p["kind"], 4), p["dev"])):
+            mark = "▶" if p.get("current") else "·"
+            state = "usable" if p.get("usable") else "down"
+            speed = f"  {p['speed']}M" if p.get("speed") else ""
+            ips = p["ips"][0] if p["ips"] else "—"
+            con = f"  ({p['connection']})" if p.get("connection") else ""
+            tag = "  ◀ current" if p.get("current") else ""
+            lines.append(f"    {mark}  {p['label']:<12}  {p['dev']:<16}  "
+                         f"{ips:<18}{speed}  {state}{con}{tag}")
+        lines.append("")
+        lines.append(art.paint(
+            "  select: ether link lan | usb | tether | wifi | <connection>",
+            P.MUTED))
+        print(art.box(lines, title="link", width=art.term_width(),
+                      body_style=(P.SILVER,)))
+        print()
+        return 0
+
+    # ── selection ──────────────────────────────────────────────
+    aliases = {"lan": "lan", "wired": "lan", "ethernet": "lan",
+               "usb": "usb", "tether": "usb", "tethering": "usb",
+               "wifi": "wifi", "wireless": "wifi"}
+    want = aliases.get(target, target)
+    if want in ("lan", "usb", "wifi", "vpn"):
+        cand = next((p for p in paths if p.get("kind") == want and p.get("usable")), None)
+        if cand is None:
+            cand = next((p for p in paths if p.get("kind") == want), None)
+    else:
+        cand = next((p for p in paths
+                     if want in (p.get("connection") or "").lower()
+                     or want == p.get("dev").lower()), None)
+
+    kinds = ", ".join(sorted({p["kind"] for p in paths})) or "none"
+    if cand is None:
+        if not quiet:
+            print(art.box([f"no such path — {target}",
+                           f"candidates: {kinds}"],
+                          title="Ether", body_style=(P.WARN),
+                          width=art.term_width()))
+        return 1
+
+    sel = {"preferred": cand.get("connection") or cand["kind"],
+           "dev": cand["dev"], "ts": int(time.time())}
+    if cand.get("current") and not getattr(args, "dry_run", False):
+        _save_selection(sel)
+        if not quiet:
+            print(art.box([f"{cand['label']} ({cand['dev']}) already carries "
+                           "the default route"],
+                          title="Ether", body_style=(P.OK,), width=art.term_width()))
+        return 0
+
+    ok, err, cmds = _select_path(cand, disc)
+    if not ok:
+        if not quiet:
+            print(art.box([err], title="Ether", body_style=(P.WARN),
+                          width=art.term_width()))
+        return 1
+
+    if getattr(args, "dry_run", False):
+        lines = [f"dry run — would steer the ether to {cand['label']} ({cand['dev']})"]
+        lines += [f"  $ {' '.join(c)}" for c in cmds]
+        if any(c[0] == "networkctl" for c in cmds):
+            lines.append(f"  # DHCP on {cand['dev']} will then install its "
+                         f"default route at metric {_LINK_METRIC_PREF}")
+        if not quiet:
+            print(art.box(lines, title="Ether", body_style=(P.MUTED,),
+                          width=art.term_width()))
+        return 0
+
+    for c in cmds:
+        cok, cout = _run_cmd(c)
+        if not cok:
+            if not quiet:
+                print(art.box([f"could not steer the ether to {cand['label']}: "
+                               f"{cout}"],
+                              title="Ether", body_style=(P.WARN),
+                              width=art.term_width()))
+            return 1
+    _save_selection(sel)
+    if not quiet:
+        print(art.box([f"the ether bends to {cand['label']} ({cand['dev']})"],
+                      title="Ether", body_style=(P.OK,), width=art.term_width()))
     return 0
 
 
@@ -877,6 +1593,7 @@ def _collect_status() -> dict:
     data["sinks"] = _wpctl_sinks()
     data["dls"] = _collect_downloads()
     data["heos"] = _heos_cached()  # cache only — live sweep is `ether speakers`
+    data["path"] = discover_paths()  # current + selected network path
     return data
 
 
@@ -925,6 +1642,30 @@ def _wifi_panel(data: dict, width: int) -> str:
 
 def _lan_panel(data: dict, width: int) -> str:
     lines = []
+    # current / selected network path (wired LAN vs USB tether vs …)
+    path = data.get("path") or {}
+    cur = path.get("default") or {}
+    paths = path.get("paths") or []
+    cur_cand = next((p for p in paths if p.get("dev") == cur.get("dev")), None)
+    if cur_cand or paths:
+        if cur_cand:
+            first_ip = cur_cand["ips"][0] if cur_cand["ips"] else "—"
+            lines.append(art.paint(
+                f"  ▶ path: {cur_cand['label']}  ·  {cur['dev']}  ·  {first_ip}",
+                P.OK))
+        else:
+            lines.append(art.paint(
+                f"  ▶ path: {cur.get('dev', '—')}  ·  unmanaged", P.WARN))
+        sel = path.get("selection") or {}
+        if sel.get("preferred"):
+            lines.append(art.paint(f"  · selected: {sel['preferred']}", P.MUTED))
+        for p in paths:
+            if p.get("dev") == cur.get("dev"):
+                continue
+            state = "usable" if p.get("usable") else "down"
+            lines.append(art.paint(f"  · {p['label']}  {p['dev']}  {state}",
+                                   P.MUTED))
+        lines.append("")
     if not data["lan"]:
         lines.append(art.paint("  probing…", P.MUTED))
     for label, ok in data["lan"]:
@@ -1104,7 +1845,7 @@ def build_frame(data: dict, width: int, height: int) -> str:
     lan = _lan_panel(data, panel_w)
     dls = _downloads_panel(data.get("dls", []), panel_w)
     footer = art.box(
-        ["w whisper · l listen · s scan · n new · d remove · R restart · r refresh · q quit"],
+        ["w whisper · l listen · s scan · n new (wifi · bt · wired lan) · d remove · R restart · r refresh · q quit"],
         title="runes", width=width, body_style=(P.MUTED,),
     )
     return "\n".join([bt, "", wifi, "", lan, "", dls, "", footer])
@@ -1123,14 +1864,19 @@ def _menu_frame(title: str, items: list, sel: int, width: int) -> str:
     return art.box(lines, title=title, width=width, body_style=(P.SILVER,))
 
 
-def _input_frame(prompt: str, value: str, secret: bool, width: int) -> str:
+def _input_frame(prompt: str, value: str, secret: bool,
+                 width: int, err: str = "") -> str:
     shown = "•" * len(value) if secret else value
-    return art.box([art.paint(f"  {prompt}", P.SILVER), "", f"  {shown}█"],
-                   title="weave · input", width=width, body_style=(P.SILVER,))
+    lines = [art.paint(f"  {prompt}", P.SILVER), "", f"  {shown}█"]
+    if err:
+        lines += ["", art.paint(f"  ⚠ {err}", P.ERR)]
+    return art.box(lines, title="weave · input", width=width,
+                   body_style=(P.SILVER,))
 
 
-def _confirm_frame(msg: str, width: int) -> str:
-    return art.box([f"  {msg}", "", "  y  yes        n / esc  no"],
+def _confirm_frame(msg: str | list[str], width: int) -> str:
+    lines = list(msg) if isinstance(msg, list) else [f"  {msg}"]
+    return art.box([*lines, "", "  y  yes        n / esc  no"],
                    title="are you sure?", width=width, body_style=(P.WARN,))
 
 
@@ -1349,6 +2095,302 @@ def _wifi_connect_do(ui: dict, net: dict, psk: str) -> None:
     _start_work(ui, f"weaving into {net['ssid']}", run)
 
 
+# ---------------------------------------------------------------------------
+# wired LAN / static IPv4 — systemd-networkd profiles woven by ether
+# ---------------------------------------------------------------------------
+
+# .network files ether creates sort before 20-ethernet.network so the
+# static profile wins for the matched interface.
+_LAN_PROFILE_PREFIX = "10-ether-"
+LAN_PROFILE_MARKER = "# managed-by: ether link"
+
+
+def _lan_profile_filename(dev: str) -> str:
+    """/etc/systemd/network filename for an ether-woven LAN profile."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", (dev or "").strip()) or "lan"
+    return f"{_LAN_PROFILE_PREFIX}{safe}.network"
+
+
+def _parse_lan_cidr(text: str) -> tuple[str, str]:
+    """Validate a static IPv4 address in CIDR form → (addr, error)."""
+    raw = (text or "").strip()
+    if not raw:
+        return "", "address required — e.g. 192.168.11.1/24"
+    if "/" not in raw:
+        return "", "CIDR form required — e.g. 192.168.11.1/24"
+    try:
+        iface = ipaddress.ip_interface(raw)
+    except ValueError as e:
+        return "", f"not an address/prefix: {e}"
+    if iface.version != 4:
+        return "", "IPv4 only — IPv6 is not woven yet"
+    return str(iface), ""
+
+
+def _parse_lan_gateway(text: str) -> tuple[str, str]:
+    """Optional gateway → (gateway, error); blank is allowed."""
+    raw = (text or "").strip()
+    if not raw:
+        return "", ""
+    try:
+        net = ipaddress.ip_network(raw, strict=False)
+    except ValueError as e:
+        return "", f"not a gateway: {e}"
+    if net.version != 4:
+        return "", "gateway must be IPv4"
+    return str(net.network_address), ""
+
+
+def _parse_lan_dns(text: str) -> tuple[list[str], str]:
+    """Optional DNS servers (comma or space separated) → ([addrs], error)."""
+    raw = (text or "").strip()
+    if not raw:
+        return [], ""
+    out: list[str] = []
+    for part in re.split(r"[,\s]+", raw):
+        if not part:
+            continue
+        try:
+            addr = ipaddress.ip_address(part)
+        except ValueError:
+            return [], f"not a DNS address: {part}"
+        if addr.version != 4:
+            return [], f"DNS must be IPv4: {part}"
+        out.append(str(addr))
+    return out, ""
+
+
+def _lan_network_content(dev: str, addr: str, gateway: str = "",
+                       dns: list[str] | None = None) -> str:
+    """Render the .network profile for a static IPv4 LAN."""
+    lines = [
+        LAN_PROFILE_MARKER,
+        "[Match]",
+        f"Name={dev}",
+        "",
+        "[Network]",
+        f"Address={addr}",
+    ]
+    if gateway:
+        lines.append(f"Gateway={gateway}")
+    for server in dns or []:
+        lines.append(f"DNS={server}")
+    return "\n".join(lines) + "\n"
+
+
+def _lan_managed_profiles() -> list[Path]:
+    """.network profiles under /etc/systemd/network woven by ether."""
+    out: list[Path] = []
+    try:
+        entries = sorted((Path("/etc/systemd/network")).glob("*.network"))
+    except OSError:
+        return out
+    for path in entries:
+        if path.name.startswith(_LAN_PROFILE_PREFIX):
+            out.append(path)
+            continue
+        try:
+            if LAN_PROFILE_MARKER in path.read_text(encoding="utf-8",
+                                                  errors="replace"):
+                out.append(path)
+        except OSError:
+            continue
+    return out
+
+
+def _sudo_run(argv: list[str], pw: str, timeout: float = 90) -> tuple[bool, str]:
+    """Run a privileged command, password on stdin (`sudo -S`)."""
+    try:
+        r = subprocess.run(["sudo", "-S", "-p", "", *argv],
+                           input=pw + "\n", text=True, capture_output=True,
+                           timeout=timeout, check=False)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"sudo failed: {e}"
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return False, (tail[-1] if tail else "sudo failed")
+    return True, ""
+
+
+def _lan_apply_profile(dev: str, addr: str, gateway: str = "",
+                     dns: list[str] | None = None,
+                     pw: str = "") -> tuple[bool, str]:
+    """Write the profile with `sudo install`, then reload networkd."""
+    name = _lan_profile_filename(dev)
+    dest = f"/etc/systemd/network/{name}"
+    content = _lan_network_content(dev, addr, gateway, dns)
+    try:
+        fd, tmpname = tempfile.mkstemp(prefix="ether-", suffix=".network")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as e:
+        return False, f"could not stage the profile: {e}"
+    try:
+        for argv in (["install", "-m", "644", tmpname, dest],
+                     ["networkctl", "reload"],
+                     ["networkctl", "reconfigure", dev]):
+            ok, err = _sudo_run(argv, pw)
+            if not ok:
+                return False, err
+    finally:
+        try:
+            os.unlink(tmpname)
+        except OSError:
+            pass
+    return True, f"wired profile woven into {dev}"
+
+
+def _lan_remove_profile(path: Path, pw: str) -> tuple[bool, str]:
+    """Remove an ether-woven profile with sudo, then reload networkd."""
+    ok, err = _sudo_run(["rm", "-f", str(path)], pw)
+    if not ok:
+        return False, err
+    ok, err = _sudo_run(["networkctl", "reload"], pw)
+    if not ok:
+        return False, err
+    return True, f"unravelled {path.name}"
+
+
+def _new_lan_flow(ui: dict) -> None:
+    def run() -> tuple[bool, str] | None:
+        disc = discover_paths()
+        wired = [p for p in disc.get("paths", [])
+                 if p.get("kind") in ("lan", "usb")
+                 and "tailscale" not in p.get("dev", "").lower()]
+        if not wired:
+            return False, "no wired paths found — is the cable in?"
+        ui["mode"] = "menu"
+        ui["title"] = "wired paths"
+        ui["sel"] = 0
+        ui["items"] = []
+        for p in wired:
+            ips = p["ips"][0] if p["ips"] else "—"
+            gw = f"  via {p['gateway']}" if p.get("gateway") else ""
+            ui["items"].append(
+                (f"{p['label']}  {p['dev']}  {ips}{gw}",
+                 lambda u, dev=p["dev"], path=p: _lan_input_addr(u, dev, path)))
+        return None
+    _start_work(ui, "reading the wired paths", run)
+
+
+def _lan_input_addr(ui: dict, dev: str, path: dict) -> None:
+    ui["mode"] = "input"
+    ui["prompt"] = f"static IPv4 for {dev} (CIDR, e.g. 192.168.11.1/24):"
+    ui["value"] = ""
+    ui["secret"] = False
+    ui["input_err"] = ""
+    ui["input_cb"] = lambda u, addr: _lan_input_gw(u, dev, path, addr)
+
+
+def _lan_input_gw(ui: dict, dev: str, path: dict, addr: str) -> None:
+    parsed, err = _parse_lan_cidr(addr)
+    if err:
+        ui["mode"] = "input"
+        ui["input_err"] = err
+        ui["value"] = addr
+        return
+    lan = {"dev": dev, "path": path, "addr": parsed}
+    ui["mode"] = "input"
+    ui["prompt"] = f"gateway for {dev} (blank to skip):"
+    ui["value"] = ""
+    ui["secret"] = False
+    ui["input_err"] = ""
+    ui["input_cb"] = lambda u, gw: _lan_input_dns(u, lan, gw)
+
+
+def _lan_input_dns(ui: dict, lan: dict, gw: str) -> None:
+    parsed, err = _parse_lan_gateway(gw)
+    if err:
+        ui["mode"] = "input"
+        ui["input_err"] = err
+        ui["value"] = gw
+        return
+    lan["gateway"] = parsed
+    ui["mode"] = "input"
+    ui["prompt"] = (f"DNS servers for {lan['dev']} "
+                    "(comma or space separated, blank to skip):")
+    ui["value"] = ""
+    ui["secret"] = False
+    ui["input_err"] = ""
+    ui["input_cb"] = lambda u, dns: _lan_confirm(u, lan, dns)
+
+
+def _lan_confirm(ui: dict, lan: dict, dns_text: str) -> None:
+    servers, err = _parse_lan_dns(dns_text)
+    if err:
+        ui["mode"] = "input"
+        ui["input_err"] = err
+        ui["value"] = dns_text
+        return
+    lan["dns"] = servers
+    dev = lan["dev"]
+    name = _lan_profile_filename(dev)
+    lines = [
+        f"  interface:  {dev}",
+        f"  address:    {lan['addr']}",
+        f"  profile:    {name}",
+    ]
+    if lan["gateway"]:
+        lines.append(f"  gateway:    {lan['gateway']}")
+    if lan["dns"]:
+        lines.append(f"  dns:        {', '.join(lan['dns'])}")
+    lines += ["", "  applied with sudo — the interface may briefly bounce"]
+    ui["mode"] = "confirm"
+    ui["confirm_msg"] = lines
+    ui["confirm_cb"] = lambda: _lan_sudo(ui, lan)
+
+
+def _lan_sudo(ui: dict, lan: dict) -> None:
+    ui["mode"] = "input"
+    ui["prompt"] = "sudo password (to write the network profile):"
+    ui["value"] = ""
+    ui["secret"] = True
+    ui["input_err"] = ""
+    ui["input_cb"] = lambda u, pw: _lan_apply_do(u, lan, pw)
+
+
+def _lan_apply_do(ui: dict, lan: dict, pw: str) -> None:
+    def run() -> tuple[bool, str]:
+        return _lan_apply_profile(lan["dev"], lan["addr"],
+                                  lan["gateway"], lan["dns"], pw)
+    _start_work(ui, f"weaving {_lan_profile_filename(lan['dev'])}", run)
+
+
+def _remove_lan_menu(ui: dict) -> None:
+    profiles = _lan_managed_profiles()
+    if not profiles:
+        ui["mode"] = "result"
+        ui["result"] = (False, "no ether-woven LAN profiles")
+        return
+    ui["mode"] = "menu"
+    ui["title"] = "ether-woven LAN profiles"
+    ui["sel"] = 0
+    ui["items"] = [(p.name, lambda u, path=p: _confirm_remove_lan(u, path))
+                   for p in profiles]
+
+
+def _confirm_remove_lan(ui: dict, path: Path) -> None:
+    ui["mode"] = "confirm"
+    ui["confirm_msg"] = (f"unravel {path.name}? (removes the static "
+                         "profile — the interface may fall back to DHCP)")
+    ui["confirm_cb"] = lambda: _lan_remove_sudo(ui, path)
+
+
+def _lan_remove_sudo(ui: dict, path: Path) -> None:
+    ui["mode"] = "input"
+    ui["prompt"] = "sudo password (to remove the profile):"
+    ui["value"] = ""
+    ui["secret"] = True
+    ui["input_err"] = ""
+    ui["input_cb"] = lambda u, pw: _lan_remove_do(u, path, pw)
+
+
+def _lan_remove_do(ui: dict, path: Path, pw: str) -> None:
+    def run() -> tuple[bool, str]:
+        return _lan_remove_profile(path, pw)
+    _start_work(ui, f"unravelling {path.name}", run)
+
+
 def _new_menu(ui: dict) -> None:
     ui["mode"] = "menu"
     ui["title"] = "weave a new thread"
@@ -1356,6 +2398,7 @@ def _new_menu(ui: dict) -> None:
     ui["items"] = [
         ("wifi network", lambda u: _scan_wifi_flow(u)),
         ("bluetooth device", lambda u: _scan_bt_flow(u)),
+        ("wired LAN / static IPv4", lambda u: _new_lan_flow(u)),
     ]
 
 
@@ -1366,6 +2409,7 @@ def _remove_menu(ui: dict) -> None:
     ui["items"] = [
         ("bluetooth device", lambda u: _remove_bt_menu(u)),
         ("wifi connection", lambda u: _remove_wifi_menu(u)),
+        ("wired LAN profile", lambda u: _remove_lan_menu(u)),
     ]
 
 
@@ -1475,6 +2519,7 @@ def cmd_status(_: argparse.Namespace | None = None) -> int:
     ui: dict = {
         "mode": "home", "sel": 0, "items": [], "title": "",
         "prompt": "", "value": "", "secret": True, "input_cb": None,
+        "input_err": "",
         "confirm_msg": "", "confirm_cb": None,
         "work_msg": "", "work_fn": None,
         "result": (True, ""),
@@ -1493,7 +2538,9 @@ def cmd_status(_: argparse.Namespace | None = None) -> int:
                 frame = _menu_frame(ui["title"], ui["items"], ui["sel"], width)
                 hint = "↑/↓ or j/k move · enter pick · esc back"
             elif ui["mode"] == "input":
-                frame = _input_frame(ui["prompt"], ui["value"], ui["secret"], width)
+                frame = _input_frame(ui["prompt"], ui["value"],
+                                     ui["secret"], width,
+                                     ui.get("input_err", ""))
                 hint = "enter confirm · esc cancel"
             elif ui["mode"] == "confirm":
                 frame = _confirm_frame(ui["confirm_msg"], width)
@@ -1758,11 +2805,14 @@ def cmd_about(_: argparse.Namespace) -> int:
             "  whisper ether               tune the ANC headphone in",
             "  listen  ether               tune the JBL Go 3 in",
             "  ether                      live TUI: bt · wifi · lan (q to close)",
+            "  ether TUI · n new → wired LAN / static IPv4 profile (systemd-networkd)",
             "  status ether               one-shot report: bt · wifi · lan",
             "",
             "  ether net                  connectivity across the weave",
+            "  ether link [lan|usb|…]     show / select the internet path",
             "  ether veil [on|off|status] raise/lower the VPN (alias: vpn)",
             "  ether bridge               phone hotspot on boot (systemd)",
+            "  ether ap [on|off|status]   house Wi-Fi AP (iw + hostapd; NetworkManager-free)",
             "  ether about",
             "",
             "Free media lives under Siren now:",
@@ -1817,12 +2867,27 @@ def main() -> int:
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_bridge)
 
+    p = sub.add_parser("ap", help="house Wi-Fi AP (iw + hostapd; NetworkManager-free)")
+    p.add_argument("action", nargs="?", default="status", help="on|off|status")
+    p.set_defaults(func=cmd_ap)
+
     p = sub.add_parser("speakers", help="HEOS speakers on the LAN (Denon HEOS API)")
     p.add_argument("action", nargs="?", default="list", help="list|status|pause|resume|stop|next|prev|vol|mute|cast|play")
     p.add_argument("value", nargs="?", default=None, help="volume level, url, or file for cast/play")
     p.add_argument("--speaker","-s", default=None, help="speaker name (default Vanguarda Office)")
     p.add_argument("--cached", action="store_true", help="last known roster only (no sweep)")
     p.set_defaults(func=cmd_speakers)
+
+    p = sub.add_parser("link", help="show / select the network path (lan · usb tether)")
+    p.add_argument("target", nargs="?", default=None,
+                   help="lan | usb | tether | wifi | connection name")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable discovery data")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the commands without changing anything")
+    p.add_argument("--quiet", "-q", action="store_true",
+                   help="suppress human output (exit code only)")
+    p.set_defaults(func=cmd_link)
 
     p = sub.add_parser("about")
     p.set_defaults(func=cmd_about)

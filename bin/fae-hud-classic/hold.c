@@ -96,6 +96,16 @@ static int key_down(Display *dpy, KeyCode kc)
     return (keys[kc / 8] >> (kc % 8)) & 1;
 }
 
+/* Tab hold-to-skim: first step on the edge, then repeat while held. */
+#define TAB_REPEAT_MS 240
+
+static long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
 static void commit(Display *dpy, hud_t *h, const char *how)
 {
     Window t = hud_target(h);
@@ -135,8 +145,13 @@ int hold_cycle(Display *dpy, int scr, elist_t *apps)
     }
 
     /* Windows/macOS semantics: the first Alt+Tab has ALREADY moved you one
-     * step, so a single tap lands on the next app without any further input. */
-    int sel = n > 1 ? 1 : 0;
+     * step, so a single tap lands on the next app without any further input.
+     * Alt+Shift+Tab starts one step BACKWARD instead — both i3 bindings land
+     * here, so read Shift fresh rather than trusting which one fired. */
+    KeyCode kc_shift_l0 = XKeysymToKeycode(dpy, XK_Shift_L);
+    KeyCode kc_shift_r0 = XKeysymToKeycode(dpy, XK_Shift_R);
+    int reverse = (key_down(dpy, kc_shift_l0) || key_down(dpy, kc_shift_r0));
+    int sel = n > 1 ? (reverse ? n - 1 : 1) : 0;
     hud_t *h = hud_open(dpy, scr, apps, sel, 0);
     if (!h) return 1;
 
@@ -144,9 +159,11 @@ int hold_cycle(Display *dpy, int scr, elist_t *apps)
     KeyCode kc_esc    = XKeysymToKeycode(dpy, XK_Escape);
     KeyCode kc_alt_l  = XKeysymToKeycode(dpy, XK_Alt_L);
     KeyCode kc_alt_r  = XKeysymToKeycode(dpy, XK_Alt_R);
-    KeyCode kc_lshift = XKeysymToKeycode(dpy, XK_Shift_L);
+    KeyCode kc_lshift = kc_shift_l0;
+    KeyCode kc_rshift = kc_shift_r0;
 
     int cancelled = 0, tab_was = 0;
+    long last_tab_step = 0;
 
     /* A tap: i3 consumed the Alt+Tab that started us and the user has already
      * let go. Commit immediately — no wait — and let the strip fade as the
@@ -223,10 +240,14 @@ int hold_cycle(Display *dpy, int scr, elist_t *apps)
         if (cancelled) break;
 
         int tab_down = key_down(dpy, kc_tab);
-        if (tab_down && !tab_was && n > 1) {
-            int shift = key_down(dpy, kc_lshift);
+        /* Either Shift key reverses. The old code only watched Shift_L, so
+         * right-Shift users tabbed forward while holding "reverse". */
+        int shift = key_down(dpy, kc_lshift) || key_down(dpy, kc_rshift);
+        if (tab_down && n > 1 &&
+            ((!tab_was) || (now_ms() - last_tab_step >= TAB_REPEAT_MS))) {
             sel = shift ? (sel - 1 + n) % n : (sel + 1) % n;
             hud_select(h, sel);
+            last_tab_step = now_ms();
             if (getenv("FAE_HUD_VERBOSE"))
                 fprintf(stderr, "fae-hud: selection -> %d\n", sel);
         }

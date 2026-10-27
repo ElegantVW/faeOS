@@ -239,11 +239,11 @@ static void paint_entry(hud_t *h, int i, double a)
          * showed as two stray corner slivers either side of the icon, which
          * read as artefacts rather than as a selection. */
         int pw = box + 14, ph = box + 12;
-        set_rgba(cr, h->c_pink, 0.20 * a);
+        set_rgba(cr, h->c_pink, 0.28 * a);
         round_rect(cr, cx - pw / 2, iy - 6, pw, ph, 14);
         cairo_fill(cr);
         cairo_set_line_width(cr, 1.0);
-        set_rgba(cr, h->c_pink, 0.55 * a);
+        set_rgba(cr, h->c_pink, 0.75 * a);
         round_rect(cr, cx - pw / 2, iy - 6, pw, ph, 14);
         cairo_stroke(cr);
     }
@@ -287,11 +287,12 @@ static void paint_entry(hud_t *h, int i, double a)
                   cx - tw / 2, iy + psz / 2 + h->label_h / 3);
     }
 
-    /* label */
-    rgb_t lc = sel ? h->c_fg : h->c_dim;
+    /* label: unselected entries stay silver-bright so the strip reads over
+     * busy terminals; selection is the plate + full-white text. */
+    rgb_t lc = sel ? h->c_fg : mix(h->c_fg, h->c_dim, 0.35);
     type_set(&h->label, e->label, h->cell_w - 8);
     int tw = type_w(&h->label);
-    type_draw(&h->label, cr, lc, a * (sel ? 1.0 : 0.75),
+    type_draw(&h->label, cr, lc, a * (sel ? 1.0 : 0.85),
               cx - tw / 2, iy + box + THEME_LABEL_GAP + h->label_h * 0.8);
 
 }

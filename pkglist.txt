@@ -29,6 +29,10 @@ python
 git
 openssh
 
+# House AP — `ether ap` runs iw + hostapd directly (NetworkManager-free)
+hostapd
+dnsmasq
+
 # Lock screen
 xprintidle
 

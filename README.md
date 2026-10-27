@@ -12,7 +12,10 @@ Works on **Linux** (Arch + kmscon tested). **Source-only kit** — scripts, shel
 
 For: offline terminal life on your own box. Not for: macOS/Windows, cloud sync.
 
-Single main plan: [faeOSplan.md](faeOSplan.md). Per-app plans: [docs/plans/](docs/plans/). Design: [docs/design.md](docs/design.md). CLI voice: [docs/cli-voice.md](docs/cli-voice.md).
+Single main plan: [faeOSplan.md](faeOSplan.md). Per-app plans:
+[docs/plans/](docs/plans/). Design: [docs/design.md](docs/design.md).
+Keyboard contract: [docs/keyboard-shortcuts.md](docs/keyboard-shortcuts.md).
+CLI voice: [docs/cli-voice.md](docs/cli-voice.md).
 
 **Terminal-first:** keyboard and CLI remain the hero path; mouse on TUIs is optional sugar. Pink crystal frames (`fae_termart`) unify the look.
 

@@ -7,7 +7,7 @@ typedef enum {
     ACT_FOCUS, ACT_NUDGE,
     ACT_WORKSPACE, ACT_TOWORKSPACE, ACT_RESIZE_MODE, ACT_PRESET,
     ACT_RELOAD, ACT_QUIT, ACT_HELP, ACT_SPLIT, ACT_FLOAT,
-    ACT_EVEN, ACT_LAYOUT
+    ACT_EVEN, ACT_LAYOUT, ACT_DOCK_SCALE, ACT_LAUNCH
 } action_t;
 
 typedef struct {
@@ -30,6 +30,7 @@ typedef struct {
     int   focus_follows_mouse; /* i3 default was yes; hover focuses */
     int   dock_dwell;          /* ms in the hotspot before the dock rises */
     int   dock_hotspot_center; /* 1 = bottom-center band, 0 = full bottom edge */
+    double dock_scale;         /* snapped 0.80 .. 2.00, Super+= / Super+- */
     char  color_focus[16];
     char  color_unfocus[16];
     pin_t *pins;
@@ -44,5 +45,6 @@ typedef struct {
  * is fine — defaults mirror the house i3 setup. Returns 0 on ok. */
 int  config_load(config_t *c, const char **errpath);
 void config_free(config_t *c);
+void config_save_dock_scale(double s);
 
 #endif /* FAE_WM_CONFIG_H */

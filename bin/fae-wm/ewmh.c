@@ -28,8 +28,10 @@ void atoms_init(Display *dpy, atoms_t *a)
     a->wm_window_type_desktop = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
     a->wm_window_type_dialog  = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DIALOG", False);
     a->wm_window_type_utility = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
+    a->wm_window_type_splash  = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_SPLASH", False);
     a->close_window         = XInternAtom(dpy, "_NET_CLOSE_WINDOW", False);
     a->wm_name              = XInternAtom(dpy, "_NET_WM_NAME", False);
+    a->wm_class             = XInternAtom(dpy, "WM_CLASS", False);
     a->utf8_string          = XInternAtom(dpy, "UTF8_STRING", False);
     a->wm_protocols         = XInternAtom(dpy, "WM_PROTOCOLS", False);
     a->wm_delete_window     = XInternAtom(dpy, "WM_DELETE_WINDOW", False);

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "product": "Grove",
+  "actions": {
+    "cycle_next": {
+      "binding": "Tab",
+      "description": "Move to the next item in the active ordered navigation context.",
+      "contexts": ["application views", "application pages", "application modes"]
+    },
+    "cycle_previous": {
+      "binding": "Shift+Tab",
+      "description": "Move to the previous item in the active ordered navigation context.",
+      "contexts": ["application views", "application pages", "application modes"]
+    }
+  },
+  "context_boundaries": [
+    "System-level Alt+Tab application switching is separate from in-app cycling.",
+    "Shell line-editor widgets are separate from application TUI navigation."
+  ]
+}

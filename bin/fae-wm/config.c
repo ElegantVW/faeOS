@@ -4,9 +4,11 @@
 #include "theme.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
@@ -112,6 +114,7 @@ static action_t action_of(const char *s)
         { "quit", ACT_QUIT }, { "help", ACT_HELP },
         { "split", ACT_SPLIT }, { "float", ACT_FLOAT },
         { "even", ACT_EVEN }, { "layout", ACT_LAYOUT },
+        { "dock-scale", ACT_DOCK_SCALE }, { "launch", ACT_LAUNCH },
     };
     for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
         if (!strcmp(s, tab[i].name)) return tab[i].act;
@@ -123,7 +126,8 @@ static int is_action(const char *s)
     static const char *names[] = { "exec", "close", "fullscreen", "maximize",
         "minimize", "focus",
         "move", "workspace", "toworkspace", "resize-mode", "preset",
-        "reload", "quit", "help", "split", "float", "even", "layout", NULL };
+        "reload", "quit", "help", "split", "float", "even", "layout",
+        "dock-scale", "launch", NULL };
     for (int i = 0; names[i]; i++) if (!strcmp(s, names[i])) return 1;
     return 0;
 }
@@ -133,7 +137,7 @@ static void defaults(config_t *c)
 {
     struct { const char *keys, *act, *arg; } d[] = {
         { "Mod4+Return", "exec", "kitty" },
-        { "Mod4+d", "exec", "rofi -show drun" },
+        { "Mod4+d", "launch", "" },
         { "Mod4+z", "exec", "rofi -show run" },
         { "Mod4+Shift+q", "close", "" },
         { "Mod4+f", "fullscreen", "" },
@@ -182,6 +186,12 @@ static void defaults(config_t *c)
         { "Mod4+e", "even", "" },
         { "Mod4+t", "layout", "" },
         { "Mod4+Shift+space", "float", "" },
+        { "Mod4+equal", "dock-scale", "up" },
+        { "Mod4+plus", "dock-scale", "up" },
+        { "Mod4+Shift+equal", "dock-scale", "up" },
+        { "Mod4+KP_Add", "dock-scale", "up" },
+        { "Mod4+minus", "dock-scale", "down" },
+        { "Mod4+KP_Subtract", "dock-scale", "down" },
         { "Mod4+Shift+c", "reload", "" },
         { "Mod4+Shift+e", "quit", "" },
     };
@@ -203,6 +213,7 @@ int config_load(config_t *c, const char **errpath)
     c->focus_follows_mouse = 1;
     c->dock_dwell = 280;
     c->dock_hotspot_center = 1;
+    c->dock_scale = 1.0;
     snprintf(c->color_focus, sizeof c->color_focus, "#e879a0");
     snprintf(c->color_unfocus, sizeof c->color_unfocus, "#9d5c75");
     defaults(c);
@@ -290,10 +301,77 @@ int config_load(config_t *c, const char **errpath)
             char *v = strtok(NULL, " \t");
             if (v)
                 c->dock_hotspot_center = strcasecmp(v, "full") != 0;
+        } else if (!strcmp(key, "dock_scale")) {
+            char *v = strtok(NULL, " \t");
+            if (v) {
+                double s = atof(v);
+                if (s < 0.80) s = 0.80;
+                if (s > 2.00) s = 2.00;
+                c->dock_scale = s;
+            }
         }
     }
     fclose(f);
     return 0;
+}
+
+static const char *config_path(char *buf, size_t n)
+{
+    const char *env = getenv("FAE_WM_CONFIG");
+    if (env && *env) {
+        snprintf(buf, n, "%s", env);
+        return buf;
+    }
+    const char *home = getenv("HOME");
+    if (!home) return NULL;
+    snprintf(buf, n, "%s/.config/fae-wm/config", home);
+    return buf;
+}
+
+void config_save_dock_scale(double s)
+{
+    char path[1024];
+    if (!config_path(path, sizeof path)) return;
+    char *slash = strrchr(path, '/');
+    if (slash && slash != path) {
+        char dir[1024];
+        size_t dn = (size_t)(slash - path);
+        if (dn >= sizeof dir) return;
+        memcpy(dir, path, dn);
+        dir[dn] = 0;
+        if (mkdir(dir, 0755) < 0 && errno != EEXIST) return;
+    }
+    FILE *in = fopen(path, "r");
+    char *lines[256];
+    int n = 0, found = 0;
+    char buf[1024];
+    if (in) {
+        while (n < 255 && fgets(buf, sizeof buf, in)) {
+            char *p = buf;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!strncmp(p, "dock_scale", 10) &&
+                (p[10] == 0 || p[10] == ' ' || p[10] == '\t' || p[10] == '\n')) {
+                snprintf(buf, sizeof buf, "dock_scale %.2f\n", s);
+                found = 1;
+            }
+            lines[n++] = strdup(buf);
+        }
+        fclose(in);
+    }
+    if (!found && n < 255) {
+        snprintf(buf, sizeof buf, "dock_scale %.2f\n", s);
+        lines[n++] = strdup(buf);
+    }
+    FILE *out = fopen(path, "w");
+    if (!out) {
+        for (int i = 0; i < n; i++) free(lines[i]);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        fputs(lines[i], out);
+        free(lines[i]);
+    }
+    fclose(out);
 }
 
 void config_free(config_t *c)

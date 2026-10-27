@@ -4,7 +4,14 @@
 **Status:** Phase B+ (waves 1–4)
 
 ## Surface
-- `murmur` — crystal chat with the glass (default)  
+- `murmur` — crystal chat with the glass (default)
+
+**Song: Sealed Leaf**
+
+*In the Menagerie's egg, where whispers dwell,
+A glass shard sings of worlds that fell.
+Through babbling streams, the truth is spun,
+A melody born from the sun.*
 - `murmur "words"` — one exchange  
 - Mostly gibberish; rare clear shards on certain offerings  
 - **Never** a walkthrough; **never** hatches the egg alone  

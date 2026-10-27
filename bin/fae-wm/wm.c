@@ -16,6 +16,7 @@
 #include "panel.h"
 #include "dock.h"
 #include "help.h"
+#include "launch.h"
 #include "tile.h"
 #include "theme.h"
 
@@ -173,12 +174,16 @@ static void run_bind(const bind_t *b)
         break;
     case ACT_PRESET:     do_preset(c, b->arg); break;
     case ACT_HELP:       help_toggle(&W); break;
+    case ACT_LAUNCH:     launch_toggle(&W); break;
     case ACT_SPLIT:
         tile_set_split(b->arg && !strcmp(b->arg, "vertical"));
         break;
     case ACT_FLOAT:      tile_toggle_float(&W, c); break;
     case ACT_EVEN:       tile_even(&W, c); break;
     case ACT_LAYOUT:     tile_toggle_layout(&W); break;
+    case ACT_DOCK_SCALE:
+        dock_scale_nudge(&W, (b->arg && !strcmp(b->arg, "down")) ? -1 : 1);
+        break;
     case ACT_RELOAD:     /* handled by main loop: re-exec ourselves */ break;
     case ACT_QUIT:       break;
     }
@@ -432,6 +437,10 @@ static void on_keypress(XKeyEvent *ev)
     KeySym ks = XLookupKeysym(ev, 0);
     unsigned state = ev->state;
 
+    if (launch_visible()) {
+        launch_on_key(&W, ev);
+        return;
+    }
     if (help_visible()) {
         const bind_t *hb = match_bind(state, ks);
         if (ks == XK_Escape || (hb && hb->act == ACT_HELP)) {
@@ -473,6 +482,7 @@ static void on_keypress(XKeyEvent *ev)
         /* Graceful: hand every client back to the root before leaving, so
          * nothing is lost to a dead frame. The dock goes too. */
         dock_teardown(&W);
+        if (launch_visible()) launch_hide(&W);
         while (W.clients) {
             client_t *c = W.clients;
             W.clients = c->next;
@@ -592,6 +602,7 @@ static void on_expose(XExposeEvent *ev)
     if (c) { frame_paint(&W, c); return; }
     if (ev->window == dock_win(&W)) dock_refresh(&W);
     if (help_is_win(ev->window)) help_expose(&W);
+    if (launch_is_win(ev->window)) launch_expose(&W);
 }
 
 static void on_map_request(XMapRequestEvent *ev)
@@ -641,6 +652,15 @@ static void on_configure(XConfigureRequestEvent *ev)
     }
     if (c) {
         /* Client coords are frame-relative now; placement is ours alone. */
+        {
+            int tw = (mask & CWWidth) ? wc.width : c->w;
+            int th = (mask & CWHeight) ? wc.height : c->h;
+            if (!c->fullscreen && (mask & (CWWidth | CWHeight)) &&
+                client_should_takeover(&W, c, tw, th)) {
+                client_set_full(&W, c, 1);
+                mask &= ~(CWX | CWY | CWWidth | CWHeight);
+            }
+        }
         if (mask & CWWidth) c->w = wc.width;
         if (mask & CWHeight) c->h = wc.height;
         mask &= ~(CWX | CWY);
@@ -658,9 +678,18 @@ static void on_configure(XConfigureRequestEvent *ev)
 
 static void on_property(XPropertyEvent *ev)
 {
-    if (ev->atom != W.atoms.wm_name) return;
     client_t *c = client_find(&W, ev->window);
     if (!c) return;
+    if (ev->atom == W.atoms.wm_state) {
+        client_sync_state(&W, c);
+        return;
+    }
+    if (ev->atom == W.atoms.wm_class) {
+        if (!c->fullscreen && client_should_takeover(&W, c, c->w, c->h))
+            client_set_full(&W, c, 1);
+        return;
+    }
+    if (ev->atom != W.atoms.wm_name) return;
     free(c->title);
     c->title = ewmh_title(W.dpy, &W.atoms, ev->window);
     frame_paint(&W, c);
@@ -809,6 +838,7 @@ int wm_run(Display *dpy, int scr, config_t *cfg)
         dock_tick(&W);
         tile_tick(&W);
         help_tick(&W);
+        launch_tick(&W);
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);
